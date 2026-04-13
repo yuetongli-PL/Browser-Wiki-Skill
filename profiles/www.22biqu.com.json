@@ -1,0 +1,95 @@
+{
+  "host": "www.22biqu.com",
+  "version": 3,
+  "search": {
+    "formSelectors": [
+      "form[name=\"t_frmsearch\"]",
+      "form[action*=\"/ss/\"]"
+    ],
+    "inputSelectors": [
+      "#searchkey",
+      "input[name=\"searchkey\"]"
+    ],
+    "submitSelectors": [
+      "#search_btn",
+      "button[type=\"submit\"]",
+      "input[type=\"submit\"]"
+    ],
+    "resultTitleSelectors": [
+      ".layout-co18 .layout-tit",
+      ".layout2 .layout-tit"
+    ],
+    "resultBookSelectors": [
+      ".txt-list-row5 li .s2 a[href]",
+      ".layout-co18 .txt-list a[href]"
+    ],
+    "knownQueries": [
+      {
+        "query": "玄鉴仙族",
+        "title": "玄鉴仙族",
+        "url": "https://www.22biqu.com/biqu5735/",
+        "authorName": "季越人"
+      }
+    ]
+  },
+  "bookDetail": {
+    "authorMetaNames": [
+      "og:novel:author"
+    ],
+    "authorLinkMetaNames": [
+      "og:novel:author_link"
+    ],
+    "latestChapterNameMetaNames": [
+      "og:novel:lastest_chapter_name"
+    ],
+    "latestChapterMetaNames": [
+      "og:novel:lastest_chapter_url"
+    ],
+    "updateTimeMetaNames": [
+      "og:novel:update_time"
+    ],
+    "chapterLinkSelectors": [
+      "#list a[href]",
+      ".listmain a[href]",
+      "dd a[href]"
+    ],
+    "directoryLinkSelectors": [
+      ".section-box .section-list a[href]"
+    ],
+    "directoryPageUrlTemplate": "{detail_url}{page}/",
+    "directoryPageStart": 1,
+    "directoryPageMax": 32,
+    "directoryMinimumExpected": 300
+  },
+  "chapter": {
+    "contentSelectors": [
+      "#content",
+      ".content",
+      ".reader-main .content"
+    ],
+    "titleSelectors": [
+      ".reader-main .title",
+      ".content_read h1",
+      "h1.title",
+      "h1"
+    ],
+    "prevSelector": "#prev_url",
+    "nextSelector": "#next_url",
+    "cleanupPatterns": [
+      "上一章",
+      "下一章",
+      "返回目录",
+      "加入书签",
+      "章节报错",
+      "投推荐票",
+      "笔趣阁",
+      "请收藏本站",
+      "手机用户请浏览",
+      "最新网址",
+      "纯文字在线阅读本站域名",
+      "水印广告测试",
+      "为你提供最快的",
+      "更新速度全网最快"
+    ]
+  }
+}

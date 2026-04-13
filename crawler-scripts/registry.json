@@ -1,0 +1,23 @@
+{
+  "generatedAt": "2026-04-13T19:01:30Z",
+  "hosts": {
+    "www.22biqu.com": {
+      "host": "www.22biqu.com",
+      "scriptPath": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\crawler-scripts\\www.22biqu.com\\crawler.py",
+      "metaPath": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\crawler-scripts\\www.22biqu.com\\crawler.meta.json",
+      "profileHash": "35cb0c8ac9bfe25bcb45a0746e45d0069c89e8dbe6deaa53ffec5767aaba3418",
+      "lastUsedAt": "2026-04-13T19:01:30Z",
+      "status": "reused",
+      "capabilities": [
+        "search-content",
+        "navigate-to-content",
+        "navigate-to-author",
+        "navigate-to-chapter",
+        "download-content"
+      ],
+      "scriptLanguage": "python",
+      "interpreterRequired": "pypy3",
+      "templateVersion": 3
+    }
+  }
+}
