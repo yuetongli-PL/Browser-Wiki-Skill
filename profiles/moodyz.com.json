@@ -16,6 +16,13 @@
     "authorPrefixes": [
       "/actress/detail/"
     ],
+    "authorListExact": [],
+    "authorListPrefixes": [
+      "/actress"
+    ],
+    "authorDetailPrefixes": [
+      "/actress/detail/"
+    ],
     "chapterPrefixes": [],
     "historyPrefixes": [],
     "authPrefixes": [],
@@ -75,6 +82,12 @@
       "/works/detail/"
     ],
     "authorPathPrefixes": [
+      "/actress/detail/"
+    ],
+    "authorListPathPrefixes": [
+      "/actress"
+    ],
+    "authorDetailPathPrefixes": [
       "/actress/detail/"
     ],
     "categoryPathPrefixes": [

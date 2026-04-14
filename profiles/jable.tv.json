@@ -1,0 +1,178 @@
+{
+  "host": "jable.tv",
+  "version": 1,
+  "pageTypes": {
+    "homeExact": [
+      "/"
+    ],
+    "homePrefixes": [],
+    "searchResultsPrefixes": [
+      "/search/"
+    ],
+    "contentDetailPrefixes": [
+      "/videos/"
+    ],
+    "authorPrefixes": [],
+    "authorListExact": [
+      "/models/"
+    ],
+    "authorListPrefixes": [
+      "/models/"
+    ],
+    "authorDetailPrefixes": [
+      "/models/"
+    ],
+    "chapterPrefixes": [],
+    "historyPrefixes": [],
+    "authPrefixes": [],
+    "categoryPrefixes": [
+      "/categories/",
+      "/tags/",
+      "/hot/",
+      "/latest-updates/"
+    ]
+  },
+  "search": {
+    "formSelectors": [
+      "form#search_form",
+      "form[action*=\"/search/\"]",
+      "form[role=\"search\"]"
+    ],
+    "inputSelectors": [
+      "#inputSearch",
+      "input[name=\"q\"]",
+      "input[type=\"search\"]"
+    ],
+    "submitSelectors": [
+      "button[type=\"submit\"]",
+      "input[type=\"submit\"]"
+    ],
+    "queryParamNames": [
+      "q"
+    ],
+    "resultTitleSelectors": [
+      "title",
+      "h1",
+      "h2"
+    ],
+    "resultBookSelectors": [
+      "a[href*=\"/videos/\"]"
+    ],
+    "defaultQueries": [
+      "JUR-652",
+      "IPX-238",
+      "IPX-795",
+      "APNS-025",
+      "MUKD-514",
+      "SDDE-706",
+      "MOMO"
+    ],
+    "knownQueries": [
+      {
+        "query": "JUR-652",
+        "title": "JUR-652",
+        "url": "https://jable.tv/videos/jur-652/",
+        "authorName": "unknown"
+      },
+      {
+        "query": "IPX-238",
+        "title": "IPX-238",
+        "url": "https://jable.tv/videos/ipx-238-c/",
+        "authorName": "unknown"
+      },
+      {
+        "query": "IPX-795",
+        "title": "IPX-795",
+        "url": "https://jable.tv/videos/ipx-795/",
+        "authorName": "unknown"
+      },
+      {
+        "query": "APNS-025",
+        "title": "APNS-025",
+        "url": "https://jable.tv/videos/apns-025-c/",
+        "authorName": "unknown"
+      },
+      {
+        "query": "MUKD-514",
+        "title": "MUKD-514",
+        "url": "https://jable.tv/videos/mukd-514/",
+        "authorName": "unknown"
+      },
+      {
+        "query": "SDDE-706",
+        "title": "SDDE-706",
+        "url": "https://jable.tv/videos/sdde-706/",
+        "authorName": "unknown"
+      }
+    ]
+  },
+  "sampling": {
+    "searchResultContentLimit": 6,
+    "authorContentLimit": 12,
+    "categoryContentLimit": 12,
+    "fallbackContentLimitWithSearch": 10
+  },
+  "navigation": {
+    "allowedHosts": [
+      "jable.tv",
+      "www.jable.tv"
+    ],
+    "contentPathPrefixes": [
+      "/videos/"
+    ],
+    "authorPathPrefixes": [
+      "/models/"
+    ],
+    "authorListPathPrefixes": [
+      "/models/"
+    ],
+    "authorDetailPathPrefixes": [
+      "/models/"
+    ],
+    "categoryPathPrefixes": [
+      "/categories/",
+      "/tags/",
+      "/hot/",
+      "/latest-updates/"
+    ],
+    "utilityPathPrefixes": [
+      "/search/"
+    ],
+    "authPathPrefixes": [],
+    "categoryLabelKeywords": [
+      "分类",
+      "标签",
+      "热门",
+      "更新",
+      "演员",
+      "女优",
+      "视频",
+      "影片",
+      "搜索结果"
+    ]
+  },
+  "contentDetail": {
+    "titleSelectors": [
+      "meta[property=\"og:title\"]",
+      "h1",
+      "h2",
+      "title"
+    ],
+    "authorNameSelectors": [
+      "a[href*=\"/models/\"]"
+    ],
+    "authorLinkSelectors": [
+      "a[href*=\"/models/\"]"
+    ]
+  },
+  "author": {
+    "titleSelectors": [
+      "h1",
+      "h2",
+      "title"
+    ],
+    "workLinkSelectors": [
+      "a[href*=\"/videos/\"]"
+    ]
+  }
+}
