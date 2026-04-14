@@ -1,0 +1,83 @@
+{
+  "host": "replace.with.real.host",
+  "version": 1,
+  "search": {
+    "formSelectors": [
+      "form[action*=\"search\"]",
+      "form[role=\"search\"]"
+    ],
+    "inputSelectors": [
+      "input[name=\"searchkey\"]",
+      "input[name=\"q\"]"
+    ],
+    "submitSelectors": [
+      "button[type=\"submit\"]",
+      "input[type=\"submit\"]"
+    ],
+    "resultTitleSelectors": [
+      "title",
+      "h1",
+      ".search-title"
+    ],
+    "resultBookSelectors": [
+      "a[href*=\"/book/\"]",
+      "a[href*=\"/novel/\"]"
+    ],
+    "knownQueries": []
+  },
+  "bookDetail": {
+    "authorMetaNames": [
+      "og:novel:author"
+    ],
+    "authorLinkMetaNames": [
+      "og:novel:author_link"
+    ],
+    "latestChapterNameMetaNames": [
+      "og:novel:lastest_chapter_name",
+      "og:novel:latest_chapter_name"
+    ],
+    "latestChapterMetaNames": [
+      "og:novel:lastest_chapter_url",
+      "og:novel:latest_chapter_url"
+    ],
+    "updateTimeMetaNames": [
+      "og:novel:update_time"
+    ],
+    "chapterLinkSelectors": [
+      "#list a[href]",
+      ".chapter-list a[href]",
+      "dd a[href]"
+    ],
+    "directoryLinkSelectors": [
+      ".directory a[href]",
+      ".page-list a[href]"
+    ],
+    "directoryPageUrlTemplate": "{detail_url}{page}/",
+    "directoryPageStart": 1,
+    "directoryPageMax": 8,
+    "directoryMinimumExpected": 50
+  },
+  "chapter": {
+    "contentSelectors": [
+      "#content",
+      ".content",
+      "article"
+    ],
+    "titleSelectors": [
+      "h1",
+      ".chapter-title",
+      "title"
+    ],
+    "prevSelector": "a[rel=\"prev\"]",
+    "nextSelector": "a[rel=\"next\"]",
+    "cleanupPatterns": [
+      "上一章",
+      "下一章",
+      "返回目录",
+      "加入书签",
+      "最新网址",
+      "手机用户请浏览",
+      "请收藏本站"
+    ]
+  }
+}

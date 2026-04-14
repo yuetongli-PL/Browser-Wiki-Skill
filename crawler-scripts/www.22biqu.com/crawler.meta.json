@@ -1,12 +1,12 @@
 {
   "host": "www.22biqu.com",
   "baseUrl": "https://www.22biqu.com/",
-  "generatedAt": "2026-04-13T18:23:11.688Z",
+  "generatedAt": "2026-04-14T04:23:02.218Z",
   "scriptLanguage": "python",
   "interpreterRequired": "pypy3",
   "templateVersion": 3,
   "profilePath": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\profiles\\www.22biqu.com.json",
-  "profileHash": "35cb0c8ac9bfe25bcb45a0746e45d0069c89e8dbe6deaa53ffec5767aaba3418",
+  "profileHash": "f49cf0d1e1353086244207f14c478f57a32d2eb304442b222cefa35014c36f7f",
   "profileVersion": 3,
   "capabilities": [
     "search-content",
@@ -24,12 +24,12 @@
     "https://www.22biqu.com/"
   ],
   "historicalContext": {
-    "sourceRunDir": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\knowledge-base\\www.22biqu.com\\raw\\step-book-content\\20260413T180053081Z_www.22biqu.com_book-content",
+    "sourceRunDir": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\knowledge-base\\www.22biqu.com\\raw\\step-book-content\\20260413T190030627Z_www.22biqu.com_book-content",
     "books": [
       {
-        "title": "玄鉴仙族",
-        "finalUrl": "https://www.22biqu.com/biqu5735/",
-        "authorName": "季越人"
+        "title": "乱世书",
+        "finalUrl": "https://www.22biqu.com/biqu6586/",
+        "authorName": "姬叉"
       }
     ]
   }

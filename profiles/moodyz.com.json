@@ -1,0 +1,129 @@
+{
+  "host": "moodyz.com",
+  "version": 2,
+  "pageTypes": {
+    "homeExact": [
+      "/",
+      "/top"
+    ],
+    "homePrefixes": [],
+    "searchResultsPrefixes": [
+      "/search/list"
+    ],
+    "contentDetailPrefixes": [
+      "/works/detail/"
+    ],
+    "authorPrefixes": [
+      "/actress/detail/"
+    ],
+    "chapterPrefixes": [],
+    "historyPrefixes": [],
+    "authPrefixes": [],
+    "categoryPrefixes": [
+      "/works/date",
+      "/works/list/",
+      "/actress",
+      "/search"
+    ]
+  },
+  "search": {
+    "formSelectors": [
+      "form[action*=\"/search/list\"]",
+      "form[role=\"search\"]"
+    ],
+    "inputSelectors": [
+      "input[name=\"keyword\"]",
+      "#s"
+    ],
+    "submitSelectors": [
+      "button[type=\"submit\"]",
+      "input[type=\"submit\"]"
+    ],
+    "queryParamNames": [
+      "keyword"
+    ],
+    "resultTitleSelectors": [
+      "title",
+      ".top",
+      ".headline",
+      "h2"
+    ],
+    "resultBookSelectors": [
+      "a[href*=\"/works/detail/\"]"
+    ],
+    "defaultQueries": [
+      "奥井千晴",
+      "八木奈々",
+      "小野六花",
+      "松本いちか",
+      "七瀬アリス"
+    ],
+    "knownQueries": []
+  },
+  "sampling": {
+    "searchResultContentLimit": 4,
+    "authorContentLimit": 10,
+    "categoryContentLimit": 10,
+    "fallbackContentLimitWithSearch": 8
+  },
+  "navigation": {
+    "allowedHosts": [
+      "moodyz.com",
+      "www.moodyz.com"
+    ],
+    "contentPathPrefixes": [
+      "/works/detail/"
+    ],
+    "authorPathPrefixes": [
+      "/actress/detail/"
+    ],
+    "categoryPathPrefixes": [
+      "/works/date",
+      "/works/list/",
+      "/actress",
+      "/search"
+    ],
+    "utilityPathPrefixes": [
+      "/top",
+      "/link",
+      "/help",
+      "/privacy",
+      "/sitemap"
+    ],
+    "authPathPrefixes": [],
+    "categoryLabelKeywords": [
+      "発売日",
+      "発売作品",
+      "予約作品",
+      "作品検索",
+      "シリーズ",
+      "レーベル",
+      "ジャンル",
+      "女優",
+      "検索結果",
+      "WORKS"
+    ]
+  },
+  "contentDetail": {
+    "titleSelectors": [
+      ".p-workPage h2",
+      "h2",
+      "title"
+    ],
+    "authorNameSelectors": [
+      "a[href*=\"/actress/detail/\"]"
+    ],
+    "authorLinkSelectors": [
+      "a[href*=\"/actress/detail/\"]"
+    ]
+  },
+  "author": {
+    "titleSelectors": [
+      "h2",
+      "title"
+    ],
+    "workLinkSelectors": [
+      "a[href*=\"/works/detail/\"]"
+    ]
+  }
+}

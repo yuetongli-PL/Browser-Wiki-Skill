@@ -1,0 +1,126 @@
+{
+  "host": "replace.with.real.host",
+  "version": 1,
+  "pageTypes": {
+    "homeExact": [
+      "/"
+    ],
+    "homePrefixes": [],
+    "searchResultsPrefixes": [
+      "/search"
+    ],
+    "contentDetailPrefixes": [
+      "/item/",
+      "/works/detail/"
+    ],
+    "authorPrefixes": [
+      "/author/",
+      "/actress/detail/"
+    ],
+    "chapterPrefixes": [],
+    "historyPrefixes": [],
+    "authPrefixes": [],
+    "categoryPrefixes": [
+      "/category/",
+      "/list/",
+      "/tags/"
+    ]
+  },
+  "search": {
+    "formSelectors": [
+      "form[role=\"search\"]",
+      "form[action*=\"search\"]"
+    ],
+    "inputSelectors": [
+      "input[type=\"search\"]",
+      "input[name=\"q\"]"
+    ],
+    "submitSelectors": [
+      "button[type=\"submit\"]",
+      "input[type=\"submit\"]"
+    ],
+    "queryParamNames": [
+      "q"
+    ],
+    "resultTitleSelectors": [
+      "title",
+      "h1",
+      "h2"
+    ],
+    "resultBookSelectors": [
+      "a[href*=\"/item/\"]",
+      "a[href*=\"/works/detail/\"]"
+    ],
+    "defaultQueries": [],
+    "knownQueries": []
+  },
+  "sampling": {
+    "searchResultContentLimit": 5,
+    "authorContentLimit": 10,
+    "categoryContentLimit": 10,
+    "fallbackContentLimitWithSearch": 8
+  },
+  "navigation": {
+    "allowedHosts": [
+      "replace.with.real.host",
+      "www.replace.with.real.host"
+    ],
+    "contentPathPrefixes": [
+      "/item/",
+      "/works/detail/"
+    ],
+    "authorPathPrefixes": [
+      "/author/",
+      "/actress/detail/"
+    ],
+    "categoryPathPrefixes": [
+      "/category/",
+      "/list/",
+      "/tags/"
+    ],
+    "utilityPathPrefixes": [
+      "/help",
+      "/about",
+      "/privacy",
+      "/sitemap"
+    ],
+    "authPathPrefixes": [
+      "/login",
+      "/signup"
+    ],
+    "categoryLabelKeywords": [
+      "分类",
+      "目录",
+      "系列",
+      "标签",
+      "作者",
+      "搜索结果"
+    ]
+  },
+  "contentDetail": {
+    "titleSelectors": [
+      "h1",
+      "h2",
+      "title"
+    ],
+    "authorNameSelectors": [
+      "a[href*=\"/author/\"]",
+      "a[href*=\"/actress/detail/\"]"
+    ],
+    "authorLinkSelectors": [
+      "a[href*=\"/author/\"]",
+      "a[href*=\"/actress/detail/\"]"
+    ]
+  },
+  "author": {
+    "titleSelectors": [
+      "h1",
+      "h2",
+      "title"
+    ],
+    "workLinkSelectors": [
+      "a[href*=\"/item/\"]",
+      "a[href*=\"/works/detail/\"]"
+    ]
+  }
+}
