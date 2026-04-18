@@ -1,5 +1,8 @@
 {
   "host": "replace.with.real.host",
+  "archetype": "chapter-content",
+  "schemaVersion": 1,
+  "primaryArchetype": "chapter-content",
   "version": 1,
   "search": {
     "formSelectors": [

@@ -1,5 +1,8 @@
 {
   "host": "replace.with.real.host",
+  "archetype": "navigation-catalog",
+  "schemaVersion": 1,
+  "primaryArchetype": "catalog-detail",
   "version": 1,
   "pageTypes": {
     "homeExact": [
@@ -17,6 +20,9 @@
       "/author/",
       "/actress/detail/"
     ],
+    "authorListExact": [],
+    "authorListPrefixes": [],
+    "authorDetailPrefixes": [],
     "chapterPrefixes": [],
     "historyPrefixes": [],
     "authPrefixes": [],
@@ -73,6 +79,8 @@
       "/author/",
       "/actress/detail/"
     ],
+    "authorListPathPrefixes": [],
+    "authorDetailPathPrefixes": [],
     "categoryPathPrefixes": [
       "/category/",
       "/list/",
