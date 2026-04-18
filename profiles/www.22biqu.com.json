@@ -1,5 +1,8 @@
 {
   "host": "www.22biqu.com",
+  "archetype": "chapter-content",
+  "schemaVersion": 1,
+  "primaryArchetype": "chapter-content",
   "version": 3,
   "search": {
     "formSelectors": [

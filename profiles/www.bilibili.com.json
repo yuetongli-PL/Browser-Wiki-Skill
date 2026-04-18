@@ -1,0 +1,322 @@
+{
+  "host": "www.bilibili.com",
+  "archetype": "navigation-catalog",
+  "schemaVersion": 1,
+  "primaryArchetype": "catalog-detail",
+  "version": 1,
+  "pageTypes": {
+    "homeExact": [
+      "/"
+    ],
+    "homePrefixes": [],
+    "searchResultsPrefixes": [
+      "/all",
+      "/video",
+      "/bangumi",
+      "/upuser"
+    ],
+    "contentDetailPrefixes": [
+      "/video/",
+      "/bangumi/play/"
+    ],
+    "authorPrefixes": [
+      "/space/"
+    ],
+    "authorListExact": [],
+    "authorListPrefixes": [
+      "/video",
+      "/upload/video",
+      "/dynamic",
+      "/fans/follow",
+      "/fans/fans"
+    ],
+    "authorDetailPrefixes": [
+      "/space/"
+    ],
+    "chapterPrefixes": [],
+    "historyPrefixes": [],
+    "authPrefixes": [
+      "/login"
+    ],
+    "categoryPrefixes": [
+      "/c/",
+      "/v/",
+      "/v/popular/",
+      "/anime/",
+      "/movie/",
+      "/guochuang/",
+      "/tv/",
+      "/variety/",
+      "/documentary/",
+      "/knowledge/",
+      "/music/",
+      "/game/",
+      "/food/",
+      "/sports/"
+    ]
+  },
+  "search": {
+    "formSelectors": [
+      "form#nav-searchform",
+      "form[action*=\"search.bilibili.com/all\"]",
+      "form[role=\"search\"]"
+    ],
+    "inputSelectors": [
+      "input.nav-search-input",
+      "input[name=\"keyword\"]",
+      "input[placeholder*=\"搜索\"]",
+      "input[type=\"search\"]"
+    ],
+    "submitSelectors": [
+      "button.nav-search-btn",
+      ".nav-search-btn",
+      "button[type=\"submit\"]",
+      "input[type=\"submit\"]"
+    ],
+    "queryParamNames": [
+      "keyword"
+    ],
+    "resultTitleSelectors": [
+      "title",
+      "h1",
+      "h2"
+    ],
+    "resultBookSelectors": [
+      "a[href*=\"//www.bilibili.com/video/\"]",
+      "a[href*=\"/video/\"]",
+      "a[href*=\"//www.bilibili.com/bangumi/play/\"]",
+      "a[href*=\"/bangumi/play/\"]"
+    ],
+    "defaultQueries": [
+      "BV1WjDDBGE3p",
+      "BV1uT41147VW"
+    ],
+    "knownQueries": [
+      {
+        "query": "BV1WjDDBGE3p",
+        "title": "BV1WjDDBGE3p",
+        "url": "https://www.bilibili.com/video/BV1WjDDBGE3p",
+        "authorName": "space.bilibili.com"
+      },
+      {
+        "query": "BV1uT41147VW",
+        "title": "BV1uT41147VW",
+        "url": "https://www.bilibili.com/video/BV1uT41147VW",
+        "authorName": "space.bilibili.com"
+      }
+    ]
+  },
+  "validationSamples": {
+    "videoSearchQuery": "BV1WjDDBGE3p",
+    "videoDetailUrl": "https://www.bilibili.com/video/BV1WjDDBGE3p/",
+    "authorUrl": "https://space.bilibili.com/1202350411",
+    "authorVideosUrl": "https://space.bilibili.com/1202350411/video",
+    "authorDynamicUrl": "https://space.bilibili.com/1202350411/dynamic",
+    "collectionUrl": "https://space.bilibili.com/1202350411/channel/collectiondetail?sid=622146",
+    "channelUrl": "https://www.bilibili.com/v/popular/all/",
+    "categoryPopularUrl": "https://www.bilibili.com/v/popular/all/",
+    "categoryAnimeUrl": "https://www.bilibili.com/anime/",
+    "bangumiDetailUrl": "https://www.bilibili.com/bangumi/play/ep508404"
+  },
+  "authValidationSamples": {
+    "dynamicUrl": "https://space.bilibili.com/1202350411/dynamic",
+    "followListUrl": "https://space.bilibili.com/1202350411/fans/follow",
+    "fansListUrl": "https://space.bilibili.com/1202350411/fans/fans",
+    "favoriteListUrl": "https://space.bilibili.com/1202350411/favlist?fid=622146",
+    "watchLaterUrl": "https://www.bilibili.com/watchlater/#/list"
+  },
+  "downloader": {
+    "defaultOutputRoot": "video-downloads",
+    "requiresLoginForHighestQuality": true,
+    "qualityPolicy": {
+      "targetHeight": 1080,
+      "targetCodec": "h264",
+      "defaultContainer": "mp4",
+      "fallbackPolicy": "preserve-height-then-downgrade-codec"
+    },
+    "authorVideoListPathPrefixes": [
+      "/video",
+      "/upload/video"
+    ],
+    "favoriteListPathPrefixes": [
+      "/favlist"
+    ],
+    "watchLaterPathPrefixes": [
+      "/watchlater"
+    ],
+    "collectionPathPrefixes": [
+      "/channel/collectiondetail",
+      "/channel/seriesdetail",
+      "/list/",
+      "/medialist/play/"
+    ],
+    "channelPathPrefixes": [
+      "/v/",
+      "/anime",
+      "/movie"
+    ],
+    "playlistPageSize": 30,
+    "defaultContainer": "mp4",
+    "defaultNamingStrategy": "title-id",
+    "maxBatchItems": 20
+  },
+  "pipeline": {
+    "skipBookContent": true
+  },
+  "authSession": {
+    "loginUrl": "https://passport.bilibili.com/login",
+    "postLoginUrl": "https://www.bilibili.com/",
+    "reuseLoginStateByDefault": true,
+    "autoLoginByDefault": false,
+    "usernameEnv": "BILIBILI_USERNAME",
+    "passwordEnv": "BILIBILI_PASSWORD",
+    "loginIndicatorSelectors": [
+      "a[href*=\"space.bilibili.com/\"] img",
+      ".bili-avatar img",
+      ".header-entry-mini img",
+      ".header-avatar-wrap--container img"
+    ],
+    "loggedOutIndicatorSelectors": [
+      ".go-login-btn",
+      ".header-login-entry",
+      ".login-btn",
+      "a[href*=\"passport.bilibili.com/login\"]"
+    ],
+    "passwordLoginTabSelectors": [
+      ".tabs_wp > div:first-child"
+    ],
+    "usernameSelectors": [
+      ".tab__form input[type=\"text\"]:not(.body__captcha-input)",
+      "input[placeholder*=\"账号\"]"
+    ],
+    "passwordSelectors": [
+      ".tab__form input[type=\"password\"]",
+      "input[placeholder*=\"密码\"]"
+    ],
+    "submitSelectors": [
+      ".btn_primary",
+      "button[type=\"submit\"]"
+    ],
+    "challengeSelectors": [
+      ".body__captcha-input",
+      "[class*=\"captcha\"]",
+      "[class*=\"geetest\"]",
+      "[class*=\"verify\"]"
+    ],
+    "authRequiredAuthorSubpages": [
+      "dynamic",
+      "fans/follow",
+      "fans/fans"
+    ],
+    "authRequiredPathPrefixes": [
+      "/watchlater",
+      "/favlist"
+    ]
+  },
+  "sampling": {
+    "searchResultContentLimit": 5,
+    "authorContentLimit": 10,
+    "categoryContentLimit": 10,
+    "fallbackContentLimitWithSearch": 8
+  },
+  "navigation": {
+    "allowedHosts": [
+      "www.bilibili.com",
+      "search.bilibili.com",
+      "space.bilibili.com"
+    ],
+    "contentPathPrefixes": [
+      "/video/",
+      "/bangumi/play/"
+    ],
+    "authorPathPrefixes": [
+      "/space/"
+    ],
+    "authorListPathPrefixes": [
+      "/video",
+      "/upload/video",
+      "/dynamic",
+      "/fans/follow",
+      "/fans/fans"
+    ],
+    "authorDetailPathPrefixes": [
+      "/space/"
+    ],
+    "categoryPathPrefixes": [
+      "/c/",
+      "/v/",
+      "/v/popular/",
+      "/anime/",
+      "/movie/",
+      "/guochuang/",
+      "/tv/",
+      "/variety/",
+      "/documentary/",
+      "/knowledge/",
+      "/music/",
+      "/game/",
+      "/food/",
+      "/sports/"
+    ],
+    "utilityPathPrefixes": [
+      "/match/home/",
+      "/blackboard/",
+      "/read/",
+      "/help",
+      "/about",
+      "/privacy",
+      "/sitemap"
+    ],
+    "authPathPrefixes": [
+      "/login",
+      "/signup"
+    ],
+    "categoryLabelKeywords": [
+      "popular",
+      "anime",
+      "movie",
+      "music",
+      "game",
+      "knowledge"
+    ]
+  },
+  "contentDetail": {
+    "titleSelectors": [
+      "h1.video-title",
+      ".video-title",
+      ".media-title",
+      "h1",
+      "h2",
+      "title"
+    ],
+    "authorNameSelectors": [
+      "a.up-name",
+      ".up-name",
+      ".up-detail-top .up-name",
+      ".video-owner-card .name",
+      ".upname .name",
+      "a[href*=\"space.bilibili.com/\"] .name"
+    ],
+    "authorLinkSelectors": [
+      "a.up-name[href*=\"space.bilibili.com/\"]",
+      ".video-owner-card a[href*=\"space.bilibili.com/\"]",
+      "a[href*=\"space.bilibili.com/\"]"
+    ]
+  },
+  "author": {
+    "titleSelectors": [
+      ".nickname",
+      ".up-name",
+      ".h-name",
+      "h1",
+      "h2",
+      "title"
+    ],
+    "workLinkSelectors": [
+      "a[href*=\"//www.bilibili.com/video/\"]",
+      "a[href*=\"/video/\"]",
+      "a[href*=\"//www.bilibili.com/bangumi/play/\"]",
+      "a[href*=\"/bangumi/play/\"]"
+    ]
+  }
+}

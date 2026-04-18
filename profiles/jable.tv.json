@@ -1,5 +1,8 @@
 {
   "host": "jable.tv",
+  "archetype": "navigation-catalog",
+  "schemaVersion": 1,
+  "primaryArchetype": "catalog-detail",
   "version": 1,
   "pageTypes": {
     "homeExact": [
