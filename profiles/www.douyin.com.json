@@ -157,6 +157,20 @@
       "[class*=\"verify\"]",
       "text/\\u9a8c\\u8bc1\\u7801\\u4e2d\\u95f4\\u9875"
     ],
+    "validationSamplePriority": [
+      "likesUrl",
+      "selfPostsUrl",
+      "followFeedUrl",
+      "followUsersUrl",
+      "collectionsUrl",
+      "historyUrl"
+    ],
+    "reusableSessionSignals": [
+      "usableForCookies",
+      "healthy",
+      "loginStateLikelyAvailable",
+      "presentWithoutMissingPaths"
+    ],
     "authRequiredPathPrefixes": [
       "/user/self",
       "/follow"

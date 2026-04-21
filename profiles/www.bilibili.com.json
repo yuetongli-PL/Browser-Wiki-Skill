@@ -203,6 +203,16 @@
       "[class*=\"geetest\"]",
       "[class*=\"verify\"]"
     ],
+    "validationSamplePriority": [
+      "dynamicUrl",
+      "followListUrl",
+      "fansListUrl",
+      "favoriteListUrl",
+      "watchLaterUrl"
+    ],
+    "reusableSessionSignals": [
+      "usableForCookies"
+    ],
     "authRequiredAuthorSubpages": [
       "dynamic",
       "fans/follow",
