@@ -40,6 +40,6 @@
 
 - 当前站点 Skill 以导航为主：覆盖搜索、影片页、演员页、分类/标签页和功能页。
 - 新增榜单型查询：可以按任一已抽取 taxonomy 标签或一级分类组，返回站内前 N 条公开结果。
-- 实际执行入口：`node query-jable-ranking.mjs https://jable.tv/ --query "<请求>"`。
+- 实际执行入口：`node src/entrypoints/sites/jable-ranking.mjs https://jable.tv/ --query "<请求>"`。
 - “推荐/最佳”默认解释为站内综合排序，不输出主观推荐话术。
 - 当前已观测的 jable 模型里，没有已验证的下载或长文本阅读流程。

@@ -11,7 +11,7 @@ description: Instruction-only Skill for https://jable.tv/. Use when Codex needs 
 - Stay inside the verified `jable.tv` URL family.
 - Safe actions: `navigate`, `query-ranking`
 - Supported tasks: 搜索影片、打开影片页、打开演员页、打开分类或标签页、按分类或标签提取前 N 条榜单.
-- Ranking query entrypoint: `node query-jable-ranking.mjs <url> --query "<自然语言请求>"`.
+- Ranking query entrypoint: `node src/entrypoints/sites/jable-ranking.mjs <url> --query "<自然语言请求>"`.
 
 ## Sample coverage
 

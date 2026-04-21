@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
-import { collectBookContent } from '../../collect-book-content.mjs';
+import { collectBookContent } from '../../src/entrypoints/pipeline/collect-book-content.mjs';
 
 const GENERATED_CONTEXT = {
   "host": "www.22biqu.com",

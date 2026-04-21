@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-04-17T17:41:05.813Z",
+  "generatedAt": "2026-04-19T08:46:11.166Z",
   "hosts": {
     "www.22biqu.com": {
       "host": "www.22biqu.com",
@@ -25,6 +25,25 @@
       "metaPath": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\crawler-scripts\\www.bilibili.com\\crawler.meta.json",
       "profileHash": "3c13a23d3af0ec23400f29d637ecfd6a38d3ececb0a6947d35b946ef63c1272e",
       "lastUsedAt": "2026-04-17T17:41:05.812Z",
+      "status": "generated",
+      "scriptLanguage": "python",
+      "interpreterRequired": "pypy3",
+      "templateVersion": 3,
+      "capabilities": [
+        "navigate-to-author",
+        "navigate-to-category",
+        "navigate-to-content",
+        "navigate-to-utility-page",
+        "search-content",
+        "switch-in-page-state"
+      ]
+    },
+    "www.douyin.com": {
+      "host": "www.douyin.com",
+      "scriptPath": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\crawler-scripts\\www.douyin.com\\crawler.py",
+      "metaPath": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\crawler-scripts\\www.douyin.com\\crawler.meta.json",
+      "profileHash": "bd8d694b52adfa2166f15391c501cf7edbef2b35de9adbf12ef5667e8a380818",
+      "lastUsedAt": "2026-04-19T08:46:11.165Z",
       "status": "generated",
       "scriptLanguage": "python",
       "interpreterRequired": "pypy3",

@@ -28,4 +28,4 @@
 - Examples: `3P分类，近期最佳推荐三部`, `Cosplay标签最近更新前五条`, `地點分类最高收藏前三`
 - Sort defaults: `推荐/最佳/近期最佳 => 综合排序`; `最近/近期 => 最近更新`; `最多观看/最热 => 最多觀看`; `最高收藏/收藏最多 => 最高收藏`。
 - Scope: supports all extracted taxonomy tags and all first-level category groups.
-- Execution: `node query-jable-ranking.mjs https://jable.tv/ --query "<请求>"`.
+- Execution: `node src/entrypoints/sites/jable-ranking.mjs https://jable.tv/ --query "<请求>"`.

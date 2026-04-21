@@ -1,0 +1,245 @@
+{
+  "host": "www.douyin.com",
+  "archetype": "navigation-catalog",
+  "schemaVersion": 1,
+  "primaryArchetype": "catalog-detail",
+  "version": 1,
+  "pageTypes": {
+    "homeExact": [
+      "/"
+    ],
+    "homePrefixes": [],
+    "searchResultsPrefixes": [
+      "/search"
+    ],
+    "contentDetailPrefixes": [
+      "/video/",
+      "/shipin/"
+    ],
+    "authorPrefixes": [
+      "/user/"
+    ],
+    "authorListExact": [
+      "/follow",
+      "/user/self"
+    ],
+    "authorListPrefixes": [
+      "/follow",
+      "/user/self"
+    ],
+    "authorDetailPrefixes": [
+      "/user/"
+    ],
+    "chapterPrefixes": [],
+    "historyPrefixes": [],
+    "authPrefixes": [],
+    "categoryPrefixes": [
+      "/shipin/",
+      "/discover/",
+      "/zhuanti/",
+      "/vs"
+    ]
+  },
+  "search": {
+    "formSelectors": [
+      "form[role=\"search\"]",
+      "form[action*=\"/search\"]",
+      "form"
+    ],
+    "inputSelectors": [
+      "input[placeholder*=\"\\u641c\\u7d22\"]",
+      "input[type=\"search\"]",
+      "input[name=\"q\"]"
+    ],
+    "submitSelectors": [
+      "button[type=\"submit\"]",
+      "button[aria-label*=\"\\u641c\\u7d22\"]"
+    ],
+    "queryParamNames": [
+      "keyword",
+      "q"
+    ],
+    "resultTitleSelectors": [
+      "title",
+      "h1",
+      "h2"
+    ],
+    "resultBookSelectors": [
+      "a[href*=\"/video/\"]",
+      "a[href*=\"/shipin/\"]"
+    ],
+    "knownQueries": [
+      {
+        "query": "新闻",
+        "title": "新闻",
+        "url": "https://www.douyin.com/video/7487317288315258152",
+        "authorName": "抖音用户"
+      }
+    ]
+  },
+  "validationSamples": {
+    "videoSearchQuery": "新闻",
+    "videoDetailUrl": "https://www.douyin.com/video/7487317288315258152",
+    "authorUrl": "https://www.douyin.com/user/MS4wLjABAAAAD_rgoQxZRb5ZZdRaJIEEaRVq2h3_1YwTXfUhFGJPDhL0-oL-nDOYSn-y_wsCnjsZ",
+    "authorVideosUrl": "https://www.douyin.com/user/MS4wLjABAAAAD_rgoQxZRb5ZZdRaJIEEaRVq2h3_1YwTXfUhFGJPDhL0-oL-nDOYSn-y_wsCnjsZ?showTab=post",
+    "categoryPopularUrl": "https://www.douyin.com/shipin/"
+  },
+  "authValidationSamples": {
+    "selfPostsUrl": "https://www.douyin.com/user/self?showTab=post",
+    "likesUrl": "https://www.douyin.com/user/self?showTab=like",
+    "collectionsUrl": "https://www.douyin.com/user/self?showTab=collect",
+    "historyUrl": "https://www.douyin.com/user/self?showTab=history",
+    "followFeedUrl": "https://www.douyin.com/follow?tab=feed",
+    "followUsersUrl": "https://www.douyin.com/follow?tab=user"
+  },
+  "pipeline": {
+    "skipBookContent": true
+  },
+  "authSession": {
+    "loginUrl": "https://www.douyin.com/",
+    "postLoginUrl": "https://www.douyin.com/",
+    "verificationUrl": "https://www.douyin.com/user/self?showTab=like",
+    "keepaliveUrl": "https://www.douyin.com/user/self?showTab=like",
+    "keepaliveIntervalMinutes": 120,
+    "cooldownMinutesAfterRisk": 120,
+    "preferVisibleBrowserForAuthenticatedFlows": true,
+    "requireStableNetworkForAuthenticatedFlows": true,
+    "reuseLoginStateByDefault": true,
+    "autoLoginByDefault": true,
+    "credentialTarget": "BrowserWikiSkill:douyin.com",
+    "usernameEnv": "DOUYIN_USERNAME",
+    "passwordEnv": "DOUYIN_PASSWORD",
+    "loginIndicatorSelectors": [
+      "a[href*=\"/user/self\"] img",
+      "[data-e2e*=\"user-avatar\"] img",
+      "img[alt*=\"avatar\"]"
+    ],
+    "loginEntrySelectors": [
+      "button[aria-label*=\"登录\"]",
+      "button[class*=\"login\"]",
+      "[data-e2e*=\"login\"]",
+      "[class*=\"login\"] button",
+      "[class*=\"login\"]"
+    ],
+    "loggedOutIndicatorSelectors": [
+      "button[aria-label*=\"\\u767b\\u5f55\"]",
+      "button[class*=\"login\"]",
+      "[data-e2e*=\"login\"]",
+      "[class*=\"login\"]"
+    ],
+    "passwordLoginTabSelectors": [
+      "[data-e2e*=\"password\"]",
+      "button[class*=\"password\"]",
+      "[class*=\"tab\"] [class*=\"password\"]",
+      "[class*=\"password\"]"
+    ],
+    "usernameSelectors": [
+      "input[placeholder*=\"\\u624b\\u673a\\u53f7\"]",
+      "input[placeholder*=\"\\u8d26\\u53f7\"]",
+      "input[name=\"mobile\"]",
+      "input[name=\"username\"]",
+      "input[type=\"text\"]"
+    ],
+    "passwordSelectors": [
+      "input[type=\"password\"]",
+      "input[placeholder*=\"\\u5bc6\\u7801\"]"
+    ],
+    "submitSelectors": [
+      "button[type=\"submit\"]",
+      "button[class*=\"submit\"]",
+      "button[class*=\"confirm\"]",
+      "button[class*=\"login\"]",
+      "[data-e2e*=\"login\"] button"
+    ],
+    "challengeSelectors": [
+      ".middle_page_loading",
+      "[class*=\"captcha\"]",
+      "[class*=\"verify\"]",
+      "text/\\u9a8c\\u8bc1\\u7801\\u4e2d\\u95f4\\u9875"
+    ],
+    "authRequiredPathPrefixes": [
+      "/user/self",
+      "/follow"
+    ]
+  },
+  "sampling": {
+    "searchResultContentLimit": 5,
+    "authorContentLimit": 10,
+    "categoryContentLimit": 10,
+    "fallbackContentLimitWithSearch": 8
+  },
+  "downloader": {
+    "defaultOutputRoot": "video-downloads",
+    "requiresLoginForHighestQuality": true,
+    "authorVideoListPathPrefixes": [
+      "/user/"
+    ],
+    "maxBatchItems": 500,
+    "playlistPageSize": 18,
+    "defaultContainer": "mp4",
+    "defaultNamingStrategy": "title-id",
+    "qualityPolicy": {
+      "targetHeight": 2160,
+      "targetCodec": "auto",
+      "defaultContainer": "mp4",
+      "fallbackPolicy": "preserve-height-then-downgrade-codec"
+    }
+  },
+  "navigation": {
+    "allowedHosts": [
+      "www.douyin.com"
+    ],
+    "contentPathPrefixes": [
+      "/video/",
+      "/shipin/"
+    ],
+    "authorPathPrefixes": [
+      "/user/"
+    ],
+    "authorListPathPrefixes": [
+      "/user/self",
+      "/follow"
+    ],
+    "authorDetailPathPrefixes": [
+      "/user/"
+    ],
+    "categoryPathPrefixes": [
+      "/shipin/",
+      "/discover/",
+      "/zhuanti/",
+      "/vs"
+    ],
+    "utilityPathPrefixes": [
+      "/recovery_account/"
+    ],
+    "authPathPrefixes": [],
+    "categoryLabelKeywords": [
+      "\\u89c6\\u9891",
+      "\\u63a8\\u8350",
+      "\\u53d1\\u73b0"
+    ]
+  },
+  "contentDetail": {
+    "titleSelectors": [
+      "h1",
+      "[data-e2e*=\"video-desc\"]"
+    ],
+    "authorNameSelectors": [
+      "a[href*=\"/user/\"]:not([href*=\"/user/self\"]) h1",
+      "a[href*=\"/user/\"]:not([href*=\"/user/self\"]) [data-e2e*=\"user-title\"]",
+      "a[href*=\"/user/\"]:not([href*=\"/user/self\"])"
+    ],
+    "authorLinkSelectors": [
+      "a[href*=\"/user/\"]:not([href*=\"/user/self\"])"
+    ]
+  },
+  "author": {
+    "titleSelectors": [
+      "h1",
+      "[data-e2e*=\"user-title\"]"
+    ],
+    "workLinkSelectors": [
+      "a[href*=\"/video/\"]"
+    ]
+  }
+}

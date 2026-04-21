@@ -1,0 +1,31 @@
+{
+  "host": "www.douyin.com",
+  "baseUrl": "https://www.douyin.com/",
+  "generatedAt": "2026-04-19T08:46:11.155Z",
+  "scriptLanguage": "python",
+  "interpreterRequired": "pypy3",
+  "templateVersion": 3,
+  "profilePath": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\profiles\\www.douyin.com.json",
+  "profileHash": "bd8d694b52adfa2166f15391c501cf7edbef2b35de9adbf12ef5667e8a380818",
+  "profileVersion": 1,
+  "capabilities": [
+    "search-content",
+    "navigate-to-content",
+    "navigate-to-author",
+    "navigate-to-category",
+    "navigate-to-utility-page",
+    "switch-in-page-state"
+  ],
+  "dependencies": [
+    "httpx",
+    "selectolax",
+    "anyio"
+  ],
+  "urlFamily": [
+    "https://www.douyin.com/"
+  ],
+  "historicalContext": {
+    "sourceRunDir": null,
+    "books": []
+  }
+}
