@@ -21,7 +21,7 @@
 - Example user requests: `下载《玄鉴仙族》`
 - Start state: any verified public page, or a known book directory page.
 - Target state: a local full-book TXT exists.
-- Main path: check local artifact -> if missing, run `pypy3 download_book.py` -> parse the paginated directory -> fetch chapters concurrently -> output a pretty TXT.
+- Main path: check local artifact -> if missing, run `pypy3 src/sites/chapter-content/download/python/book.py` -> parse the paginated directory -> fetch chapters concurrently -> output a pretty TXT.
 - No-op rule: if a complete local TXT already exists, return it directly.
 - Success signal: `book-content/<run>/downloads/<book-title>.txt` exists.
 

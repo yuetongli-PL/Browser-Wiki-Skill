@@ -19,8 +19,8 @@
 
 ## Download path
 
-- Entrypoint: `pypy3 download_book.py`
-- Metadata path: `pypy3 download_book.py <url> --book-title "<title>" --metadata-only`
+- Entrypoint: `pypy3 src/sites/chapter-content/download/python/book.py`
+- Metadata path: `pypy3 src/sites/chapter-content/download/python/book.py <url> --book-title "<title>" --metadata-only`
 - Directory strategy: parse paginated directory pages first, then fetch chapters concurrently.
 - Concurrency: chapter fetch concurrency is currently `64`; chapter sub-pages are still ordered serially inside each chapter.
 - Output strategy: write `.part` files during execution, then finalize TXT and JSON outputs.

@@ -26,29 +26,29 @@ description: Instruction-only Skill for https://www.bilibili.com/. Use when Code
 ## Execution policy
 
 - Public bilibili pages MUST use the built-in browser.
-- Authenticated bilibili pages MUST use the local opener: `node .\scripts\bilibili-action.mjs open <bilibili-authenticated-url>`.
-- Download requests MUST use the local downloader through the action router: `node .\scripts\bilibili-action.mjs download <url-or-bv>...`.
-- Login bootstrap MUST run through the local helper path: `node .\scripts\bilibili-action.mjs login https://www.bilibili.com/`.
+- Authenticated bilibili pages MUST use the canonical opener: `node .\src\entrypoints\sites\bilibili-action.mjs open <bilibili-authenticated-url>`.
+- Download requests MUST use the canonical downloader router: `node .\src\entrypoints\sites\bilibili-action.mjs download <url-or-bv>...`.
+- Login bootstrap MUST run through the canonical helper path: `node .\src\entrypoints\sites\bilibili-action.mjs login https://www.bilibili.com/`.
 - The built-in browser NEVER carries bilibili login state.
 - If an authenticated bilibili page needs a reusable local session, the router MUST trigger the local login helper before continuing.
 - Routing table:
   - Public home/search/video/bangumi/UP/category pages -> `builtin-browser`
   - Authenticated read-only pages -> `local-profile-browser`
   - Login bootstrap -> `site-login`
-  - Downloads -> `download_bilibili.py` via the action router
+  - Downloads -> `src/sites/bilibili/download/python/bilibili.py` via the action router
 
 ## Command entrypoints
 
 - Open a public or authenticated bilibili page through the router:
-  - `node .\scripts\bilibili-action.mjs open <url>`
+  - `node .\src\entrypoints\sites\bilibili-action.mjs open <url>`
 - Download one or more bilibili videos:
-  - `node .\scripts\bilibili-action.mjs download <url-or-bv>...`
+  - `node .\src\entrypoints\sites\bilibili-action.mjs download <url-or-bv>...`
 - Run explicit login bootstrap:
-  - `node .\scripts\bilibili-action.mjs login https://www.bilibili.com/`
+  - `node .\src\entrypoints\sites\bilibili-action.mjs login https://www.bilibili.com/`
 - Legacy helpers remain available when needed:
-  - `node .\scripts\open-bilibili-page.mjs <bilibili-authenticated-url>`
-  - `node .\scripts\site-login.mjs https://www.bilibili.com\ --no-headless`
-  - `python .\download_bilibili.py <url-or-bv>...`
+  - `node .\src\entrypoints\sites\bilibili-open-page.mjs <bilibili-authenticated-url>`
+  - `node .\src\entrypoints\sites\site-login.mjs https://www.bilibili.com\ --no-headless`
+  - `python .\src\sites\bilibili\download\python\bilibili.py <url-or-bv>...`
 - Downloader prerequisites: `yt-dlp`, `ffmpeg`, and `ffprobe` must be available on PATH.
 
 ## Safety boundary

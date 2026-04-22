@@ -11,7 +11,7 @@ description: Instruction-only Skill for https://www.22biqu.com/. Use when Codex 
 - Stay inside the verified `www.22biqu.com` URL family.
 - Safe actions: `download-book`, `navigate`, `search-submit`
 - Supported tasks: search books, open book directories, open author pages, open chapter pages, and download full public novels.
-- Download entrypoint: `pypy3 download_book.py`.
+- Download entrypoint: `pypy3 src/sites/chapter-content/download/python/book.py`.
 
 ## Reading order
 
