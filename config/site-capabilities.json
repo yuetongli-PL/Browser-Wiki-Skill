@@ -89,8 +89,7 @@
         "most-viewed",
         "most-favourited"
       ],
-      "categoryTaxonomySupported": true,
-      "rankingQueryEntrypoint": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\query-jable-ranking.mjs"
+      "categoryTaxonomySupported": true
     },
     "www.bilibili.com": {
       "baseUrl": "https://www.bilibili.com/",
@@ -157,6 +156,42 @@
         "search-submit"
       ],
       "host": "www.douyin.com"
+    },
+    "www.xiaohongshu.com": {
+      "baseUrl": "https://www.xiaohongshu.com/explore",
+      "primaryArchetype": "catalog-detail",
+      "pageTypes": [
+        "auth-page",
+        "author-page",
+        "book-detail-page",
+        "category-page",
+        "content-detail-page",
+        "home",
+        "search-results-page"
+      ],
+      "capabilityFamilies": [
+        "search-content"
+      ],
+      "supportedIntents": [
+        "search-book",
+        "open-book",
+        "download-book",
+        "open-author",
+        "open-category",
+        "open-auth-page",
+        "open-utility-page",
+        "list-followed-users",
+        "list-followed-updates"
+      ],
+      "safeActionKinds": [
+        "navigate"
+      ],
+      "approvalActionKinds": [
+        "search-submit"
+      ],
+      "host": "www.xiaohongshu.com",
+      "siteKey": "xiaohongshu",
+      "adapterId": "xiaohongshu"
     }
   }
 }

@@ -1,0 +1,222 @@
+{
+  "host": "www.xiaohongshu.com",
+  "archetype": "navigation-catalog",
+  "schemaVersion": 1,
+  "primaryArchetype": "catalog-detail",
+  "version": 1,
+  "pageTypes": {
+    "homeExact": [
+      "/explore"
+    ],
+    "homePrefixes": [],
+    "searchResultsPrefixes": [
+      "/search_result"
+    ],
+    "contentDetailPrefixes": [
+      "/explore/"
+    ],
+    "authorPrefixes": [
+      "/user/profile/"
+    ],
+    "authorListExact": [],
+    "authorListPrefixes": [],
+    "authorDetailPrefixes": [
+      "/user/profile/"
+    ],
+    "chapterPrefixes": [],
+    "historyPrefixes": [],
+    "authPrefixes": [
+      "/login",
+      "/register",
+      "/website-login/error"
+    ],
+    "categoryPrefixes": [
+      "/explore"
+    ]
+  },
+  "search": {
+    "formSelectors": [
+      ".search-layout",
+      ".search-layout__top",
+      ".search-input-box"
+    ],
+    "inputSelectors": [
+      "input#search-input",
+      "input.search-input",
+      "input[placeholder*=\"\\u641c\\u7d22\"]",
+      "input[type=\"search\"]"
+    ],
+    "submitSelectors": [
+      "[aria-label*=\"\\u641c\\u7d22\"]",
+      ".search-icon",
+      "button[type=\"submit\"]"
+    ],
+    "queryParamNames": [
+      "keyword",
+      "searchkey"
+    ],
+    "resultTitleSelectors": [
+      "title",
+      "h1",
+      "h2"
+    ],
+    "resultBookSelectors": [
+      "section.note-item a[href*=\"/explore/\"]",
+      "a.cover[href*=\"/explore/\"]",
+      "a.title[href*=\"/explore/\"]",
+      "a[href*=\"/explore/\"]"
+    ],
+    "defaultQueries": [
+      "\u7a7f\u642d"
+    ],
+    "knownQueries": [
+      {
+        "query": "\u7a7f\u642d",
+        "title": "\u4e00\u5468\u7a7f\u642d",
+        "url": "https://www.xiaohongshu.com/explore/646f34fd000000001300755c",
+        "authorName": "\u738b\u7389\u96efUvin"
+      }
+    ]
+  },
+  "validationSamples": {
+    "videoSearchQuery": "\u7a7f\u642d",
+    "videoDetailUrl": "https://www.xiaohongshu.com/explore/646f34fd000000001300755c",
+    "authorUrl": "https://www.xiaohongshu.com/user/profile/5acc62a7e8ac2b04829875e1",
+    "authorVideosUrl": "https://www.xiaohongshu.com/user/profile/5acc62a7e8ac2b04829875e1",
+    "categoryPopularUrl": "https://www.xiaohongshu.com/explore"
+  },
+  "downloader": {
+    "defaultOutputRoot": "note-downloads",
+    "maxBatchItems": 20,
+    "defaultNamingStrategy": "title-id"
+  },
+  "authValidationSamples": {
+    "notificationUrl": "https://www.xiaohongshu.com/notification"
+  },
+  "pipeline": {
+    "skipBookContent": true
+  },
+  "authSession": {
+    "loginUrl": "https://www.xiaohongshu.com/login?redirectPath=https%3A%2F%2Fwww.xiaohongshu.com%2Fnotification",
+    "postLoginUrl": "https://www.xiaohongshu.com/notification",
+    "verificationUrl": "https://www.xiaohongshu.com/notification",
+    "keepaliveUrl": "https://www.xiaohongshu.com/notification",
+    "keepaliveIntervalMinutes": 180,
+    "cooldownMinutesAfterRisk": 180,
+    "preferVisibleBrowserForAuthenticatedFlows": true,
+    "requireStableNetworkForAuthenticatedFlows": true,
+    "reuseLoginStateByDefault": true,
+    "autoLoginByDefault": false,
+    "credentialTarget": "BrowserWikiSkill:xiaohongshu.com",
+    "loginIndicatorSelectors": [
+      ".notification-page .user-avatar img",
+      ".notification-page .user-info a[href*=\"/user/profile/\"]"
+    ],
+    "loginEntrySelectors": [
+      "a[href^=\"/login\"]",
+      "a[href*=\"/login?redirectPath=\"]",
+      ".side-bar-component .login-btn",
+      ".bottom-menu-component .login-btn",
+      ".login-btn"
+    ],
+    "loggedOutIndicatorSelectors": [
+      ".login-modal",
+      ".login-container",
+      "input[placeholder*=\"\u624b\u673a\u53f7\"]",
+      ".phone input",
+      ".auth-code input",
+      ".login-btn",
+      "a[href^=\"/login\"]",
+      "a[href*=\"/login?redirectPath=\"]"
+    ],
+    "challengeSelectors": [
+      ".container.risk",
+      "[class*=\"risk\"]",
+      ".alert-content",
+      "[class*=\"captcha\"]",
+      "[class*=\"verify\"]"
+    ],
+    "validationSamplePriority": [
+      "notificationUrl"
+    ],
+    "reusableSessionSignals": [
+      "usableForCookies",
+      "healthy",
+      "loginStateLikelyAvailable",
+      "presentWithoutMissingPaths"
+    ],
+    "authRequiredPathPrefixes": [
+      "/notification"
+    ]
+  },
+  "sampling": {
+    "searchResultContentLimit": 5,
+    "authorContentLimit": 10,
+    "categoryContentLimit": 10,
+    "fallbackContentLimitWithSearch": 8
+  },
+  "navigation": {
+    "allowedHosts": [
+      "www.xiaohongshu.com"
+    ],
+    "contentPathPrefixes": [
+      "/explore/"
+    ],
+    "authorPathPrefixes": [
+      "/user/profile/"
+    ],
+    "authorListPathPrefixes": [],
+    "authorDetailPathPrefixes": [
+      "/user/profile/"
+    ],
+    "categoryPathPrefixes": [
+      "/explore"
+    ],
+    "utilityPathPrefixes": [
+      "/livelist",
+      "/notification"
+    ],
+    "authPathPrefixes": [
+      "/login",
+      "/register",
+      "/website-login/error"
+    ],
+    "categoryLabelKeywords": [
+      "\u53d1\u73b0",
+      "\u56fe\u6587",
+      "\u89c6\u9891",
+      "\u7528\u6237"
+    ]
+  },
+  "contentDetail": {
+    "titleSelectors": [
+      ".note-content .title",
+      ".note-content .desc",
+      "h1",
+      "title"
+    ],
+    "authorNameSelectors": [
+      ".author-wrapper .name",
+      ".author-wrapper .username",
+      "a[href*=\"/user/profile/\"] .name",
+      "a[href*=\"/user/profile/\"]"
+    ],
+    "authorLinkSelectors": [
+      "a[href*=\"/user/profile/\"]"
+    ]
+  },
+  "author": {
+    "titleSelectors": [
+      ".user-name",
+      ".username",
+      "h1",
+      "title"
+    ],
+    "workLinkSelectors": [
+      "section.note-item a[href*=\"/explore/\"]",
+      "a.cover[href*=\"/explore/\"]",
+      "a.title[href*=\"/explore/\"]",
+      "a[href*=\"/explore/\"]"
+    ]
+  }
+}

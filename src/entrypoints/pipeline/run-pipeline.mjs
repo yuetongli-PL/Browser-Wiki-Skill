@@ -7,6 +7,161 @@ import { executePipeline } from '../../pipeline/engine/engine.mjs';
 import { normalizePipelineOptions, toBoolean } from '../../pipeline/engine/options.mjs';
 import { summarizePipelineStages } from '../../pipeline/engine/stage-spec.mjs';
 import { DEFAULT_PIPELINE_RUNTIME, resolvePipelineRuntime } from '../../pipeline/runtime/create-default-runtime.mjs';
+import { detectXiaohongshuRestrictionPage, isXiaohongshuUrl } from '../../shared/xiaohongshu-risk.mjs';
+
+function summarizeAuthKeepalive(authKeepalive) {
+  return {
+    attempted: authKeepalive.attempted === true,
+    ran: authKeepalive.ran === true,
+    trigger: authKeepalive.trigger ?? null,
+    reason: authKeepalive.reason ?? null,
+    thresholdMinutes: authKeepalive.thresholdMinutes ?? null,
+    status: authKeepalive.keepaliveReport?.keepalive?.status ?? null,
+    sessionHealthSummary: authKeepalive.sessionHealthSummaryAfter ?? authKeepalive.sessionHealthSummary ?? null,
+    reports: authKeepalive.keepaliveReport?.reports ?? null,
+  };
+}
+
+function extractXiaohongshuRestriction(inputUrl, manifest) {
+  return detectXiaohongshuRestrictionPage({
+    inputUrl,
+    finalUrl: manifest?.finalUrl ?? inputUrl,
+    title: manifest?.title ?? '',
+    pageType: manifest?.pageType ?? null,
+    pageFacts: manifest?.pageFacts ?? null,
+    runtimeEvidence: manifest?.runtimeEvidence ?? null,
+  });
+}
+
+function buildBlockedStageSummaries(stageSpecs, captureManifest, reason) {
+  return Object.fromEntries(stageSpecs.map((stageSpec) => {
+    if (stageSpec.name === 'capture') {
+      return [stageSpec.name, stageSpec.summarize(captureManifest)];
+    }
+    return [stageSpec.name, {
+      status: 'skipped',
+      reason,
+    }];
+  }));
+}
+
+function summarizeRiskRecovery(result = null) {
+  if (!result) {
+    return null;
+  }
+  return {
+    attempted: result.attempted === true,
+    status: result.status ?? null,
+    trigger: result.trigger ?? null,
+    initialUrl: result.initialUrl ?? null,
+    initialRiskPageCode: result.initialRiskPageCode ?? null,
+    finalUrl: result.finalUrl ?? null,
+    finalRiskPageCode: result.finalRiskPageCode ?? null,
+    reusedLoginState: result.reusedLoginState === true,
+    reports: result.keepaliveReport?.reports ?? null,
+    warmupSummary: result.keepaliveReport?.keepalive?.warmupSummary ?? result.keepaliveReport?.loginReport?.auth?.warmupSummary ?? null,
+    sessionHealthSummary: result.keepaliveReport?.keepalive?.sessionHealthSummary
+      ?? result.keepaliveReport?.loginReport?.auth?.sessionHealthSummary
+      ?? null,
+    error: result.error ?? null,
+  };
+}
+
+async function executeXiaohongshuRiskAwareCapture(inputUrl, settings, stageSpecs, stageImpls, pipelineSiteKeepalive) {
+  const captureStageSpec = stageSpecs.find((stageSpec) => stageSpec.name === 'capture');
+  if (!captureStageSpec) {
+    throw new Error('Missing capture stage spec.');
+  }
+  const captureOptions = captureStageSpec.buildOptions({
+    inputUrl,
+    settings,
+    generatedAt: new Date().toISOString(),
+    stageResults: {},
+  });
+  let captureManifest = await stageImpls.capture(inputUrl, captureOptions);
+  const initialRestriction = extractXiaohongshuRestriction(inputUrl, captureManifest);
+  if (!initialRestriction) {
+    return {
+      captureManifest,
+      initialRestriction: null,
+      finalRestriction: null,
+      riskRecovery: null,
+    };
+  }
+
+  if (typeof pipelineSiteKeepalive !== 'function' || settings.reuseLoginState === false) {
+    return {
+      captureManifest,
+      initialRestriction,
+      finalRestriction: initialRestriction,
+      riskRecovery: {
+        attempted: false,
+        status: 'not-eligible',
+        trigger: null,
+        keepaliveReport: null,
+        initialUrl: captureManifest?.finalUrl ?? inputUrl,
+        initialRiskPageCode: initialRestriction.riskPageCode ?? null,
+        finalUrl: captureManifest?.finalUrl ?? inputUrl,
+        finalRiskPageCode: initialRestriction.riskPageCode ?? null,
+        reusedLoginState: settings.reuseLoginState !== false,
+      },
+    };
+  }
+
+  let keepaliveReport = null;
+  try {
+    keepaliveReport = await pipelineSiteKeepalive(inputUrl, {
+      profilePath: settings.profilePath,
+      outDir: path.join(settings.captureOutDir, 'risk-recovery-keepalive'),
+      browserPath: settings.browserPath,
+      browserProfileRoot: settings.browserProfileRoot,
+      userDataDir: settings.userDataDir,
+      timeoutMs: settings.timeoutMs,
+      headless: false,
+      reuseLoginState: true,
+      ...(settings.autoLogin !== undefined ? { autoLogin: settings.autoLogin } : {}),
+    });
+    captureManifest = await stageImpls.capture(inputUrl, {
+      ...captureOptions,
+      outDir: path.join(settings.captureOutDir, 'risk-recovery-recapture'),
+    });
+    const finalRestriction = extractXiaohongshuRestriction(inputUrl, captureManifest);
+    return {
+      captureManifest,
+      initialRestriction,
+      finalRestriction,
+      riskRecovery: {
+        attempted: true,
+        status: finalRestriction ? 'still-blocked' : 'recovered',
+        trigger: 'restriction-page',
+        keepaliveReport,
+        initialUrl: initialRestriction.finalUrl ?? inputUrl,
+        initialRiskPageCode: initialRestriction.riskPageCode ?? null,
+        finalUrl: captureManifest?.finalUrl ?? inputUrl,
+        finalRiskPageCode: finalRestriction?.riskPageCode ?? null,
+        reusedLoginState: true,
+      },
+    };
+  } catch (error) {
+    return {
+      captureManifest,
+      initialRestriction,
+      finalRestriction: initialRestriction,
+      riskRecovery: {
+        attempted: true,
+        status: 'recovery-failed',
+        trigger: 'restriction-page',
+        keepaliveReport,
+        error: error?.message ?? String(error),
+        initialUrl: initialRestriction.finalUrl ?? inputUrl,
+        initialRiskPageCode: initialRestriction.riskPageCode ?? null,
+        finalUrl: captureManifest?.finalUrl ?? inputUrl,
+        finalRiskPageCode: initialRestriction.riskPageCode ?? null,
+        reusedLoginState: true,
+      },
+    };
+  }
+}
 
 export async function runPipeline(inputUrl, options = {}, runtime = DEFAULT_PIPELINE_RUNTIME) {
   const settings = normalizePipelineOptions(inputUrl, options);
@@ -34,10 +189,54 @@ export async function runPipeline(inputUrl, options = {}, runtime = DEFAULT_PIPE
       sessionHealthSummaryAfter: null,
       keepaliveReport: null,
     };
-  const { generatedAt, stageResults } = await executePipeline(inputUrl, settings, {
-    stageSpecs,
-    stageImpls,
-  });
+  const summarizedAuthKeepalive = summarizeAuthKeepalive(authKeepalive);
+  let riskRecovery = null;
+  let stageResults = null;
+  let generatedAt = new Date().toISOString();
+
+  if (isXiaohongshuUrl(inputUrl)) {
+    const riskAwareCapture = await executeXiaohongshuRiskAwareCapture(
+      inputUrl,
+      settings,
+      stageSpecs,
+      stageImpls,
+      pipelineSiteKeepalive,
+    );
+    riskRecovery = summarizeRiskRecovery(riskAwareCapture.riskRecovery);
+    if (riskAwareCapture.finalRestriction?.restrictionDetected) {
+      const restriction = riskAwareCapture.finalRestriction;
+      const blockedReason = `Blocked by Xiaohongshu restriction page${restriction.riskPageCode ? ` ${restriction.riskPageCode}` : ''}.`;
+      return {
+        inputUrl,
+        generatedAt,
+        kbDir: null,
+        skillDir: null,
+        skillName: null,
+        authKeepalive: summarizedAuthKeepalive,
+        riskRecovery,
+        pipelineBlockedByRisk: true,
+        antiCrawlSignals: restriction.antiCrawlSignals ?? [],
+        antiCrawlReasonCode: restriction.antiCrawlReasonCode ?? null,
+        riskCauseCode: restriction.riskCauseCode ?? null,
+        riskAction: restriction.riskAction ?? null,
+        stages: buildBlockedStageSummaries(stageSpecs, riskAwareCapture.captureManifest, blockedReason),
+      };
+    }
+
+    const wrappedStageImpls = {
+      ...stageImpls,
+      capture: async () => riskAwareCapture.captureManifest,
+    };
+    ({ generatedAt, stageResults } = await executePipeline(inputUrl, settings, {
+      stageSpecs,
+      stageImpls: wrappedStageImpls,
+    }));
+  } else {
+    ({ generatedAt, stageResults } = await executePipeline(inputUrl, settings, {
+      stageSpecs,
+      stageImpls,
+    }));
+  }
 
   return {
     inputUrl,
@@ -45,16 +244,9 @@ export async function runPipeline(inputUrl, options = {}, runtime = DEFAULT_PIPE
     kbDir: stageResults.knowledgeBase.kbDir,
     skillDir: stageResults.skill.skillDir,
     skillName: stageResults.skill.skillName,
-    authKeepalive: {
-      attempted: authKeepalive.attempted === true,
-      ran: authKeepalive.ran === true,
-      trigger: authKeepalive.trigger ?? null,
-      reason: authKeepalive.reason ?? null,
-      thresholdMinutes: authKeepalive.thresholdMinutes ?? null,
-      status: authKeepalive.keepaliveReport?.keepalive?.status ?? null,
-      sessionHealthSummary: authKeepalive.sessionHealthSummaryAfter ?? authKeepalive.sessionHealthSummary ?? null,
-      reports: authKeepalive.keepaliveReport?.reports ?? null,
-    },
+    authKeepalive: summarizedAuthKeepalive,
+    riskRecovery,
+    pipelineBlockedByRisk: false,
     stages: summarizePipelineStages(stageResults),
   };
 }
@@ -97,7 +289,7 @@ Options:
   --help                       Show this help
 
 Notes:
-  - Douyin defaults to a visible browser unless --headless is explicitly set.
+  - Douyin and Xiaohongshu default to a visible browser unless --headless is explicitly set.
 `);
 }
 

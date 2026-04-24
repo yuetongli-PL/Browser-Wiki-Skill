@@ -1,15 +1,19 @@
+import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 
 import { validateProfileFile } from '../../sites/core/profile-validation.mjs';
 import { maybeLoadValidatedProfileForUrl } from '../../sites/core/profiles.mjs';
 import { inspectPersistentProfileHealth, resolvePersistentUserDataDir } from '../browser/profile-store.mjs';
+import { openBrowserSession } from '../browser/session.mjs';
+import { writeJsonFile, writeTextFile } from '../io.mjs';
 import { normalizeText } from '../../shared/normalize.mjs';
 import { getWindowsCredential, resolveWindowsCredentialTarget } from './windows-credential-manager.mjs';
 
 export const DEFAULT_LOGIN_WAIT_TIMEOUT_MS = 5 * 60_000;
 
 const AUTH_READY_IDLE_MS = 250;
+const DOWNLOAD_AUTH_STATE_DIR = '.bws';
 
 function buildAuthWaitPolicy(timeoutMs) {
   return {
@@ -34,6 +38,44 @@ function normalizeHostToken(host) {
     .toUpperCase()
     .replace(/[^A-Z0-9]+/gu, '_')
     .replace(/^_+|_+$/gu, '');
+}
+
+function normalizeComparableHost(value) {
+  return String(value ?? '').trim().toLowerCase();
+}
+
+function normalizePathPrefix(value) {
+  const normalized = String(value ?? '').trim().replace(/^\/+|\/+$/gu, '');
+  return normalized ? `/${normalized}` : '/';
+}
+
+function normalizePathname(value) {
+  const normalized = String(value ?? '').trim().replace(/\/+$/u, '');
+  return normalized || '/';
+}
+
+function isPathPrefixMatch(pathname, prefix) {
+  const normalizedPath = normalizePathname(pathname);
+  const normalizedPrefix = normalizePathPrefix(prefix);
+  return normalizedPath === normalizedPrefix || normalizedPath.startsWith(`${normalizedPrefix}/`);
+}
+
+function isPathFamilyMatch(pathname, prefix) {
+  return isPathPrefixMatch(pathname, prefix)
+    || normalizePathname(pathname).includes(normalizePathPrefix(prefix));
+}
+
+function readPathname(inputUrl) {
+  try {
+    return new URL(String(inputUrl ?? '')).pathname;
+  } catch {
+    return null;
+  }
+}
+
+function isXiaohongshuHostValue(value) {
+  const host = normalizeComparableHost(value);
+  return host === 'www.xiaohongshu.com' || host === 'xiaohongshu.com';
 }
 
 function normalizeComparableUrl(value) {
@@ -203,9 +245,53 @@ export function resolveAuthKeepaliveUrl(inputUrl, authProfile = null, authConfig
   return String(resolvedAuthConfig?.postLoginUrl ?? '').trim() || String(inputUrl ?? '').trim() || null;
 }
 
-function pageInspectLoginState(config) {
+export function isAuthRequiredNavigationTarget(inputUrl, { authConfig = null, siteProfile = null } = {}) {
+  const resolvedAuthConfig = authConfig ?? buildResolvedAuthConfig(siteProfile);
+  const pathname = readPathname(inputUrl);
+  if (!resolvedAuthConfig?.authRequiredPathPrefixes?.length || !pathname) {
+    return false;
+  }
+  return resolvedAuthConfig.authRequiredPathPrefixes.some((prefix) => isPathFamilyMatch(pathname, prefix));
+}
+
+export function shouldUsePersistentProfileForNavigation(inputUrl, settings = {}, context = {}) {
+  if (context.reuseLoginState !== true) {
+    return false;
+  }
+  if (settings?.userDataDir) {
+    return true;
+  }
+  const resolvedAuthConfig = context.authConfig ?? buildResolvedAuthConfig(context.siteProfile ?? null);
+  if (isXiaohongshuHostValue(resolvedAuthConfig?.host ?? context.siteProfile?.host)) {
+    return isAuthRequiredNavigationTarget(inputUrl, {
+      authConfig: resolvedAuthConfig,
+      siteProfile: context.siteProfile ?? null,
+    });
+  }
+  return true;
+}
+
+export function shouldEnsureAuthenticatedNavigationSession(inputUrl, settings = {}, context = {}) {
+  const resolvedAuthConfig = context.authConfig ?? buildResolvedAuthConfig(context.siteProfile ?? null);
+  if (!resolvedAuthConfig?.loginUrl) {
+    return false;
+  }
+  if (settings?.autoLogin === true) {
+    return true;
+  }
+  if (!isXiaohongshuHostValue(resolvedAuthConfig.host ?? context.siteProfile?.host)) {
+    return Boolean(context.reuseLoginState || resolvedAuthConfig.autoLoginByDefault);
+  }
+  return isAuthRequiredNavigationTarget(inputUrl, {
+    authConfig: resolvedAuthConfig,
+    siteProfile: context.siteProfile ?? null,
+  }) && Boolean(context.reuseLoginState || resolvedAuthConfig.autoLoginByDefault);
+}
+
+async function pageInspectLoginState(config) {
   const normalize = (value) => String(value ?? '').replace(/\s+/gu, ' ').trim();
   const selectors = (value) => Array.isArray(value) ? value.filter(Boolean) : [];
+  const isXiaohongshu = /(^|\.)xiaohongshu\.com$/iu.test(String(config?.host ?? window.location.hostname ?? ''));
   const isVisible = (node) => {
     if (!(node instanceof Element)) {
       return false;
@@ -239,6 +325,66 @@ function pageInspectLoginState(config) {
   const challengeNode = firstVisible(config.challengeSelectors);
   const challengeText = challengeNode ? normalize(challengeNode.node.textContent || challengeNode.node.getAttribute?.('placeholder') || '') : null;
   const onLoginPage = Boolean(config.loginUrl && currentUrl.startsWith(config.loginUrl));
+  let xiaohongshuAuthProbe = null;
+  if (isXiaohongshu) {
+    try {
+      const response = await fetch('https://edith.xiaohongshu.com/api/sns/web/v2/user/me', {
+        credentials: 'include',
+      });
+      const text = await response.text();
+      let body = null;
+      try {
+        body = JSON.parse(text);
+      } catch {
+        body = null;
+      }
+      const userId = normalize(body?.data?.user_id || body?.data?.userId || '');
+      xiaohongshuAuthProbe = {
+        status: response.status,
+        ok: response.ok,
+        guest: Boolean(body?.data?.guest),
+        userId: userId || null,
+      };
+      if (response.ok && xiaohongshuAuthProbe.guest === true) {
+        return {
+          currentUrl,
+          title,
+          onLoginPage,
+          loggedIn: false,
+          loginStateDetected: false,
+          identityConfirmed: false,
+          identitySource: 'api:v2-user-me:guest',
+          hasLoginForm: Boolean(usernameInput?.node && passwordInput?.node),
+          hasChallenge: Boolean(challengeNode?.node),
+          challengeText,
+          xiaohongshuAuthProbe,
+        };
+      }
+      if (response.ok && xiaohongshuAuthProbe.guest === false && xiaohongshuAuthProbe.userId) {
+        return {
+          currentUrl,
+          title,
+          onLoginPage,
+          loggedIn: true,
+          loginStateDetected: true,
+          identityConfirmed: true,
+          identitySource: 'api:v2-user-me',
+          hasLoginForm: Boolean(usernameInput?.node && passwordInput?.node),
+          hasChallenge: Boolean(challengeNode?.node),
+          challengeText,
+          xiaohongshuAuthProbe,
+        };
+      }
+    } catch (error) {
+      xiaohongshuAuthProbe = {
+        status: null,
+        ok: false,
+        guest: null,
+        userId: null,
+        error: normalize(error?.message ?? String(error)),
+      };
+    }
+  }
   const heuristicLoggedIn = !loggedOutIndicator && !usernameInput && !passwordInput && !onLoginPage;
   const loggedIn = Boolean(loginIndicator) || heuristicLoggedIn;
   const identityConfirmed = Boolean(loginIndicator);
@@ -259,11 +405,213 @@ function pageInspectLoginState(config) {
     hasLoginForm: Boolean(usernameInput?.node && passwordInput?.node),
     hasChallenge: Boolean(challengeNode?.node),
     challengeText,
+    xiaohongshuAuthProbe,
   };
 }
 
 function isConfirmedLoginState(loginState) {
   return loginState?.identityConfirmed === true;
+}
+
+function dedupeSortedStrings(values) {
+  return [...new Set((values ?? []).map((value) => String(value ?? '').trim()).filter(Boolean))].sort((left, right) => left.localeCompare(right, 'en'));
+}
+
+function buildAcceptLanguage(navigatorInfo = {}) {
+  const languages = Array.isArray(navigatorInfo.languages)
+    ? navigatorInfo.languages.map((value) => String(value ?? '').trim()).filter(Boolean)
+    : [];
+  if (languages.length > 0) {
+    return languages.join(',');
+  }
+  return String(navigatorInfo.language ?? '').trim();
+}
+
+function normalizeCookieDomain(value) {
+  return normalizeComparableHost(String(value ?? '').replace(/^\./u, ''));
+}
+
+function buildCookieHostCandidates(...values) {
+  const candidates = new Set();
+  for (const value of values) {
+    let host = '';
+    try {
+      host = new URL(String(value ?? '')).hostname;
+    } catch {
+      host = String(value ?? '').trim();
+    }
+    const normalizedHost = normalizeComparableHost(host);
+    if (!normalizedHost) {
+      continue;
+    }
+    candidates.add(normalizedHost);
+    const parts = normalizedHost.split('.').filter(Boolean);
+    if (parts.length >= 2) {
+      candidates.add(parts.slice(-2).join('.'));
+    }
+  }
+  return [...candidates];
+}
+
+function cookieMatchesHost(cookieDomain, host) {
+  return cookieDomain === host
+    || cookieDomain.endsWith(`.${host}`)
+    || host.endsWith(`.${cookieDomain}`);
+}
+
+function filterCookiesForHosts(cookies, hosts) {
+  const normalizedHosts = dedupeSortedStrings(hosts);
+  const filtered = [];
+  const seen = new Set();
+  for (const cookie of Array.isArray(cookies) ? cookies : []) {
+    const name = String(cookie?.name ?? '').trim();
+    const domain = normalizeCookieDomain(cookie?.domain);
+    const cookiePath = String(cookie?.path ?? '/').trim() || '/';
+    if (!name || !domain || !normalizedHosts.some((host) => cookieMatchesHost(domain, host))) {
+      continue;
+    }
+    const key = `${domain}\t${cookiePath}\t${name}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    filtered.push({
+      ...cookie,
+      name,
+      domain: String(cookie?.domain ?? '').trim(),
+      path: cookiePath,
+      value: String(cookie?.value ?? ''),
+    });
+  }
+  return filtered.sort((left, right) => {
+    const leftKey = `${normalizeCookieDomain(left.domain)}\t${left.path}\t${left.name}`;
+    const rightKey = `${normalizeCookieDomain(right.domain)}\t${right.path}\t${right.name}`;
+    return leftKey.localeCompare(rightKey, 'en');
+  });
+}
+
+function buildCookieHeader(cookies) {
+  return (Array.isArray(cookies) ? cookies : [])
+    .map((cookie) => {
+      const name = String(cookie?.name ?? '').trim();
+      if (!name) {
+        return '';
+      }
+      return `${name}=${String(cookie?.value ?? '')}`;
+    })
+    .filter(Boolean)
+    .join('; ');
+}
+
+function netscapeBoolean(value) {
+  return value ? 'TRUE' : 'FALSE';
+}
+
+function toNetscapeCookieLine(cookie) {
+  const domain = String(cookie?.domain ?? '').trim();
+  const includeSubdomains = domain.startsWith('.');
+  const expires = Number.isFinite(Number(cookie?.expires)) && Number(cookie?.expires) > 0
+    ? Math.trunc(Number(cookie.expires))
+    : 0;
+  return [
+    domain,
+    netscapeBoolean(includeSubdomains),
+    String(cookie?.path ?? '/').trim() || '/',
+    netscapeBoolean(cookie?.secure === true),
+    String(expires),
+    String(cookie?.name ?? '').trim(),
+    String(cookie?.value ?? ''),
+  ].join('\t');
+}
+
+function buildCookieFileContents(siteLabel, cookies) {
+  const lines = [
+    '# Netscape HTTP Cookie File',
+    `# This file was generated by Browser-Wiki-Skill for ${siteLabel} downloads.`,
+    '',
+  ];
+  for (const cookie of Array.isArray(cookies) ? cookies : []) {
+    lines.push(toNetscapeCookieLine(cookie));
+  }
+  return `${lines.join(os.EOL)}${os.EOL}`;
+}
+
+function toFileStem(value) {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, '-')
+    .replace(/^-+|-+$/gu, '')
+    || 'site-download';
+}
+
+function deriveOrigin(value) {
+  try {
+    const parsed = new URL(String(value ?? ''));
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      return parsed.origin;
+    }
+  } catch {
+    // Ignore invalid origins.
+  }
+  return null;
+}
+
+function pageReadDownloadPassthroughContext() {
+  return {
+    navigatorUserAgent: navigator.userAgent || '',
+    navigatorLanguage: navigator.language || '',
+    navigatorLanguages: Array.isArray(navigator.languages) ? navigator.languages : [],
+    navigatorPlatform: navigator.platform || '',
+    locationHref: location.href || '',
+    locationOrigin: location.origin || '',
+    documentReferrer: document.referrer || '',
+    documentTitle: document.title || '',
+  };
+}
+
+function createDownloadPassthroughResult(overrides = {}) {
+  return {
+    available: false,
+    reasonCode: null,
+    passthroughMode: 'unavailable',
+    sessionProfileAvailable: false,
+    cookieHeaderAvailable: false,
+    cookieCount: 0,
+    cookieNames: [],
+    cookieDomains: [],
+    headerNames: [],
+    sidecarPath: null,
+    cookieFile: null,
+    userDataDir: null,
+    verificationUrl: null,
+    currentUrl: null,
+    title: null,
+    loginStateDetected: false,
+    identityConfirmed: false,
+    identitySource: null,
+    env: {},
+    error: null,
+    ...overrides,
+  };
+}
+
+function buildDownloadPassthroughEnv(envToken, payload = {}) {
+  const normalizedToken = normalizeHostToken(envToken).replace(/_COM$/u, '') || 'SITE';
+  const env = {};
+  if (payload.sidecarPath) {
+    env[`BWS_${normalizedToken}_DOWNLOAD_AUTH_SIDECAR`] = payload.sidecarPath;
+  }
+  if (payload.cookieFile) {
+    env[`BWS_${normalizedToken}_DOWNLOAD_COOKIE_FILE`] = payload.cookieFile;
+  }
+  if (payload.userDataDir) {
+    env[`BWS_${normalizedToken}_DOWNLOAD_USER_DATA_DIR`] = payload.userDataDir;
+  }
+  if (payload.passthroughMode) {
+    env[`BWS_${normalizedToken}_DOWNLOAD_PASSTHROUGH_MODE`] = payload.passthroughMode;
+  }
+  return env;
 }
 
 async function pageAttemptCredentialLogin(config, credentials) {
@@ -543,8 +891,232 @@ export async function inspectReusableSiteSession(inputUrl, settings = {}, option
   };
 }
 
+export async function exportDownloadSessionPassthrough(session, inputUrl, authContext = {}, options = {}, _deps = {}) {
+  const authProfile = authContext.authProfile ?? null;
+  const authConfig = authContext.authConfig ?? null;
+  const siteProfile = authContext.siteProfile ?? null;
+  const verificationUrl = resolveAuthVerificationUrl(inputUrl, authProfile, authConfig)
+    || String(authConfig?.postLoginUrl ?? '').trim()
+    || String(inputUrl ?? '').trim()
+    || null;
+  const userDataDir = authContext.userDataDir ? path.resolve(authContext.userDataDir) : null;
+  const loginState = options.loginState ?? null;
+  const sessionProfileAvailable = Boolean(userDataDir && authContext.reuseLoginState === true);
+  if (!sessionProfileAvailable) {
+    return createDownloadPassthroughResult({
+      reasonCode: authContext.reuseLoginState === true ? 'missing-user-data-dir' : 'reuse-login-state-disabled',
+      userDataDir,
+      verificationUrl,
+      loginStateDetected: loginState?.loginStateDetected === true || loginState?.loggedIn === true,
+      identityConfirmed: loginState?.identityConfirmed === true,
+      identitySource: loginState?.identitySource ?? null,
+    });
+  }
+
+  const pageContext = await session.callPageFunction(pageReadDownloadPassthroughContext);
+  const cookiesResult = await session.send('Storage.getCookies');
+  const hostCandidates = buildCookieHostCandidates(
+    inputUrl,
+    verificationUrl,
+    authConfig?.postLoginUrl,
+    authConfig?.loginUrl,
+    siteProfile?.host,
+  );
+  const cookies = filterCookiesForHosts(cookiesResult?.cookies, hostCandidates);
+  const cookieHeader = buildCookieHeader(cookies);
+  const navigatorInfo = {
+    userAgent: String(pageContext?.navigatorUserAgent ?? '').trim(),
+    language: String(pageContext?.navigatorLanguage ?? '').trim(),
+    languages: Array.isArray(pageContext?.navigatorLanguages) ? pageContext.navigatorLanguages : [],
+    platform: String(pageContext?.navigatorPlatform ?? '').trim(),
+  };
+  const currentUrl = String(pageContext?.locationHref ?? '').trim()
+    || String(verificationUrl ?? '').trim()
+    || String(inputUrl ?? '').trim()
+    || null;
+  const origin = String(pageContext?.locationOrigin ?? '').trim()
+    || deriveOrigin(currentUrl)
+    || deriveOrigin(verificationUrl)
+    || deriveOrigin(inputUrl);
+  const headers = {};
+  if (cookieHeader) {
+    headers.Cookie = cookieHeader;
+  }
+  if (navigatorInfo.userAgent) {
+    headers['User-Agent'] = navigatorInfo.userAgent;
+  }
+  const acceptLanguage = buildAcceptLanguage(navigatorInfo);
+  if (acceptLanguage) {
+    headers['Accept-Language'] = acceptLanguage;
+  }
+  if (currentUrl) {
+    headers.Referer = currentUrl;
+  }
+  if (origin) {
+    headers.Origin = origin;
+  }
+
+  const loginStateDetected = loginState?.loginStateDetected === true || loginState?.loggedIn === true;
+  const identityConfirmed = loginState?.identityConfirmed === true;
+  const available = sessionProfileAvailable && (cookieHeader.length > 0 || loginStateDetected || identityConfirmed);
+  const passthroughMode = cookieHeader.length > 0
+    ? 'cookie-header'
+    : sessionProfileAvailable
+      ? 'browser-profile'
+      : 'unavailable';
+  const artifactStem = toFileStem(options.artifactStem ?? options.siteKey ?? siteProfile?.host ?? inputUrl);
+  const cookieFile = cookieHeader.length > 0 ? path.join(userDataDir, DOWNLOAD_AUTH_STATE_DIR, `${artifactStem}-cookies.txt`) : null;
+  const sidecarPath = path.join(userDataDir, DOWNLOAD_AUTH_STATE_DIR, `${artifactStem}-auth.json`);
+
+  if (available) {
+    const sidecarPayload = {
+      ok: true,
+      generatedAt: new Date().toISOString(),
+      inputUrl: String(inputUrl ?? '').trim() || null,
+      verificationUrl,
+      userDataDir,
+      passthroughMode,
+      cookieFile,
+      cookieCount: cookies.length,
+      cookies: cookies.map((cookie) => ({
+        name: cookie.name,
+        value: cookie.value,
+        domain: cookie.domain,
+        path: cookie.path,
+        expires: Number.isFinite(Number(cookie.expires)) ? Number(cookie.expires) : null,
+        httpOnly: cookie.httpOnly === true,
+        secure: cookie.secure === true,
+        sameSite: cookie.sameSite ?? null,
+      })),
+      headers,
+      page: {
+        url: currentUrl,
+        origin,
+        referrer: String(pageContext?.documentReferrer ?? '').trim() || null,
+        title: String(pageContext?.documentTitle ?? '').trim() || null,
+      },
+      navigator: navigatorInfo,
+      auth: {
+        loginStateDetected,
+        identityConfirmed,
+        identitySource: loginState?.identitySource ?? null,
+      },
+    };
+    await writeJsonFile(sidecarPath, sidecarPayload);
+    if (cookieFile) {
+      await writeTextFile(cookieFile, buildCookieFileContents(options.siteKey ?? siteProfile?.host ?? 'site', cookies));
+    }
+  }
+
+  return createDownloadPassthroughResult({
+    available,
+    reasonCode: available ? null : 'not-logged-in',
+    passthroughMode,
+    sessionProfileAvailable,
+    cookieHeaderAvailable: cookieHeader.length > 0,
+    cookieCount: cookies.length,
+    cookieNames: dedupeSortedStrings(cookies.map((cookie) => cookie.name)),
+    cookieDomains: dedupeSortedStrings(cookies.map((cookie) => cookie.domain)),
+    headerNames: dedupeSortedStrings(Object.keys(headers)),
+    sidecarPath: available ? sidecarPath : null,
+    cookieFile: available ? cookieFile : null,
+    userDataDir,
+    verificationUrl,
+    currentUrl,
+    title: String(pageContext?.documentTitle ?? '').trim() || null,
+    loginStateDetected,
+    identityConfirmed,
+    identitySource: loginState?.identitySource ?? null,
+    env: available
+      ? buildDownloadPassthroughEnv(options.envToken ?? options.siteKey ?? siteProfile?.host ?? inputUrl, {
+          sidecarPath,
+          cookieFile,
+          userDataDir,
+          passthroughMode,
+        })
+      : {},
+  });
+}
+
+export async function exportSiteDownloadPassthrough(inputUrl, settings = {}, options = {}, deps = {}) {
+  const authContext = options.authContext ?? await (deps.resolveSiteBrowserSessionOptions ?? resolveSiteBrowserSessionOptions)(
+    inputUrl,
+    settings,
+    options,
+  );
+  const authConfig = authContext?.authConfig ?? null;
+  if (!authConfig?.loginUrl) {
+    return createDownloadPassthroughResult({
+      reasonCode: 'unsupported',
+      userDataDir: authContext?.userDataDir ?? null,
+      verificationUrl: resolveAuthVerificationUrl(inputUrl, authContext?.authProfile ?? null, authConfig),
+    });
+  }
+  if (authContext.reuseLoginState !== true) {
+    return createDownloadPassthroughResult({
+      reasonCode: 'reuse-login-state-disabled',
+      userDataDir: authContext.userDataDir ?? null,
+      verificationUrl: resolveAuthVerificationUrl(inputUrl, authContext.authProfile ?? null, authConfig),
+    });
+  }
+  if (!authContext.userDataDir) {
+    return createDownloadPassthroughResult({
+      reasonCode: 'missing-user-data-dir',
+      verificationUrl: resolveAuthVerificationUrl(inputUrl, authContext.authProfile ?? null, authConfig),
+    });
+  }
+
+  const probeUrl = resolveAuthVerificationUrl(inputUrl, authContext.authProfile ?? null, authConfig)
+    || authConfig.postLoginUrl
+    || inputUrl;
+  let session = options.session ?? null;
+  const createdSession = !session;
+  try {
+    if (!session) {
+      const prefersVisibleAuthFlow = authConfig.preferVisibleBrowserForAuthenticatedFlows === true;
+      session = await (deps.openBrowserSession ?? openBrowserSession)({
+        browserPath: settings.browserPath,
+        headless: prefersVisibleAuthFlow ? false : settings.headless,
+        timeoutMs: settings.timeoutMs,
+        fullPage: false,
+        viewport: {
+          width: 1440,
+          height: 900,
+          deviceScaleFactor: 1,
+        },
+        userDataDir: authContext.userDataDir,
+        cleanupUserDataDirOnShutdown: authContext.cleanupUserDataDirOnShutdown,
+        startupUrl: probeUrl,
+      }, {
+        userDataDirPrefix: 'site-download-auth-',
+      });
+    }
+
+    if (options.navigate !== false) {
+      await session.navigateAndWait(probeUrl, buildAuthWaitPolicy(Math.min(settings.timeoutMs ?? 30_000, 12_000)));
+    }
+    const loginState = options.loginState ?? await (deps.inspectLoginState ?? inspectLoginState)(session, authConfig);
+    return await exportDownloadSessionPassthrough(session, inputUrl, authContext, {
+      ...options,
+      loginState,
+    }, deps);
+  } catch (error) {
+    return createDownloadPassthroughResult({
+      reasonCode: 'probe-failed',
+      userDataDir: authContext.userDataDir ?? null,
+      verificationUrl: probeUrl,
+      error: error?.message ?? String(error),
+    });
+  } finally {
+    if (createdSession && session) {
+      await session.close();
+    }
+  }
+}
+
 export async function inspectLoginState(session, authConfig) {
   return await session.callPageFunction(pageInspectLoginState, {
+    host: authConfig.host,
     loginUrl: authConfig.loginUrl,
     loginIndicatorSelectors: authConfig.loginIndicatorSelectors,
     loggedOutIndicatorSelectors: authConfig.loggedOutIndicatorSelectors,

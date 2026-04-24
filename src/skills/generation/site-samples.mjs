@@ -111,6 +111,65 @@ function normalizeDouyinSubpage(value) {
   }
 }
 
+function normalizeXiaohongshuDiscoverLabel(value) {
+  const normalized = cleanText(value);
+  if (!normalized) {
+    return null;
+  }
+  if (
+    normalized === '发现'
+    || normalized === '发现页'
+    || normalized === '/explore'
+    || normalized === 'explore'
+    || normalized === 'https://www.xiaohongshu.com/explore'
+  ) {
+    return '发现';
+  }
+  if (['图文', '视频', '用户'].includes(normalized)) {
+    return normalized;
+  }
+  return normalized;
+}
+
+function normalizeXiaohongshuAuthLabel(value) {
+  const normalized = cleanText(value);
+  if (!normalized) {
+    return null;
+  }
+  if (/register|注册/u.test(normalized)) {
+    return '注册页';
+  }
+  if (/login|登录|认证/u.test(normalized)) {
+    return '登录页';
+  }
+  return normalized;
+}
+
+function normalizeXiaohongshuUtilityLabel(value) {
+  const normalized = cleanText(value);
+  if (!normalized) {
+    return null;
+  }
+  if (/notification|通知|消息/u.test(normalized)) {
+    return '通知页';
+  }
+  if (/livelist|直播/u.test(normalized)) {
+    return '直播列表';
+  }
+  return normalized;
+}
+
+function cleanXiaohongshuSampleText(value) {
+  const normalized = cleanText(value);
+  if (!normalized) {
+    return null;
+  }
+  if (['undefined', 'null', 'none', 'n/a', '-'].includes(normalized.toLowerCase())) {
+    return null;
+  }
+  return normalized;
+}
+
 export function collectDouyinSamples(context) {
   const validationSamples = {
     ...(context.siteProfileDocument?.validationSamples ?? {}),
@@ -164,6 +223,77 @@ export function collectDouyinSamples(context) {
     categoryEntries,
     publicAuthorSubpages,
     authenticatedSubpages,
+  };
+}
+
+export function collectXiaohongshuSamples(context) {
+  const validationSamples = {
+    ...(context.siteProfileDocument?.validationSamples ?? {}),
+    ...(context.siteProfileDocument?.authValidationSamples ?? {}),
+    ...(context.liveSiteProfileDocument?.validationSamples ?? {}),
+    ...(context.liveSiteProfileDocument?.authValidationSamples ?? {}),
+  };
+  const states = toArray(context.statesDocument?.states);
+  const knownQueries = [
+    ...toArray(context.siteProfileDocument?.search?.knownQueries),
+    ...toArray(context.liveSiteProfileDocument?.search?.knownQueries),
+  ];
+  const defaultQueries = uniqueSortedStrings([
+    ...toArray(context.siteProfileDocument?.search?.defaultQueries),
+    ...toArray(context.liveSiteProfileDocument?.search?.defaultQueries),
+  ].map((item) => cleanXiaohongshuSampleText(item)).filter(Boolean));
+  const noteTitles = uniqueSortedStrings([
+    ...collectIntentTargetLabels(context, ['open-video', 'open-book', 'open-work'], 12),
+    ...collectStateDisplayTitles(context, ['content-detail-page', 'book-detail-page'], 12),
+    ...knownQueries.map((item) => cleanXiaohongshuSampleText(item?.title)),
+    ...states.map((state) => cleanXiaohongshuSampleText(state?.pageFacts?.noteTitle ?? state?.pageFacts?.title)),
+  ].filter(Boolean)).slice(0, 10);
+  const users = uniqueSortedStrings([
+    ...collectIntentTargetLabels(context, ['open-author', 'open-up', 'open-model', 'open-actress'], 12),
+    ...collectStateDisplayTitles(context, ['author-page'], 12),
+    ...knownQueries.map((item) => cleanXiaohongshuSampleText(item?.authorName)),
+    ...states.map((state) => cleanXiaohongshuSampleText(state?.pageFacts?.authorName ?? state?.pageFacts?.userName)),
+  ].filter(Boolean)).slice(0, 10);
+  const searchQueries = uniqueSortedStrings([
+    cleanXiaohongshuSampleText(validationSamples.videoSearchQuery),
+    ...defaultQueries,
+    ...collectSearchQueries(context.searchResultsDocument, 10),
+    ...collectIntentTargetLabels(context, ['search-video', 'search-book', 'search-work'], 10),
+    ...states.map((state) => cleanXiaohongshuSampleText(state?.pageFacts?.queryText)),
+  ].filter(Boolean)).slice(0, 10);
+  const discoverEntries = uniqueSortedStrings([
+    ...collectIntentTargetLabels(context, ['open-category'], 12).map(normalizeXiaohongshuDiscoverLabel),
+    ...collectStateDisplayTitles(context, ['home', 'category-page'], 12).map(normalizeXiaohongshuDiscoverLabel),
+    normalizeXiaohongshuDiscoverLabel(validationSamples.categoryPopularUrl),
+    ...toArray(context.siteProfileDocument?.navigation?.categoryLabelKeywords).map(normalizeXiaohongshuDiscoverLabel),
+    ...toArray(context.liveSiteProfileDocument?.navigation?.categoryLabelKeywords).map(normalizeXiaohongshuDiscoverLabel),
+    ...states.map((state) => normalizeXiaohongshuDiscoverLabel(state?.pageFacts?.categoryName ?? state?.pageFacts?.categoryPath)),
+  ]).filter(Boolean).slice(0, 8);
+  const authEntries = uniqueSortedStrings([
+    ...collectIntentTargetLabels(context, ['open-auth-page'], 8).map(normalizeXiaohongshuAuthLabel),
+    ...collectStateDisplayTitles(context, ['auth-page'], 8).map(normalizeXiaohongshuAuthLabel),
+    ...toArray(context.siteProfileDocument?.navigation?.authPathPrefixes).map(normalizeXiaohongshuAuthLabel),
+    ...toArray(context.siteProfileDocument?.pageTypes?.authPrefixes).map(normalizeXiaohongshuAuthLabel),
+    ...toArray(context.liveSiteProfileDocument?.navigation?.authPathPrefixes).map(normalizeXiaohongshuAuthLabel),
+    ...toArray(context.liveSiteProfileDocument?.pageTypes?.authPrefixes).map(normalizeXiaohongshuAuthLabel),
+    cleanText(context.siteProfileDocument?.authSession?.loginUrl) ? '登录页' : null,
+    cleanText(context.liveSiteProfileDocument?.authSession?.loginUrl) ? '登录页' : null,
+  ]).filter(Boolean).slice(0, 6);
+  const utilityEntries = uniqueSortedStrings([
+    ...collectIntentTargetLabels(context, ['open-utility-page'], 8).map(normalizeXiaohongshuUtilityLabel),
+    ...toArray(context.siteProfileDocument?.navigation?.utilityPathPrefixes).map(normalizeXiaohongshuUtilityLabel),
+    ...toArray(context.liveSiteProfileDocument?.navigation?.utilityPathPrefixes).map(normalizeXiaohongshuUtilityLabel),
+    ...states
+      .filter((state) => String(state?.pageType ?? '') === 'utility-page')
+      .map((state) => normalizeXiaohongshuUtilityLabel(state?.pageFacts?.utilityName ?? state?.title)),
+  ]).filter(Boolean).slice(0, 6);
+  return {
+    notes: noteTitles,
+    users,
+    searchQueries,
+    discoverEntries: discoverEntries.length ? discoverEntries : ['发现'],
+    authEntries,
+    utilityEntries,
   };
 }
 

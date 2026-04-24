@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
+import process from 'node:process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 
 import { pathExists, readJsonFile } from '../../src/infra/io.mjs';
@@ -1313,6 +1314,1243 @@ test('site-doctor skips authenticated douyin scenarios when reusable login is un
     assert.equal(report.profileQuarantined, false);
     assert.match(String(report.networkIdentityFingerprint ?? ''), /^[0-9a-f]{16}$/u);
     assert.match(report.warnings.join('\n'), /No reusable logged-in douyin session was detected/u);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('site-doctor uses xiaohongshu notification samples and reports the xiaohongshu scenario matrix', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-doctor-xiaohongshu-'));
+  const profilePath = path.resolve('profiles/www.xiaohongshu.com.json');
+  const profile = await readJsonFile(profilePath);
+  const observedRuns = [];
+  const observedProbeUrls = [];
+
+  try {
+    const report = await siteDoctor('https://www.xiaohongshu.com/explore', {
+      profilePath,
+      outDir: path.join(workspace, 'doctor'),
+    }, {
+      resolveSite: async () => ({ adapter: { id: 'xiaohongshu' } }),
+      resolveSiteAuthProfile: async () => ({
+        profile,
+        warnings: [],
+        filePath: profilePath,
+      }),
+      resolveSiteBrowserSessionOptions: async () => ({
+        reuseLoginState: true,
+        userDataDir: path.join(workspace, 'profiles', 'xiaohongshu.com'),
+        cleanupUserDataDirOnShutdown: false,
+        authConfig: {
+          loginUrl: profile.authSession.loginUrl,
+          postLoginUrl: profile.authSession.postLoginUrl,
+          verificationUrl: profile.authSession.verificationUrl,
+          keepaliveUrl: profile.authSession.keepaliveUrl,
+        },
+      }),
+      runAuthenticatedKeepalivePreflight: async () => ({
+        attempted: false,
+        ran: false,
+        reason: 'not-due',
+      }),
+      openBrowserSession: async (options) => {
+        observedProbeUrls.push({ startupUrl: options.startupUrl });
+        return {
+          async navigateAndWait(url) {
+            observedProbeUrls[observedProbeUrls.length - 1].navigateUrl = url;
+          },
+          async close() {},
+        };
+      },
+      inspectLoginState: async () => ({
+        loggedIn: true,
+        loginStateDetected: true,
+        identityConfirmed: true,
+        identitySource: 'selector:.notification-page',
+        currentUrl: profile.authValidationSamples.notificationUrl,
+        title: '通知',
+      }),
+      ensureCrawlerScript: async () => ({
+        status: 'generated',
+        scriptPath: path.join(workspace, 'crawler.py'),
+        metaPath: path.join(workspace, 'crawler.meta.json'),
+      }),
+      capture: async () => ({
+        status: 'success',
+        finalUrl: 'https://www.xiaohongshu.com/explore',
+        files: {
+          manifest: path.join(workspace, 'capture', 'manifest.json'),
+        },
+        error: null,
+      }),
+      expandStates: async (inputUrl, options) => {
+        observedRuns.push({
+          inputUrl,
+          searchQueries: options.searchQueries,
+          maxTriggers: options.maxTriggers,
+          maxCapturedStates: options.maxCapturedStates,
+        });
+        let states;
+        if (inputUrl === 'https://www.xiaohongshu.com/explore') {
+          states = [
+            {
+              state_id: 'xhs-home-search',
+              status: 'captured',
+              finalUrl: 'https://www.xiaohongshu.com/search_result?keyword=%E7%A9%BF%E6%90%AD',
+              pageType: 'search-results-page',
+              trigger: { kind: 'search-form' },
+              files: {},
+            },
+            {
+              state_id: 'xhs-home-detail',
+              status: 'captured',
+              finalUrl: profile.validationSamples.videoDetailUrl,
+              pageType: 'book-detail-page',
+              trigger: { kind: 'content-link' },
+              files: {},
+            },
+            {
+              state_id: 'xhs-home-author',
+              status: 'captured',
+              finalUrl: profile.validationSamples.authorUrl,
+              pageType: 'author-page',
+              trigger: { kind: 'safe-nav-link' },
+              files: {},
+            },
+          ];
+        } else if (inputUrl === profile.validationSamples.authorVideosUrl) {
+          states = [
+            {
+              state_id: 'xhs-author-home',
+              status: 'initial',
+              finalUrl: inputUrl,
+              pageType: 'author-page',
+              trigger: null,
+              files: {},
+            },
+            {
+              state_id: 'xhs-author-detail',
+              status: 'captured',
+              finalUrl: profile.validationSamples.videoDetailUrl,
+              pageType: 'book-detail-page',
+              trigger: { kind: 'content-link' },
+              files: {},
+            },
+          ];
+        } else if (inputUrl === profile.authValidationSamples.notificationUrl) {
+          states = [
+            {
+              state_id: 'xhs-notification',
+              status: 'initial',
+              finalUrl: inputUrl,
+              pageType: 'utility-page',
+              pageFacts: {
+                loginStateDetected: true,
+                identityConfirmed: true,
+                featuredContentCount: 0,
+                featuredAuthorCount: 0,
+              },
+              trigger: null,
+              files: {},
+            },
+          ];
+        } else {
+          throw new Error(`Unexpected scenario input: ${inputUrl}`);
+        }
+
+        return {
+          outDir: path.join(workspace, 'expand'),
+          summary: {
+            capturedStates: states.length,
+          },
+          warnings: [],
+          states,
+        };
+      },
+    });
+
+    assert.equal(observedProbeUrls[0]?.startupUrl, profile.authValidationSamples.notificationUrl);
+    assert.equal(observedProbeUrls[0]?.navigateUrl, profile.authValidationSamples.notificationUrl);
+    assert.deepEqual(observedRuns.map((entry) => entry.inputUrl), [
+      'https://www.xiaohongshu.com/explore',
+      profile.validationSamples.authorVideosUrl,
+      profile.authValidationSamples.notificationUrl,
+    ]);
+    assert.deepEqual(observedRuns[0].searchQueries, [profile.validationSamples.videoSearchQuery]);
+    assert.deepEqual(
+      observedRuns.map((entry) => ({ inputUrl: entry.inputUrl, maxTriggers: entry.maxTriggers, maxCapturedStates: entry.maxCapturedStates })),
+      [
+        { inputUrl: 'https://www.xiaohongshu.com/explore', maxTriggers: 6, maxCapturedStates: 3 },
+        { inputUrl: profile.validationSamples.authorVideosUrl, maxTriggers: 6, maxCapturedStates: 3 },
+        { inputUrl: profile.authValidationSamples.notificationUrl, maxTriggers: 6, maxCapturedStates: 3 },
+      ],
+    );
+    assert.equal(report.sessionReuseWorked, true);
+    assert.equal(report.authSession?.loginStateDetected, true);
+    assert.equal(report.authSession?.identityConfirmed, true);
+    assert.equal(report.authSession?.identitySource, 'selector:.notification-page');
+    assert.equal(report.authSession?.currentUrl, profile.authValidationSamples.notificationUrl);
+    assert.equal(report.authSession?.riskCauseCode, null);
+    assert.equal(report.authSession?.riskAction, null);
+    assert.equal(report.authSession?.profileQuarantined, false);
+    assert.match(String(report.authSession?.networkIdentityFingerprint ?? ''), /^[0-9a-f]{16}$/u);
+    assert.equal(report.search.valid, true);
+    assert.deepEqual(report.search.details, {
+      stateId: 'xhs-home-search',
+      finalUrl: 'https://www.xiaohongshu.com/search_result?keyword=%E7%A9%BF%E6%90%AD',
+      pageType: 'search-results-page',
+    });
+    assert.equal(report.detail.valid, true);
+    assert.deepEqual(report.detail.details, {
+      stateId: 'xhs-home-detail',
+      finalUrl: profile.validationSamples.videoDetailUrl,
+      pageType: 'book-detail-page',
+    });
+    assert.equal(report.author?.valid, true);
+    assert.deepEqual(report.author?.details, {
+      stateId: 'xhs-home-author',
+      finalUrl: profile.validationSamples.authorUrl,
+      pageType: 'author-page',
+    });
+    assert.equal(report.scenarios.length, 3);
+    assert.deepEqual(report.scenarios.map((entry) => entry.id), [
+      'home-search-note-detail-author',
+      'author-notes-to-detail',
+      'notification-inbox',
+    ]);
+    assert.ok(report.scenarios.every((entry) => entry.status === 'pass'));
+    assert.equal(report.scenarios[0].finalUrl, profile.validationSamples.authorUrl);
+    assert.equal(report.scenarios[0].semanticPageType, 'author-page');
+    assert.match(report.scenarios[0].note ?? '', /discover -> search-results -> content-detail -> author-page/u);
+    assert.equal(report.scenarios[2].reasonCode, 'ok');
+    assert.equal(report.scenarios[2].authRequired, true);
+    assert.equal(report.scenarios[2].expectedSemanticPageType, 'utility-page');
+    assert.equal(report.scenarios[2].featuredContentCount, 0);
+    assert.equal(report.riskCauseCode, null);
+    assert.equal(report.riskAction, null);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('site-doctor falls back Xiaohongshu tourist_search captures to canonical direct-search results and reports the recovered chain', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-doctor-xiaohongshu-direct-search-'));
+  const profilePath = path.resolve('profiles/www.xiaohongshu.com.json');
+  const profile = await readJsonFile(profilePath);
+  const fallbackSearchUrl = `https://www.xiaohongshu.com/search_result?keyword=${encodeURIComponent(profile.validationSamples.videoSearchQuery)}&type=51`;
+  const captureCalls = [];
+  const expandCalls = [];
+
+  try {
+    const report = await siteDoctor('https://www.xiaohongshu.com/explore', {
+      profilePath,
+      outDir: path.join(workspace, 'doctor'),
+    }, {
+      resolveSite: async () => ({ adapter: { id: 'xiaohongshu' } }),
+      resolveSiteAuthProfile: async () => ({
+        profile,
+        warnings: [],
+        filePath: profilePath,
+      }),
+      resolveSiteBrowserSessionOptions: async () => ({
+        reuseLoginState: true,
+        userDataDir: path.join(workspace, 'profiles', 'xiaohongshu.com'),
+        cleanupUserDataDirOnShutdown: false,
+        authConfig: {
+          loginUrl: profile.authSession.loginUrl,
+          postLoginUrl: profile.authSession.postLoginUrl,
+          verificationUrl: profile.authSession.verificationUrl,
+          keepaliveUrl: profile.authSession.keepaliveUrl,
+        },
+      }),
+      runAuthenticatedKeepalivePreflight: async () => ({
+        attempted: false,
+        ran: false,
+        reason: 'not-due',
+      }),
+      openBrowserSession: async () => ({
+        async navigateAndWait() {},
+        async close() {},
+      }),
+      inspectLoginState: async () => ({
+        loggedIn: true,
+        loginStateDetected: true,
+        identityConfirmed: true,
+        identitySource: 'selector:.notification-page',
+        currentUrl: profile.authValidationSamples.notificationUrl,
+        title: '通知',
+      }),
+      ensureCrawlerScript: async () => ({
+        status: 'generated',
+        scriptPath: path.join(workspace, 'crawler.py'),
+        metaPath: path.join(workspace, 'crawler.meta.json'),
+      }),
+      capture: async (inputUrl, options) => {
+        captureCalls.push({
+          inputUrl,
+          outDir: options.outDir,
+        });
+        return {
+          status: 'success',
+          finalUrl: inputUrl,
+          files: {
+            manifest: path.join(options.outDir, 'manifest.json'),
+          },
+          error: null,
+        };
+      },
+      expandStates: async (inputUrl, options) => {
+        expandCalls.push({
+          inputUrl,
+          outDir: options.outDir,
+          searchQueries: options.searchQueries,
+        });
+        if (inputUrl === 'https://www.xiaohongshu.com/explore') {
+          return {
+            outDir: path.join(workspace, 'expand-home'),
+            summary: { capturedStates: 1 },
+            warnings: [],
+            states: [
+              {
+                state_id: 'xhs-tourist-search',
+                status: 'captured',
+                finalUrl: 'https://www.xiaohongshu.com/explore?source=tourist_search',
+                pageType: 'search-results-page',
+                trigger: { kind: 'search-form' },
+                files: {},
+              },
+            ],
+          };
+        }
+        if (inputUrl === fallbackSearchUrl) {
+          return {
+            outDir: path.join(workspace, 'expand-direct-search'),
+            summary: { capturedStates: 3 },
+            warnings: [],
+            states: [
+              {
+                state_id: 'xhs-direct-search-result',
+                status: 'captured',
+                finalUrl: fallbackSearchUrl,
+                pageType: 'search-results-page',
+                trigger: { kind: 'search-form' },
+                files: {},
+              },
+              {
+                state_id: 'xhs-direct-detail',
+                status: 'captured',
+                finalUrl: profile.validationSamples.videoDetailUrl,
+                pageType: 'book-detail-page',
+                trigger: { kind: 'content-link' },
+                files: {},
+              },
+              {
+                state_id: 'xhs-direct-author',
+                status: 'captured',
+                finalUrl: profile.validationSamples.authorUrl,
+                pageType: 'author-page',
+                trigger: { kind: 'safe-nav-link' },
+                files: {},
+              },
+            ],
+          };
+        }
+        if (inputUrl === profile.validationSamples.authorVideosUrl) {
+          return {
+            outDir: path.join(workspace, 'expand-author'),
+            summary: { capturedStates: 2 },
+            warnings: [],
+            states: [
+              {
+                state_id: 'xhs-author-home',
+                status: 'initial',
+                finalUrl: inputUrl,
+                pageType: 'author-page',
+                trigger: null,
+                files: {},
+              },
+              {
+                state_id: 'xhs-author-detail',
+                status: 'captured',
+                finalUrl: profile.validationSamples.videoDetailUrl,
+                pageType: 'book-detail-page',
+                trigger: { kind: 'content-link' },
+                files: {},
+              },
+            ],
+          };
+        }
+        if (inputUrl === profile.authValidationSamples.notificationUrl) {
+          return {
+            outDir: path.join(workspace, 'expand-notification'),
+            summary: { capturedStates: 1 },
+            warnings: [],
+            states: [
+              {
+                state_id: 'xhs-notification',
+                status: 'initial',
+                finalUrl: inputUrl,
+                pageType: 'utility-page',
+                pageFacts: {
+                  loginStateDetected: true,
+                  identityConfirmed: true,
+                  featuredContentCount: 0,
+                  featuredAuthorCount: 0,
+                },
+                trigger: null,
+                files: {},
+              },
+            ],
+          };
+        }
+        throw new Error(`Unexpected scenario input: ${inputUrl}`);
+      },
+    });
+
+    const markdown = await readFile(report.reports.markdown, 'utf8');
+
+    assert.deepEqual(expandCalls.map((entry) => entry.inputUrl), [
+      'https://www.xiaohongshu.com/explore',
+      fallbackSearchUrl,
+      profile.validationSamples.authorVideosUrl,
+      profile.authValidationSamples.notificationUrl,
+    ]);
+    assert.deepEqual(expandCalls[0].searchQueries, [profile.validationSamples.videoSearchQuery]);
+    assert.deepEqual(expandCalls[1].searchQueries, []);
+    assert.match(expandCalls[1].outDir, /expand-direct-search/u);
+    assert.equal(
+      captureCalls.some((entry) => entry.inputUrl === fallbackSearchUrl && /capture-direct-search/u.test(entry.outDir)),
+      true,
+    );
+    assert.equal(report.search.valid, true);
+    assert.deepEqual(report.search.details, {
+      stateId: 'xiaohongshu-direct-search',
+      finalUrl: fallbackSearchUrl,
+      pageType: 'search-results-page',
+    });
+    assert.equal(report.detail.valid, true);
+    assert.deepEqual(report.detail.details, {
+      stateId: 'xhs-direct-detail',
+      finalUrl: profile.validationSamples.videoDetailUrl,
+      pageType: 'book-detail-page',
+    });
+    assert.equal(report.author?.valid, true);
+    assert.deepEqual(report.author?.details, {
+      stateId: 'xhs-direct-author',
+      finalUrl: profile.validationSamples.authorUrl,
+      pageType: 'author-page',
+    });
+    assert.equal(report.scenarios.find((entry) => entry.id === 'home-search-note-detail-author')?.status, 'pass');
+    assert.equal(report.scenarios.find((entry) => entry.id === 'home-search-note-detail-author')?.finalUrl, profile.validationSamples.authorUrl);
+    assert.match(report.warnings.join('\n'), /fell back from tourist_search to a canonical \/search_result capture/u);
+    assert.match(markdown, /## Warnings/u);
+    assert.match(markdown, /fell back from tourist_search to a canonical \/search_result capture/u);
+    assert.match(markdown, /home-search-note-detail-author: pass/u);
+    assert.match(markdown, /notification-inbox: pass/u);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('site-doctor routes Xiaohongshu download preflight through the Xiaohongshu action entrypoint', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-doctor-xiaohongshu-download-'));
+  const profilePath = path.resolve('profiles/www.xiaohongshu.com.json');
+  const profile = await readJsonFile(profilePath);
+  const runProcessCalls = [];
+  const passthroughSidecarPath = path.join(workspace, 'profiles', 'xiaohongshu.com', '.bws', 'xiaohongshu-download-auth.json');
+  const passthroughCookieFile = path.join(workspace, 'profiles', 'xiaohongshu.com', '.bws', 'xiaohongshu-download-cookies.txt');
+
+  try {
+    const report = await siteDoctor('https://www.xiaohongshu.com/explore', {
+      profilePath,
+      outDir: path.join(workspace, 'doctor'),
+      checkDownload: true,
+    }, {
+      resolveSite: async () => ({ adapter: { id: 'xiaohongshu' } }),
+      resolveSiteAuthProfile: async () => ({
+        profile,
+        warnings: [],
+        filePath: profilePath,
+      }),
+      resolveSiteBrowserSessionOptions: async () => ({
+        reuseLoginState: true,
+        userDataDir: path.join(workspace, 'profiles', 'xiaohongshu.com'),
+        cleanupUserDataDirOnShutdown: false,
+        authConfig: {
+          loginUrl: profile.authSession.loginUrl,
+          postLoginUrl: profile.authSession.postLoginUrl,
+          verificationUrl: profile.authSession.verificationUrl,
+          keepaliveUrl: profile.authSession.keepaliveUrl,
+        },
+      }),
+      runAuthenticatedKeepalivePreflight: async () => ({
+        attempted: false,
+        ran: false,
+        reason: 'not-due',
+      }),
+      openBrowserSession: async () => ({
+        async navigateAndWait() {},
+        async close() {},
+      }),
+      inspectLoginState: async () => ({
+        loggedIn: true,
+        loginStateDetected: true,
+        identityConfirmed: true,
+        identitySource: 'selector:.notification-page',
+        currentUrl: profile.authValidationSamples.notificationUrl,
+        title: '通知',
+      }),
+      ensureCrawlerScript: async () => ({
+        status: 'generated',
+        scriptPath: path.join(workspace, 'crawler.py'),
+        metaPath: path.join(workspace, 'crawler.meta.json'),
+      }),
+      capture: async () => ({
+        status: 'success',
+        finalUrl: 'https://www.xiaohongshu.com/explore',
+        files: {
+          manifest: path.join(workspace, 'capture', 'manifest.json'),
+        },
+        error: null,
+      }),
+      expandStates: async (inputUrl, options) => {
+        let states;
+        if (inputUrl === 'https://www.xiaohongshu.com/explore') {
+          states = [
+            {
+              state_id: 'xhs-home-search',
+              status: 'captured',
+              finalUrl: 'https://www.xiaohongshu.com/search_result?keyword=%E7%A9%BF%E6%90%AD',
+              pageType: 'search-results-page',
+              trigger: { kind: 'search-form' },
+              files: {},
+            },
+            {
+              state_id: 'xhs-home-detail',
+              status: 'captured',
+              finalUrl: profile.validationSamples.videoDetailUrl,
+              pageType: 'book-detail-page',
+              trigger: { kind: 'content-link' },
+              files: {},
+            },
+            {
+              state_id: 'xhs-home-author',
+              status: 'captured',
+              finalUrl: profile.validationSamples.authorUrl,
+              pageType: 'author-page',
+              trigger: { kind: 'safe-nav-link' },
+              files: {},
+            },
+          ];
+        } else if (inputUrl === profile.validationSamples.authorVideosUrl) {
+          states = [
+            {
+              state_id: 'xhs-author-home',
+              status: 'initial',
+              finalUrl: inputUrl,
+              pageType: 'author-page',
+              trigger: null,
+              files: {},
+            },
+            {
+              state_id: 'xhs-author-detail',
+              status: 'captured',
+              finalUrl: profile.validationSamples.videoDetailUrl,
+              pageType: 'book-detail-page',
+              trigger: { kind: 'content-link' },
+              files: {},
+            },
+          ];
+        } else if (inputUrl === profile.authValidationSamples.notificationUrl) {
+          states = [
+            {
+              state_id: 'xhs-notification',
+              status: 'initial',
+              finalUrl: inputUrl,
+              pageType: 'utility-page',
+              pageFacts: {
+                loginStateDetected: true,
+                identityConfirmed: true,
+              },
+              trigger: null,
+              files: {},
+            },
+          ];
+        } else {
+          throw new Error(`Unexpected scenario input: ${inputUrl}`);
+        }
+        return {
+          outDir: path.join(workspace, 'expand'),
+          summary: {
+            capturedStates: states.length,
+          },
+          warnings: [],
+          states,
+        };
+      },
+      exportSiteDownloadPassthrough: async () => ({
+        available: true,
+        reasonCode: null,
+        passthroughMode: 'cookie-header',
+        sessionProfileAvailable: true,
+        cookieHeaderAvailable: true,
+        cookieCount: 2,
+        cookieNames: ['a1', 'web_session'],
+        cookieDomains: ['.xiaohongshu.com', 'www.xiaohongshu.com'],
+        headerNames: ['Accept-Language', 'Cookie', 'Origin', 'Referer', 'User-Agent'],
+        sidecarPath: passthroughSidecarPath,
+        cookieFile: passthroughCookieFile,
+        userDataDir: path.join(workspace, 'profiles', 'xiaohongshu.com'),
+        verificationUrl: profile.authValidationSamples.notificationUrl,
+        currentUrl: profile.authValidationSamples.notificationUrl,
+        title: '通知',
+        loginStateDetected: true,
+        identityConfirmed: true,
+        identitySource: 'selector:.notification-page',
+        env: {
+          BWS_XIAOHONGSHU_DOWNLOAD_AUTH_SIDECAR: passthroughSidecarPath,
+          BWS_XIAOHONGSHU_DOWNLOAD_COOKIE_FILE: passthroughCookieFile,
+          BWS_XIAOHONGSHU_DOWNLOAD_USER_DATA_DIR: path.join(workspace, 'profiles', 'xiaohongshu.com'),
+          BWS_XIAOHONGSHU_DOWNLOAD_PASSTHROUGH_MODE: 'cookie-header',
+        },
+      }),
+      runProcess: async (command, args, options) => {
+        runProcessCalls.push({ command, args, options });
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            ok: true,
+            action: 'download',
+            reasonCode: 'download-started',
+            resolvedInputs: [profile.validationSamples.videoDetailUrl],
+            resolution: {
+              inputKinds: {
+                'note-detail': 1,
+                'author-note-list': 1,
+                'search-query': 1,
+              },
+              attemptedPages: 2,
+              attemptedNotes: 3,
+              resolvedNotes: 2,
+              skippedVideoNotes: 1,
+              skippedNoImageNotes: 0,
+              failedNotes: 0,
+            },
+            download: {
+              runDir: path.join(workspace, 'note-downloads', 'www.xiaohongshu.com', '20260423T130000000Z'),
+              summary: {
+                total: 2,
+                successful: 0,
+                partial: 0,
+                failed: 0,
+                planned: 2,
+              },
+              warnings: [],
+            },
+            downloadSession: {
+              status: 'sidecar-reused',
+              cookieCount: 2,
+              userDataDir: path.join(workspace, 'profiles', 'xiaohongshu.com'),
+              finalUrl: profile.authValidationSamples.notificationUrl,
+              sidecarPath: passthroughSidecarPath,
+            },
+            actionSummary: {
+              total: 2,
+              successful: 0,
+              partial: 0,
+              failed: 0,
+              planned: 2,
+              runDir: path.join(workspace, 'note-downloads', 'www.xiaohongshu.com', '20260423T130000000Z'),
+            },
+          }),
+          stderr: '',
+        };
+      },
+    });
+
+    assert.equal(report.download?.valid, true);
+    assert.deepEqual(report.download?.details?.inputSources, ['author-note-list', 'note-detail', 'search-query']);
+    assert.equal(report.download?.details?.resolution?.resolvedNotes, 2);
+    assert.equal(report.download?.details?.summary?.planned, 2);
+    assert.deepEqual(report.download?.details?.resolvedInputs, [profile.validationSamples.videoDetailUrl]);
+    assert.equal(report.download?.details?.downloadSession?.status, 'sidecar-reused');
+    assert.equal(report.download?.details?.downloadSession?.cookieCount, 2);
+    assert.equal(report.download?.details?.authPassthrough?.available, true);
+    assert.equal(report.download?.details?.authPassthrough?.passthroughMode, 'cookie-header');
+    assert.equal(report.download?.details?.authPassthrough?.cookieCount, 2);
+    assert.equal(report.download?.details?.authPassthrough?.sidecarPath, passthroughSidecarPath);
+    assert.equal(report.download?.details?.authPassthrough?.cookieFile, passthroughCookieFile);
+    assert.equal(runProcessCalls.length, 1);
+    assert.equal(runProcessCalls[0].command, process.execPath);
+    assert.match(String(runProcessCalls[0].args[0]).replace(/\\/gu, '/'), /\/src\/entrypoints\/sites\/xiaohongshu-action\.mjs$/u);
+    assert.ok(runProcessCalls[0].args.includes('--dry-run'));
+    assert.ok(runProcessCalls[0].args.includes('--query'));
+    assert.equal(runProcessCalls[0].args[runProcessCalls[0].args.indexOf('--query') + 1], profile.validationSamples.videoSearchQuery);
+    assert.equal(runProcessCalls[0].args[runProcessCalls[0].args.indexOf('--profile-path') + 1], profilePath);
+    assert.equal(runProcessCalls[0].options.env.BWS_XIAOHONGSHU_DOWNLOAD_AUTH_SIDECAR, passthroughSidecarPath);
+    assert.equal(runProcessCalls[0].options.env.BWS_XIAOHONGSHU_DOWNLOAD_COOKIE_FILE, passthroughCookieFile);
+    assert.equal(runProcessCalls[0].options.env.BWS_XIAOHONGSHU_DOWNLOAD_PASSTHROUGH_MODE, 'cookie-header');
+    assert.equal(runProcessCalls[0].options.env.BWS_XIAOHONGSHU_DOWNLOAD_USER_DATA_DIR, path.join(workspace, 'profiles', 'xiaohongshu.com'));
+    const markdown = await readFile(report.reports.markdown, 'utf8');
+    assert.match(markdown, /## Download Auth Passthrough/u);
+    assert.match(markdown, /Mode: cookie-header/u);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('site-doctor skips xiaohongshu notification scenario when auth bootstrap still cannot reuse login state', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-doctor-xiaohongshu-auth-missing-'));
+  const profilePath = path.resolve('profiles/www.xiaohongshu.com.json');
+  const profile = await readJsonFile(profilePath);
+  const observedRuns = [];
+  const observedProbeUrls = [];
+  const loginBootstrapCalls = [];
+
+  try {
+    const report = await siteDoctor('https://www.xiaohongshu.com/explore', {
+      profilePath,
+      outDir: path.join(workspace, 'doctor'),
+    }, {
+      resolveSite: async () => ({ adapter: { id: 'xiaohongshu' } }),
+      resolveSiteAuthProfile: async () => ({
+        profile,
+        warnings: [],
+        filePath: profilePath,
+      }),
+      resolveSiteBrowserSessionOptions: async () => ({
+        reuseLoginState: true,
+        userDataDir: path.join(workspace, 'profiles', 'xiaohongshu.com'),
+        cleanupUserDataDirOnShutdown: false,
+        authConfig: {
+          loginUrl: profile.authSession.loginUrl,
+          postLoginUrl: profile.authSession.postLoginUrl,
+          verificationUrl: profile.authSession.verificationUrl,
+          keepaliveUrl: profile.authSession.keepaliveUrl,
+        },
+      }),
+      runAuthenticatedKeepalivePreflight: async () => ({
+        attempted: false,
+        ran: false,
+        reason: 'not-due',
+      }),
+      openBrowserSession: async (options) => {
+        observedProbeUrls.push({ startupUrl: options.startupUrl });
+        return {
+          async navigateAndWait(url) {
+            observedProbeUrls[observedProbeUrls.length - 1].navigateUrl = url;
+          },
+          async close() {},
+        };
+      },
+      inspectLoginState: async () => ({
+        loggedIn: false,
+        loginStateDetected: false,
+        identityConfirmed: false,
+        identitySource: null,
+        currentUrl: profile.authSession.loginUrl,
+        title: 'xiaohongshu login',
+      }),
+      siteLogin: async (_inputUrl, options) => {
+        loginBootstrapCalls.push(options);
+        return {
+          site: {
+            runtimePurpose: 'login',
+          },
+          auth: {
+            status: 'credentials-unavailable',
+            autoLogin: true,
+            waitedForManualLogin: false,
+            credentialsSource: null,
+            loginStateDetected: false,
+            identityConfirmed: false,
+            identitySource: null,
+            persistenceVerified: false,
+            currentUrl: profile.authSession.loginUrl,
+            runtimeUrl: profile.authValidationSamples.notificationUrl,
+            title: 'xiaohongshu login',
+            riskCauseCode: 'session-invalid',
+            riskAction: 'run-keepalive-or-auto-login',
+            networkIdentityFingerprint: {
+              fingerprint: 'feedfacefeedface',
+            },
+            profileQuarantined: false,
+          },
+          reports: {
+            json: path.join(workspace, 'site-login.json'),
+            markdown: path.join(workspace, 'site-login.md'),
+          },
+        };
+      },
+      ensureCrawlerScript: async () => ({
+        status: 'generated',
+        scriptPath: path.join(workspace, 'crawler.py'),
+        metaPath: path.join(workspace, 'crawler.meta.json'),
+      }),
+      capture: async () => ({
+        status: 'success',
+        finalUrl: 'https://www.xiaohongshu.com/explore',
+        files: {
+          manifest: path.join(workspace, 'capture', 'manifest.json'),
+        },
+        error: null,
+      }),
+      expandStates: async (inputUrl, options) => {
+        observedRuns.push({
+          inputUrl,
+          searchQueries: options.searchQueries,
+        });
+        return {
+          outDir: path.join(workspace, 'expand'),
+          summary: { capturedStates: 2 },
+          warnings: [],
+          states: inputUrl === 'https://www.xiaohongshu.com/explore' ? [
+            {
+              state_id: 'xhs-home-search',
+              status: 'captured',
+              finalUrl: 'https://www.xiaohongshu.com/search_result?keyword=%E7%A9%BF%E6%90%AD',
+              pageType: 'search-results-page',
+              trigger: { kind: 'search-form' },
+              files: {},
+            },
+            {
+              state_id: 'xhs-home-detail',
+              status: 'captured',
+              finalUrl: profile.validationSamples.videoDetailUrl,
+              pageType: 'book-detail-page',
+              trigger: { kind: 'content-link' },
+              files: {},
+            },
+            {
+              state_id: 'xhs-home-author',
+              status: 'captured',
+              finalUrl: profile.validationSamples.authorUrl,
+              pageType: 'author-page',
+              trigger: { kind: 'safe-nav-link' },
+              files: {},
+            },
+          ] : [
+            {
+              state_id: 'xhs-author-detail',
+              status: 'captured',
+              finalUrl: profile.validationSamples.videoDetailUrl,
+              pageType: 'book-detail-page',
+              trigger: { kind: 'content-link' },
+              files: {},
+            },
+          ],
+        };
+      },
+    });
+
+    const notificationScenario = report.scenarios.find((entry) => entry.id === 'notification-inbox');
+    assert.equal(observedProbeUrls[0]?.startupUrl, profile.authValidationSamples.notificationUrl);
+    assert.equal(observedProbeUrls[0]?.navigateUrl, profile.authValidationSamples.notificationUrl);
+    assert.deepEqual(observedRuns.map((entry) => entry.inputUrl), [
+      'https://www.xiaohongshu.com/explore',
+      profile.validationSamples.authorVideosUrl,
+    ]);
+    assert.equal(loginBootstrapCalls.length, 1);
+    assert.equal(loginBootstrapCalls[0].waitForManualLogin, false);
+    assert.equal(loginBootstrapCalls[0].headless, false);
+    assert.deepEqual(observedRuns[0].searchQueries, [profile.validationSamples.videoSearchQuery]);
+    assert.equal(report.sessionReuseWorked, false);
+    assert.equal(report.authSession?.bootstrapAttempted, true);
+    assert.equal(report.authSession?.bootstrapStatus, 'credentials-unavailable');
+    assert.equal(report.authSession?.bootstrapManualLoginRequired, true);
+    assert.equal(report.authSession?.bootstrapPersistenceVerified, false);
+    assert.equal(report.authSession?.currentUrl, profile.authSession.loginUrl);
+    assert.equal(report.scenarios.find((entry) => entry.id === 'author-notes-to-detail')?.status, 'pass');
+    assert.equal(notificationScenario?.status, 'skipped');
+    assert.equal(notificationScenario?.reasonCode, 'not-logged-in');
+    assert.equal(notificationScenario?.authRequired, true);
+    assert.equal(notificationScenario?.riskCauseCode, null);
+    assert.equal(report.riskCauseCode, 'session-invalid');
+    assert.equal(report.riskAction, 'run-keepalive-or-auto-login');
+    assert.equal(report.profileQuarantined, false);
+    assert.match(String(report.networkIdentityFingerprint ?? ''), /^[0-9a-f]{16}$/u);
+    assert.match(report.warnings.join('\n'), /No reusable logged-in xiaohongshu session was detected/u);
+    assert.match(report.warnings.join('\n'), /Attempted xiaohongshu auth bootstrap via site-login; status=credentials-unavailable/u);
+    assert.match(report.nextActions.join('\n'), /Run Xiaohongshu site-login in a visible browser and complete one manual login/u);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('site-doctor uses Xiaohongshu auth bootstrap to recover notification validation when site-login reuses the session', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-doctor-xiaohongshu-auth-bootstrap-'));
+  const profilePath = path.resolve('profiles/www.xiaohongshu.com.json');
+  const profile = await readJsonFile(profilePath);
+  const observedRuns = [];
+  const observedProbeUrls = [];
+  const loginBootstrapCalls = [];
+
+  try {
+    const report = await siteDoctor('https://www.xiaohongshu.com/explore', {
+      profilePath,
+      outDir: path.join(workspace, 'doctor'),
+    }, {
+      resolveSite: async () => ({ adapter: { id: 'xiaohongshu' } }),
+      resolveSiteAuthProfile: async () => ({
+        profile,
+        warnings: [],
+        filePath: profilePath,
+      }),
+      resolveSiteBrowserSessionOptions: async () => ({
+        reuseLoginState: true,
+        userDataDir: path.join(workspace, 'profiles', 'xiaohongshu.com'),
+        cleanupUserDataDirOnShutdown: false,
+        authConfig: {
+          loginUrl: profile.authSession.loginUrl,
+          postLoginUrl: profile.authSession.postLoginUrl,
+          verificationUrl: profile.authSession.verificationUrl,
+          keepaliveUrl: profile.authSession.keepaliveUrl,
+          preferVisibleBrowserForAuthenticatedFlows: true,
+        },
+      }),
+      runAuthenticatedKeepalivePreflight: async () => ({
+        attempted: false,
+        ran: false,
+        reason: 'not-due',
+      }),
+      openBrowserSession: async (options) => {
+        observedProbeUrls.push({ startupUrl: options.startupUrl });
+        return {
+          async navigateAndWait(url) {
+            observedProbeUrls[observedProbeUrls.length - 1].navigateUrl = url;
+          },
+          async close() {},
+        };
+      },
+      inspectLoginState: async () => ({
+        loggedIn: false,
+        loginStateDetected: false,
+        identityConfirmed: false,
+        identitySource: null,
+        currentUrl: profile.authSession.loginUrl,
+        title: 'xiaohongshu login',
+      }),
+      siteLogin: async (_inputUrl, options) => {
+        loginBootstrapCalls.push(options);
+        return {
+          site: {
+            runtimePurpose: 'login',
+          },
+          auth: {
+            status: 'session-reused',
+            autoLogin: true,
+            waitedForManualLogin: false,
+            credentialsSource: 'wincred:BrowserWikiSkill:xiaohongshu.com',
+            loginStateDetected: true,
+            identityConfirmed: true,
+            identitySource: 'selector:.notification-page .user-avatar img',
+            persistenceVerified: true,
+            currentUrl: profile.authValidationSamples.notificationUrl,
+            runtimeUrl: profile.authValidationSamples.notificationUrl,
+            title: '通知',
+            riskCauseCode: null,
+            riskAction: null,
+            networkIdentityFingerprint: {
+              fingerprint: 'feedfacefeedface',
+            },
+            profileQuarantined: false,
+          },
+          reports: {
+            json: path.join(workspace, 'site-login.json'),
+            markdown: path.join(workspace, 'site-login.md'),
+          },
+        };
+      },
+      ensureCrawlerScript: async () => ({
+        status: 'generated',
+        scriptPath: path.join(workspace, 'crawler.py'),
+        metaPath: path.join(workspace, 'crawler.meta.json'),
+      }),
+      capture: async () => ({
+        status: 'success',
+        finalUrl: 'https://www.xiaohongshu.com/explore',
+        files: {
+          manifest: path.join(workspace, 'capture', 'manifest.json'),
+        },
+        error: null,
+      }),
+      expandStates: async (inputUrl, options) => {
+        observedRuns.push({
+          inputUrl,
+          searchQueries: options.searchQueries,
+        });
+        let states;
+        if (inputUrl === 'https://www.xiaohongshu.com/explore') {
+          states = [
+            {
+              state_id: 'xhs-home-search',
+              status: 'captured',
+              finalUrl: 'https://www.xiaohongshu.com/search_result?keyword=%E7%A9%BF%E6%90%AD',
+              pageType: 'search-results-page',
+              trigger: { kind: 'search-form' },
+              files: {},
+            },
+            {
+              state_id: 'xhs-home-detail',
+              status: 'captured',
+              finalUrl: profile.validationSamples.videoDetailUrl,
+              pageType: 'book-detail-page',
+              trigger: { kind: 'content-link' },
+              files: {},
+            },
+            {
+              state_id: 'xhs-home-author',
+              status: 'captured',
+              finalUrl: profile.validationSamples.authorUrl,
+              pageType: 'author-page',
+              trigger: { kind: 'safe-nav-link' },
+              files: {},
+            },
+          ];
+        } else if (inputUrl === profile.validationSamples.authorVideosUrl) {
+          states = [
+            {
+              state_id: 'xhs-author-home',
+              status: 'initial',
+              finalUrl: inputUrl,
+              pageType: 'author-page',
+              trigger: null,
+              files: {},
+            },
+            {
+              state_id: 'xhs-author-detail',
+              status: 'captured',
+              finalUrl: profile.validationSamples.videoDetailUrl,
+              pageType: 'book-detail-page',
+              trigger: { kind: 'content-link' },
+              files: {},
+            },
+          ];
+        } else if (inputUrl === profile.authValidationSamples.notificationUrl) {
+          states = [
+            {
+              state_id: 'xhs-notification',
+              status: 'initial',
+              finalUrl: inputUrl,
+              pageType: 'utility-page',
+              pageFacts: {
+                loginStateDetected: true,
+                identityConfirmed: true,
+                featuredContentCount: 0,
+                featuredAuthorCount: 0,
+              },
+              trigger: null,
+              files: {},
+            },
+          ];
+        } else {
+          throw new Error(`Unexpected scenario input: ${inputUrl}`);
+        }
+
+        return {
+          outDir: path.join(workspace, 'expand'),
+          summary: {
+            capturedStates: states.length,
+          },
+          warnings: [],
+          states,
+        };
+      },
+    });
+
+    assert.equal(loginBootstrapCalls.length, 1);
+    assert.equal(loginBootstrapCalls[0].waitForManualLogin, false);
+    assert.equal(loginBootstrapCalls[0].headless, false);
+    assert.deepEqual(observedProbeUrls[0], {
+      startupUrl: profile.authValidationSamples.notificationUrl,
+      navigateUrl: profile.authValidationSamples.notificationUrl,
+    });
+    assert.deepEqual(observedRuns.map((entry) => entry.inputUrl), [
+      'https://www.xiaohongshu.com/explore',
+      profile.validationSamples.authorVideosUrl,
+      profile.authValidationSamples.notificationUrl,
+    ]);
+    assert.equal(report.sessionReuseWorked, true);
+    assert.equal(report.authSession?.bootstrapAttempted, true);
+    assert.equal(report.authSession?.bootstrapStatus, 'session-reused');
+    assert.equal(report.authSession?.bootstrapCredentialsSource, 'wincred:BrowserWikiSkill:xiaohongshu.com');
+    assert.equal(report.authSession?.bootstrapPersistenceVerified, true);
+    assert.equal(report.authSession?.bootstrapManualLoginRequired, false);
+    assert.equal(report.authSession?.identityConfirmed, true);
+    assert.equal(report.authSession?.currentUrl, profile.authValidationSamples.notificationUrl);
+    assert.equal(report.scenarios.find((entry) => entry.id === 'notification-inbox')?.status, 'pass');
+    assert.match(report.warnings.join('\n'), /Attempted xiaohongshu auth bootstrap via site-login; status=session-reused/u);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('site-doctor prioritizes Xiaohongshu restriction-page risk and runs one visible-browser recovery attempt', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-doctor-xiaohongshu-risk-'));
+  const profilePath = path.resolve('profiles/www.xiaohongshu.com.json');
+  const profile = await readJsonFile(profilePath);
+  const captureHeadlessModes = [];
+  const keepaliveCalls = [];
+  let captureCalls = 0;
+
+  try {
+    const report = await siteDoctor('https://www.xiaohongshu.com/explore', {
+      profilePath,
+      outDir: path.join(workspace, 'doctor'),
+    }, {
+      resolveSite: async () => ({ adapter: { id: 'xiaohongshu' } }),
+      resolveSiteAuthProfile: async () => ({
+        profile,
+        warnings: [],
+        filePath: profilePath,
+      }),
+      resolveSiteBrowserSessionOptions: async () => ({
+        reuseLoginState: true,
+        userDataDir: path.join(workspace, 'profiles', 'xiaohongshu.com'),
+        cleanupUserDataDirOnShutdown: false,
+        authConfig: {
+          loginUrl: profile.authSession.loginUrl,
+          postLoginUrl: profile.authSession.postLoginUrl,
+          verificationUrl: profile.authSession.verificationUrl,
+          keepaliveUrl: profile.authSession.keepaliveUrl,
+          preferVisibleBrowserForAuthenticatedFlows: true,
+        },
+      }),
+      runAuthenticatedKeepalivePreflight: async () => ({
+        attempted: false,
+        ran: false,
+        reason: 'not-due',
+      }),
+      openBrowserSession: async () => ({
+        async navigateAndWait() {},
+        async close() {},
+      }),
+      ensureAuthenticatedSession: async () => null,
+      inspectLoginState: async () => ({
+        loggedIn: false,
+        loginStateDetected: false,
+        identityConfirmed: false,
+        identitySource: null,
+      }),
+      ensureCrawlerScript: async () => ({
+        status: 'generated',
+        scriptPath: path.join(workspace, 'crawler.py'),
+        metaPath: path.join(workspace, 'crawler.meta.json'),
+      }),
+      capture: async (_inputUrl, options) => {
+        captureCalls += 1;
+        captureHeadlessModes.push(options.headless);
+        return {
+          status: 'success',
+          finalUrl: 'https://www.xiaohongshu.com/website-login/error?error_code=300012&redirectPath=%2Fexplore',
+          title: '\u5b89\u5168\u9650\u5236',
+          pageType: 'auth-page',
+          pageFacts: {
+            antiCrawlDetected: true,
+            antiCrawlSignals: ['ip-risk', 'risk-control', 'verify'],
+            antiCrawlReasonCode: 'anti-crawl-verify',
+            riskPageDetected: true,
+            riskPageCode: '300012',
+            riskPageMessage: '\u8bf7\u5207\u6362\u53ef\u9760\u7f51\u7edc\u73af\u5883\u540e\u91cd\u8bd5',
+            riskPageTitle: '\u5b89\u5168\u9650\u5236',
+            redirectPath: '/explore',
+          },
+          runtimeEvidence: {
+            antiCrawlDetected: true,
+            antiCrawlSignals: ['ip-risk', 'risk-control', 'verify'],
+            antiCrawlReasonCode: 'anti-crawl-verify',
+            networkRiskDetected: true,
+            noDedicatedIpRiskDetected: true,
+          },
+          files: {
+            manifest: path.join(options.outDir, `manifest-${captureCalls}.json`),
+          },
+          error: null,
+        };
+      },
+      expandStates: async () => {
+        throw new Error('expandStates should not run while Xiaohongshu is still on the restriction page');
+      },
+      siteLogin: async () => ({
+        auth: {
+          status: 'credentials-unavailable',
+          loginStateDetected: false,
+          identityConfirmed: false,
+          identitySource: null,
+          currentUrl: profile.authSession.loginUrl,
+          title: 'Sign in - Xiaohongshu',
+          persistenceVerified: false,
+          waitedForManualLogin: false,
+          credentialsSource: null,
+          networkIdentityFingerprint: null,
+          profileQuarantined: false,
+        },
+        reports: {
+          json: path.join(workspace, 'site-login', 'report.json'),
+          markdown: path.join(workspace, 'site-login', 'report.md'),
+        },
+      }),
+      siteKeepalive: async (_inputUrl, options) => {
+        keepaliveCalls.push(options);
+        return {
+          keepalive: {
+            status: 'kept-alive',
+            networkIdentityFingerprint: 'deadbeefdeadbeef',
+            warmupSummary: {
+              attempted: true,
+              completed: true,
+              urls: [profile.authSession.keepaliveUrl],
+            },
+            sessionHealthSummary: {
+              keepaliveDue: false,
+              successfulKeepalives: 2,
+            },
+          },
+          loginReport: {
+            auth: {
+              warmupSummary: {
+                attempted: true,
+                completed: true,
+                urls: [profile.authSession.keepaliveUrl],
+              },
+            },
+          },
+          reports: {
+            json: path.join(workspace, 'keepalive', 'report.json'),
+            markdown: path.join(workspace, 'keepalive', 'report.md'),
+          },
+        };
+      },
+    });
+
+    assert.equal(captureCalls, 2);
+    assert.deepEqual(captureHeadlessModes, [false, false]);
+    assert.equal(keepaliveCalls.length, 1);
+    assert.equal(keepaliveCalls[0].headless, false);
+    assert.equal(keepaliveCalls[0].reuseLoginState, true);
+    assert.equal(report.capture.status, 'pass');
+    assert.equal(report.capture.details?.initialRestrictionDetected, true);
+    assert.equal(report.capture.details?.restrictionDetected, true);
+    assert.equal(report.capture.details?.initialRiskPageCode, '300012');
+    assert.equal(report.capture.details?.recoveryAttempted, true);
+    assert.equal(report.capture.details?.recoveryStatus, 'still-blocked');
+    assert.deepEqual(report.antiCrawlSignals, ['ip-risk', 'risk-control', 'verify']);
+    assert.equal(report.antiCrawlReasonCode, 'anti-crawl-verify');
+    assert.equal(report.recoveryAttempted, true);
+    assert.equal(report.recoveryStatus, 'still-blocked');
+    assert.equal(report.riskCauseCode, 'browser-fingerprint-risk');
+    assert.equal(report.riskAction, 'use-visible-browser-warmup');
+    assert.equal(report.expand.status, 'skipped');
+    assert.equal(report.search.status, 'fail');
+    assert.equal(report.detail.status, 'fail');
+    assert.equal(report.author?.status, 'fail');
+    assert.equal(report.scenarios.find((entry) => entry.id === 'home-search-note-detail-author')?.riskCauseCode, 'browser-fingerprint-risk');
+    assert.equal(report.scenarios.find((entry) => entry.id === 'author-notes-to-detail')?.riskAction, 'use-visible-browser-warmup');
+    assert.equal(report.scenarios.find((entry) => entry.id === 'notification-inbox')?.reasonCode, 'not-logged-in');
+    assert.match(report.warnings.join('\n'), /capture succeeded on restriction page/i);
+    assert.match(report.nextActions.join('\n'), /visible browser/i);
+    assert.match(report.nextActions.join('\n'), /reliable network identity/i);
+    assert.doesNotMatch(report.nextActions.join('\n'), /Update search selectors/i);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

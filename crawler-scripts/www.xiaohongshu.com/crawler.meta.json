@@ -1,0 +1,32 @@
+{
+  "host": "www.xiaohongshu.com",
+  "baseUrl": "https://www.xiaohongshu.com/",
+  "generatedAt": "2026-04-23T13:49:08.618Z",
+  "scriptLanguage": "python",
+  "interpreterRequired": "pypy3",
+  "templateVersion": 3,
+  "profilePath": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\profiles\\www.xiaohongshu.com.json",
+  "profileHash": "2f870a3b82f3ccf8c2c0631f3671bb2e7241a2fa7914b7df5adfcd59a2551197",
+  "profileVersion": 1,
+  "capabilities": [
+    "search-content",
+    "navigate-to-content",
+    "navigate-to-author",
+    "navigate-to-category",
+    "navigate-to-utility-page",
+    "download-content",
+    "switch-in-page-state"
+  ],
+  "dependencies": [
+    "httpx",
+    "selectolax",
+    "anyio"
+  ],
+  "urlFamily": [
+    "https://www.xiaohongshu.com/"
+  ],
+  "historicalContext": {
+    "sourceRunDir": null,
+    "books": []
+  }
+}

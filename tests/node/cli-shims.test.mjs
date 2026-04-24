@@ -8,6 +8,8 @@ import * as douyinCookiesEntrypoint from '../../src/entrypoints/sites/douyin-exp
 import * as bilibiliActionEntrypoint from '../../src/entrypoints/sites/bilibili-action.mjs';
 import * as bilibiliOpenEntrypoint from '../../src/entrypoints/sites/bilibili-open-page.mjs';
 import * as bilibiliExtractEntrypoint from '../../src/entrypoints/sites/bilibili-extract-links.mjs';
+import * as xiaohongshuActionEntrypoint from '../../src/entrypoints/sites/xiaohongshu-action.mjs';
+import * as xiaohongshuFollowEntrypoint from '../../src/entrypoints/sites/xiaohongshu-query-follow.mjs';
 import * as runPipelineEntrypoint from '../../src/entrypoints/pipeline/run-pipeline.mjs';
 import * as captureEntrypoint from '../../src/entrypoints/pipeline/capture.mjs';
 import * as expandStatesEntrypoint from '../../src/entrypoints/pipeline/expand-states.mjs';
@@ -26,6 +28,11 @@ test('canonical site CLI entrypoints expose the expected bilibili handlers', () 
   assert.equal(typeof bilibiliOpenEntrypoint.openBilibiliPage, 'function');
   assert.equal(typeof bilibiliOpenEntrypoint.runBilibiliOpenCli, 'function');
   assert.equal(typeof bilibiliExtractEntrypoint.runBilibiliExtractLinksCli, 'function');
+});
+
+test('canonical site CLI entrypoints expose the expected Xiaohongshu handlers', () => {
+  assert.equal(typeof xiaohongshuActionEntrypoint.runXiaohongshuActionCli, 'function');
+  assert.equal(typeof xiaohongshuFollowEntrypoint.runXiaohongshuFollowQueryCli, 'function');
 });
 
 test('canonical pipeline entrypoints re-export the expected stage helpers', () => {

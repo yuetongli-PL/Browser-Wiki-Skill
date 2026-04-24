@@ -1,5 +1,6 @@
 import path from 'node:path';
 import process from 'node:process';
+import { isXiaohongshuUrl } from '../../shared/xiaohongshu-risk.mjs';
 import { isDouyinSiteProfile, resolveDouyinHeadlessDefault } from '../../sites/douyin/model/site.mjs';
 
 const DEFAULT_PIPELINE_OPTIONS = {
@@ -141,7 +142,9 @@ export function mergePipelineOptions(options = {}) {
 export function normalizePipelineOptions(inputUrl, options = {}) {
   const mergedOptions = { ...options, url: inputUrl };
   if (!Object.prototype.hasOwnProperty.call(options, 'headless')) {
-    mergedOptions.headless = resolveDouyinHeadlessDefault(inputUrl, DEFAULT_PIPELINE_OPTIONS.headless);
+    mergedOptions.headless = isXiaohongshuUrl(inputUrl)
+      ? false
+      : resolveDouyinHeadlessDefault(inputUrl, DEFAULT_PIPELINE_OPTIONS.headless);
   }
   return mergePipelineOptions(mergedOptions);
 }

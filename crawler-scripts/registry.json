@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-04-19T08:46:11.166Z",
+  "generatedAt": "2026-04-23T13:49:08.629Z",
   "hosts": {
     "www.22biqu.com": {
       "host": "www.22biqu.com",
@@ -49,6 +49,26 @@
       "interpreterRequired": "pypy3",
       "templateVersion": 3,
       "capabilities": [
+        "navigate-to-author",
+        "navigate-to-category",
+        "navigate-to-content",
+        "navigate-to-utility-page",
+        "search-content",
+        "switch-in-page-state"
+      ]
+    },
+    "www.xiaohongshu.com": {
+      "host": "www.xiaohongshu.com",
+      "scriptPath": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\crawler-scripts\\www.xiaohongshu.com\\crawler.py",
+      "metaPath": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\crawler-scripts\\www.xiaohongshu.com\\crawler.meta.json",
+      "profileHash": "2f870a3b82f3ccf8c2c0631f3671bb2e7241a2fa7914b7df5adfcd59a2551197",
+      "lastUsedAt": "2026-04-23T13:49:08.629Z",
+      "status": "generated",
+      "scriptLanguage": "python",
+      "interpreterRequired": "pypy3",
+      "templateVersion": 3,
+      "capabilities": [
+        "download-content",
         "navigate-to-author",
         "navigate-to-category",
         "navigate-to-content",

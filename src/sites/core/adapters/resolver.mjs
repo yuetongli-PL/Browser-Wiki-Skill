@@ -9,12 +9,14 @@ import { douyinAdapter } from './douyin.mjs';
 import { genericNavigationAdapter } from './generic-navigation.mjs';
 import { jableAdapter } from './jable.mjs';
 import { moodyzAdapter } from './moodyz.mjs';
+import { xiaohongshuAdapter } from './xiaohongshu.mjs';
 
 const ADAPTERS = Object.freeze([
   jableAdapter,
   moodyzAdapter,
   bilibiliAdapter,
   douyinAdapter,
+  xiaohongshuAdapter,
   chapterContentAdapter,
   genericNavigationAdapter,
 ]);

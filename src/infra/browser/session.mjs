@@ -17,6 +17,7 @@ const TARGET_POLL_INTERVAL_MS = 100;
 const RUNTIME_EVALUATE_RETRY_DELAY_MS = 150;
 const SESSION_OPEN_RETRY_DELAY_MS = 250;
 const DEFAULT_SESSION_OPEN_RETRIES = 2;
+const DOM_QUIET_RECOVERY_READY_TIMEOUT_MS = 2_000;
 
 function formatEvaluationError(result, fallback) {
   return (
@@ -262,7 +263,41 @@ export class BrowserSession {
 
   async waitForDomQuiet(quietMs, timeoutMs = this.timeoutMs) {
     incrementCounter(this.metrics.counts, 'waitForDomQuiet');
-    return await this.callPageFunction(defaultDomQuietFunction, quietMs, timeoutMs);
+    const recoveryReadyTimeoutMs = Math.min(timeoutMs, DOM_QUIET_RECOVERY_READY_TIMEOUT_MS);
+
+    try {
+      return await this.callPageFunction(defaultDomQuietFunction, quietMs, timeoutMs);
+    } catch (error) {
+      if (!isTransientDomQuietNavigationError(error)) {
+        throw error;
+      }
+
+      try {
+        await this.waitForDocumentReady(recoveryReadyTimeoutMs);
+      } catch {
+        throw error;
+      }
+
+      try {
+        return await this.callPageFunction(defaultDomQuietFunction, quietMs, timeoutMs);
+      } catch (retryError) {
+        if (!isTransientDomQuietNavigationError(retryError)) {
+          throw retryError;
+        }
+
+        try {
+          await this.waitForDocumentReady(recoveryReadyTimeoutMs);
+        } catch {
+          throw retryError;
+        }
+        // DOM quiet is advisory once the page has reached document ready again.
+        return {
+          reason: 'transient-navigation-skip',
+          degraded: true,
+          recoveredAfterRetries: 1,
+        };
+      }
+    }
   }
 
   async waitForSettled(waitPolicy) {
@@ -521,6 +556,11 @@ function normalizeComparableUrl(value) {
 function isTransientRuntimeEvaluateTimeout(error) {
   const message = String(error?.message ?? '');
   return /CDP timeout for Runtime\.evaluate/iu.test(message);
+}
+
+function isTransientDomQuietNavigationError(error) {
+  const message = String(error?.message ?? '');
+  return /CDP Runtime\.evaluate failed: Inspected target navigated or closed/iu.test(message);
 }
 
 function isTransientBrowserLaunchError(error) {

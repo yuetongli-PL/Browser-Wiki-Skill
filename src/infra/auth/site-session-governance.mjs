@@ -715,6 +715,7 @@ export async function finalizeSiteSessionGovernance(governance = {}, result = {}
   const now = options.now instanceof Date ? options.now : new Date();
   const nowIso = now.toISOString();
   const antiCrawlSignals = uniqueSortedStrings(toArray(result.antiCrawlSignals).filter(Boolean));
+  const recoveredHealthySession = result.persistedHealthySession === true && antiCrawlSignals.length === 0;
   const classifiedRisk = classifyRiskFromContext({
     antiCrawlSignals,
     authRequired: result.authRequired === true,
@@ -725,18 +726,26 @@ export async function finalizeSiteSessionGovernance(governance = {}, result = {}
     networkDrift: governance.networkDrift,
     concurrentProfileUse: governance.leaseResult?.concurrentProfileUse === true,
   });
-  const riskCauseCode = result.riskCauseCode ?? governance.policyDecision?.riskCauseCode ?? classifiedRisk.riskCauseCode ?? null;
-  const riskAction = result.riskAction ?? governance.policyDecision?.riskAction ?? classifiedRisk.riskAction ?? null;
   const persistedHealthySession = result.persistedHealthySession === true;
+  let inheritedRiskCauseCode = governance.policyDecision?.riskCauseCode ?? null;
+  let inheritedRiskAction = governance.policyDecision?.riskAction ?? null;
+  let profileQuarantined = governance.policyDecision?.profileQuarantined === true;
 
-  if (governance.userDataDir && persistedHealthySession && governance.networkFingerprint) {
-    await writeHealthyNetworkFingerprint(governance.userDataDir, governance.networkFingerprint);
-    if (!antiCrawlSignals.length) {
+  if (governance.userDataDir && persistedHealthySession) {
+    if (governance.networkFingerprint) {
+      await writeHealthyNetworkFingerprint(governance.userDataDir, governance.networkFingerprint);
+    }
+    if (recoveredHealthySession) {
       await clearProfileQuarantine(governance.userDataDir);
+      inheritedRiskCauseCode = null;
+      inheritedRiskAction = null;
+      profileQuarantined = false;
     }
   }
 
-  let profileQuarantined = governance.policyDecision?.profileQuarantined === true;
+  const riskCauseCode = result.riskCauseCode ?? inheritedRiskCauseCode ?? classifiedRisk.riskCauseCode ?? null;
+  const riskAction = result.riskAction ?? inheritedRiskAction ?? classifiedRisk.riskAction ?? null;
+
   if (governance.userDataDir && shouldQuarantineRisk({ antiCrawlSignals })) {
     await writeProfileQuarantine(governance.userDataDir, {
       riskCauseCode,

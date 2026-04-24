@@ -41,6 +41,36 @@ class FakeCdpClient {
   }
 }
 
+function createSettledWaitSession({ domQuietError }) {
+  return new BrowserSession({
+    client: {
+      async send(method, params) {
+        assert.equal(method, 'Runtime.evaluate');
+        if (params.expression === 'document.readyState') {
+          return {
+            result: {
+              value: 'complete',
+            },
+          };
+        }
+        if (String(params.expression).includes('MutationObserver')) {
+          throw domQuietError;
+        }
+        throw new Error(`Unexpected Runtime.evaluate expression: ${params.expression}`);
+      },
+    },
+    sessionId: 'session-1',
+    targetId: 'target-1',
+    timeoutMs: 50,
+    networkTracker: {
+      async waitForIdle() {
+        throw new Error('network idle should not be called in this regression test');
+      },
+      dispose() {},
+    },
+  });
+}
+
 test('openBrowserSession attaches to the existing startup page target before creating a target', async () => {
   let clientInstance = null;
 
@@ -431,4 +461,61 @@ test('BrowserSession callPageFunction retries a transient Runtime.evaluate timeo
   const value = await session.callPageFunction(() => 7);
   assert.equal(value, 7);
   assert.equal(attempts, 2);
+});
+
+test('BrowserSession waitForSettled degrades after document ready when dom quiet hits an inspected-target-navigated Runtime.evaluate failure', async () => {
+  const session = createSettledWaitSession({
+    domQuietError: new Error('CDP Runtime.evaluate failed: Inspected target navigated or closed'),
+  });
+
+  await assert.doesNotReject(async () => {
+    await session.waitForSettled({
+      useLoadEvent: false,
+      useNetworkIdle: false,
+      documentReadyTimeoutMs: 25,
+      domQuietMs: 20,
+      domQuietTimeoutMs: 30,
+    });
+  });
+
+  const metrics = session.getMetrics();
+  assert.equal(metrics.counts.waitForSettled, 1);
+  assert.equal(metrics.counts.waitForDocumentReady, 3);
+  assert.equal(metrics.counts.waitForDomQuiet, 1);
+  assert.equal(metrics.counts.callPageFunction, 2);
+  assert.equal(metrics.counts.evaluateValue, 3);
+  assert.deepEqual(metrics.waitPolicies, [{
+    useLoadEvent: false,
+    useNetworkIdle: false,
+    documentReadyTimeoutMs: 25,
+    domQuietTimeoutMs: 30,
+    domQuietMs: 20,
+    networkQuietMs: null,
+    networkIdleTimeoutMs: null,
+    idleMs: null,
+  }]);
+});
+
+test('BrowserSession waitForSettled does not swallow a non-target dom quiet Runtime.evaluate failure after document ready', async () => {
+  const session = createSettledWaitSession({
+    domQuietError: new Error('CDP Runtime.evaluate failed: Execution context was destroyed'),
+  });
+
+  await assert.rejects(
+    () => session.waitForSettled({
+      useLoadEvent: false,
+      useNetworkIdle: false,
+      documentReadyTimeoutMs: 25,
+      domQuietMs: 20,
+      domQuietTimeoutMs: 30,
+    }),
+    /Execution context was destroyed/u,
+  );
+
+  const metrics = session.getMetrics();
+  assert.equal(metrics.counts.waitForSettled, 1);
+  assert.equal(metrics.counts.waitForDocumentReady, 1);
+  assert.equal(metrics.counts.waitForDomQuiet, 1);
+  assert.equal(metrics.counts.callPageFunction, 1);
+  assert.equal(metrics.counts.evaluateValue, 1);
 });

@@ -76,6 +76,7 @@ test('validateProfileFile accepts the checked-in profiles', async () => {
   const jable = await validateProfileFile(path.resolve('profiles/jable.tv.json'));
   const bilibili = await validateProfileFile(path.resolve('profiles/www.bilibili.com.json'));
   const douyin = await validateProfileFile(path.resolve('profiles/www.douyin.com.json'));
+  const xiaohongshu = await validateProfileFile(path.resolve('profiles/www.xiaohongshu.com.json'));
 
   assert.equal(twentyTwoBiqu.valid, true);
   assert.equal(twentyTwoBiqu.host, 'www.22biqu.com');
@@ -144,6 +145,17 @@ test('validateProfileFile accepts the checked-in profiles', async () => {
   assert.equal(douyin.profile.downloader.defaultContainer, 'mp4');
   assert.ok(Array.isArray(douyin.profile.downloader.authorVideoListPathPrefixes));
   assert.ok(douyin.profile.downloader.authorVideoListPathPrefixes.length > 0);
+  assert.equal(xiaohongshu.valid, true);
+  assert.equal(xiaohongshu.host, 'www.xiaohongshu.com');
+  assert.equal(xiaohongshu.archetype, 'navigation-catalog');
+  assert.equal(xiaohongshu.profile.pipeline.skipBookContent, true);
+  assert.equal(xiaohongshu.profile.validationSamples.videoSearchQuery, '穿搭');
+  assert.equal(xiaohongshu.profile.validationSamples.videoDetailUrl, 'https://www.xiaohongshu.com/explore/646f34fd000000001300755c');
+  assert.equal(xiaohongshu.profile.validationSamples.authorUrl, 'https://www.xiaohongshu.com/user/profile/5acc62a7e8ac2b04829875e1');
+  assert.equal(xiaohongshu.profile.validationSamples.categoryPopularUrl, 'https://www.xiaohongshu.com/explore');
+  assert.equal(xiaohongshu.profile.downloader.defaultOutputRoot, 'note-downloads');
+  assert.equal(xiaohongshu.profile.downloader.maxBatchItems, 20);
+  assert.equal(xiaohongshu.profile.downloader.defaultNamingStrategy, 'title-id');
 });
 
 test('validateProfileObject rejects missing required fields with path details', () => {

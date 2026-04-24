@@ -7,7 +7,7 @@
 <p>
   <img alt="Node.js" src="https://img.shields.io/badge/Runtime-Node.js_+_Python-0f172a?style=for-the-badge&logo=nodedotjs&logoColor=white">
   <img alt="Pipeline" src="https://img.shields.io/badge/Pipeline-Capture_→_KB_→_Skill-2563eb?style=for-the-badge">
-  <img alt="Supported Sites" src="https://img.shields.io/badge/Supported_Sites-5-16a34a?style=for-the-badge">
+  <img alt="Supported Sites" src="https://img.shields.io/badge/Supported_Sites-6-16a34a?style=for-the-badge">
   <img alt="Status" src="https://img.shields.io/badge/Mode-Local_First-f59e0b?style=for-the-badge">
 </p>
 
@@ -69,12 +69,14 @@ flowchart LR
 
 ## Supported Sites
 
-Current supported sites snapshot: `www.22biqu.com`, `www.bilibili.com`, `www.douyin.com`, `jable.tv`, `moodyz.com`.
+Current supported sites snapshot: `www.22biqu.com`, `www.bilibili.com`, `www.douyin.com`, `www.xiaohongshu.com`, `jable.tv`, `moodyz.com`.
 
 | Site | Skill | Archetype | Typical Intents | Status |
 | --- | --- | --- | --- | --- |
 | `www.22biqu.com` | `22biqu` | chapter-content | 下载整本、打开章节、搜索内容 | 已接入 |
 | `www.bilibili.com` | `bilibili` | catalog-detail | 打开视频、打开作者、搜索视频 | 已接入 |
+| `www.douyin.com` | `douyin` | catalog-detail | 打开视频、打开用户主页、关注更新查询 | 已接入 |
+| `www.xiaohongshu.com` | `xiaohongshu-explore` | catalog-detail | 搜索笔记、打开笔记、打开用户主页、下载图文笔记 | 已接入 |
 | `jable.tv` | `jable` | catalog-detail | 打开视频、打开演员页、榜单查询 | 已接入 |
 | `moodyz.com` | `moodyz-works` | catalog-detail | 搜索作品、打开作品、打开演员页 | 已接入 |
 
@@ -198,6 +200,13 @@ node .\src\entrypoints\sites\site-keepalive.mjs https://www.douyin.com/ --profil
 
 ```powershell
 node .\src\entrypoints\pipeline\generate-crawler-script.mjs https://www.22biqu.com/
+```
+
+### 下载小红书图文笔记
+
+```powershell
+node .\scripts\xiaohongshu-action.mjs download "穿搭" --dry-run
+node .\scripts\xiaohongshu-action.mjs download "https://www.xiaohongshu.com/explore/646f34fd000000001300755c"
 ```
 
 ### 运行测试

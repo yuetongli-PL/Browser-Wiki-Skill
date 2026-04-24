@@ -162,6 +162,41 @@ class SiteContextTests(unittest.TestCase):
             self.assertIn("updatedAt", runtime_capabilities["sites"]["www.22biqu.com"])
             self.assertEqual("22biqu", context["capabilitiesRecord"]["siteKey"])
 
+    def test_registry_stores_relative_stable_paths_but_context_resolves_workspace_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo_skill_dir = root / "skills" / "jable"
+            ranking_entrypoint = root / "src" / "entrypoints" / "sites" / "jable-ranking.mjs"
+            upsert_site_registry_record("jable.tv", {
+                "canonicalBaseUrl": "https://jable.tv/",
+                "repoSkillDir": str(repo_skill_dir),
+                "rankingQueryEntrypoint": str(ranking_entrypoint),
+            }, root)
+
+            stable_registry = json.loads(build_site_registry_path(root).read_text(encoding="utf-8"))
+            context = read_site_context("jable.tv", root)
+
+            self.assertEqual("skills/jable", stable_registry["sites"]["jable.tv"]["repoSkillDir"])
+            self.assertEqual("src/entrypoints/sites/jable-ranking.mjs", stable_registry["sites"]["jable.tv"]["rankingQueryEntrypoint"])
+            self.assertEqual(str(repo_skill_dir.resolve()), context["registryRecord"]["repoSkillDir"])
+            self.assertEqual(str(ranking_entrypoint.resolve()), context["registryRecord"]["rankingQueryEntrypoint"])
+
+    def test_capabilities_keep_implementation_paths_out_of_stable_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            ranking_entrypoint = root / "src" / "entrypoints" / "sites" / "jable-ranking.mjs"
+            upsert_site_capabilities_record("jable.tv", {
+                "baseUrl": "https://jable.tv/",
+                "siteKey": "jable",
+                "rankingQueryEntrypoint": str(ranking_entrypoint),
+            }, root)
+
+            stable_capabilities = json.loads(build_site_capabilities_path(root).read_text(encoding="utf-8"))
+            runtime_capabilities = json.loads(build_site_runtime_capabilities_path(root).read_text(encoding="utf-8"))
+
+            self.assertNotIn("rankingQueryEntrypoint", stable_capabilities["sites"]["jable.tv"])
+            self.assertEqual(str(ranking_entrypoint), runtime_capabilities["sites"]["jable.tv"]["rankingQueryEntrypoint"])
+
 
 if __name__ == "__main__":
     unittest.main()

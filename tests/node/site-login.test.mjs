@@ -46,6 +46,30 @@ function createDouyinResolvedProfile() {
   };
 }
 
+function createXiaohongshuResolvedProfile() {
+  return {
+    profile: {
+      host: 'www.xiaohongshu.com',
+      authValidationSamples: {
+        notificationUrl: 'https://www.xiaohongshu.com/notification',
+      },
+      authSession: {
+        loginUrl: 'https://www.xiaohongshu.com/login?redirectPath=https%3A%2F%2Fwww.xiaohongshu.com%2Fnotification',
+        postLoginUrl: 'https://www.xiaohongshu.com/notification',
+        verificationUrl: 'https://www.xiaohongshu.com/notification',
+        keepaliveUrl: 'https://www.xiaohongshu.com/notification',
+        keepaliveIntervalMinutes: 180,
+        cooldownMinutesAfterRisk: 180,
+        preferVisibleBrowserForAuthenticatedFlows: true,
+        requireStableNetworkForAuthenticatedFlows: true,
+        autoLoginByDefault: false,
+      },
+    },
+    warnings: [],
+    filePath: path.resolve('profiles/www.xiaohongshu.com.json'),
+  };
+}
+
 function createResolvedBrowserOptions(workspace) {
   return {
     reuseLoginState: true,
@@ -73,6 +97,25 @@ function createDouyinResolvedBrowserOptions(workspace) {
       preferVisibleBrowserForAuthenticatedFlows: true,
       requireStableNetworkForAuthenticatedFlows: true,
       autoLoginByDefault: true,
+    },
+  };
+}
+
+function createXiaohongshuResolvedBrowserOptions(workspace) {
+  return {
+    reuseLoginState: true,
+    userDataDir: path.join(workspace, 'profiles', 'xiaohongshu.com'),
+    cleanupUserDataDirOnShutdown: false,
+    authConfig: {
+      loginUrl: 'https://www.xiaohongshu.com/login?redirectPath=https%3A%2F%2Fwww.xiaohongshu.com%2Fnotification',
+      postLoginUrl: 'https://www.xiaohongshu.com/notification',
+      verificationUrl: 'https://www.xiaohongshu.com/notification',
+      keepaliveUrl: 'https://www.xiaohongshu.com/notification',
+      keepaliveIntervalMinutes: 180,
+      cooldownMinutesAfterRisk: 180,
+      preferVisibleBrowserForAuthenticatedFlows: true,
+      requireStableNetworkForAuthenticatedFlows: true,
+      autoLoginByDefault: false,
     },
   };
 }
@@ -651,6 +694,48 @@ test('siteLogin reports challenge-required without claiming identity confirmatio
   }
 });
 
+test('siteLogin preserves the original openBrowserSession failure when no session was created', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-login-open-failure-'));
+  try {
+    await assert.rejects(
+      siteLogin('https://www.xiaohongshu.com/notification', {
+        outDir: workspace,
+        profilePath: path.resolve('profiles/www.xiaohongshu.com.json'),
+        waitForManualLogin: false,
+        autoLogin: false,
+        headless: false,
+      }, {
+        async resolveSiteAuthProfile() {
+          return createXiaohongshuResolvedProfile();
+        },
+        async resolveSiteBrowserSessionOptions() {
+          return createXiaohongshuResolvedBrowserOptions(workspace);
+        },
+        async inspectPersistentProfileHealth() {
+          return {
+            healthy: true,
+            warnings: [],
+          };
+        },
+        async prepareSiteSessionGovernance() {
+          return {
+            policyDecision: { allowed: true },
+            lease: null,
+            authSessionSummary: null,
+          };
+        },
+        async openBrowserSession() {
+          throw new Error('profile already locked');
+        },
+        async releaseSessionLease() {},
+      }),
+      /profile already locked/u,
+    );
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test('siteLogin defaults reports under runs/sites/site-login when outDir is omitted', async () => {
   let reportJsonPath = null;
 
@@ -1007,6 +1092,357 @@ test('siteLogin uses the Douyin keepalive URL for keepalive runtime startup and 
     assert.deepEqual(startupUrls, [
       'https://www.douyin.com/',
       'https://www.douyin.com/',
+    ]);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('siteLogin uses the Xiaohongshu verification URL for non-interactive startup and persistence checks', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-login-xiaohongshu-verification-'));
+  const startupUrls = [];
+
+  try {
+    const report = await siteLogin('https://www.xiaohongshu.com/explore', {
+      outDir: workspace,
+      profilePath: path.resolve('profiles/www.xiaohongshu.com.json'),
+      waitForManualLogin: false,
+      autoLogin: false,
+    }, {
+      async resolveSiteAuthProfile() {
+        return createXiaohongshuResolvedProfile();
+      },
+      async resolveSiteBrowserSessionOptions() {
+        return createXiaohongshuResolvedBrowserOptions(workspace);
+      },
+      async inspectPersistentProfileHealth() {
+        return {
+          healthy: true,
+          warnings: [],
+        };
+      },
+      async openBrowserSession() {
+        startupUrls.push(arguments[0]?.startupUrl ?? null);
+        return {
+          browserStartUrl: arguments[0]?.startupUrl ?? null,
+          browserAttachedVia: 'existing-target',
+          async navigateAndWait() {},
+          async close() {
+            return {
+              shutdownMode: 'graceful',
+              profileFlush: { stable: true },
+            };
+          },
+        };
+      },
+      async ensureAuthenticatedSession() {
+        return {
+          status: 'already-authenticated',
+          credentials: null,
+          challengeRequired: false,
+          loginState: {
+            currentUrl: 'https://www.xiaohongshu.com/notification',
+            title: 'xiaohongshu',
+            loggedIn: true,
+            loginStateDetected: true,
+            identityConfirmed: true,
+            identitySource: 'selector:.notification-page .user-avatar img',
+          },
+        };
+      },
+      async inspectLoginState() {
+        return {
+          currentUrl: 'https://www.xiaohongshu.com/notification',
+          title: 'xiaohongshu',
+          loggedIn: true,
+          loginStateDetected: true,
+          identityConfirmed: true,
+          identitySource: 'selector:.notification-page .user-avatar img',
+        };
+      },
+      async waitForAuthenticatedSession() {
+        throw new Error('manual wait should not be used');
+      },
+    });
+
+    assert.equal(report.auth.status, 'session-reused');
+    assert.equal(report.auth.autoLogin, false);
+    assert.equal(report.auth.reopenVerificationPassed, true);
+    assert.equal(report.auth.persistenceVerified, true);
+    assert.equal(report.site.runtimePurpose, 'login');
+    assert.equal(report.auth.runtimeUrl, 'https://www.xiaohongshu.com/notification');
+    assert.equal(report.auth.warmupSummary?.attempted, false);
+    assert.equal(report.auth.keepaliveUrl, 'https://www.xiaohongshu.com/notification');
+    assert.equal(report.auth.keepaliveIntervalMinutes, 180);
+    assert.equal(report.auth.cooldownMinutesAfterRisk, 180);
+    assert.equal(report.auth.preferVisibleBrowserForAuthenticatedFlows, true);
+    assert.equal(report.auth.requireStableNetworkForAuthenticatedFlows, true);
+    assert.equal(report.auth.verificationUrl, 'https://www.xiaohongshu.com/notification');
+    assert.equal(report.site.userDataDir, path.join(workspace, 'profiles', 'xiaohongshu.com'));
+    assert.deepEqual(startupUrls, [
+      'https://www.xiaohongshu.com/notification',
+      'https://www.xiaohongshu.com/notification',
+    ]);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('siteLogin uses the Xiaohongshu login URL as startup page when interactive manual login is expected', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-login-xiaohongshu-manual-start-'));
+  const startupUrls = [];
+
+  try {
+    await siteLogin('https://www.xiaohongshu.com/explore', {
+      outDir: workspace,
+      profilePath: path.resolve('profiles/www.xiaohongshu.com.json'),
+      headless: false,
+      waitForManualLogin: true,
+      autoLogin: false,
+    }, {
+      async resolveSiteAuthProfile() {
+        return createXiaohongshuResolvedProfile();
+      },
+      async resolveSiteBrowserSessionOptions() {
+        return createXiaohongshuResolvedBrowserOptions(workspace);
+      },
+      async inspectPersistentProfileHealth() {
+        return {
+          healthy: true,
+          warnings: [],
+        };
+      },
+      async openBrowserSession() {
+        startupUrls.push(arguments[0]?.startupUrl ?? null);
+        return {
+          browserStartUrl: arguments[0]?.startupUrl ?? null,
+          browserAttachedVia: 'existing-target',
+          async navigateAndWait() {},
+          async close() {
+            return {
+              shutdownMode: 'graceful',
+              profileFlush: { stable: true },
+            };
+          },
+        };
+      },
+      async ensureAuthenticatedSession() {
+        return {
+          status: 'already-authenticated',
+          credentials: null,
+          challengeRequired: false,
+          loginState: {
+            currentUrl: 'https://www.xiaohongshu.com/notification',
+            title: 'xiaohongshu',
+            loggedIn: true,
+            loginStateDetected: true,
+            identityConfirmed: true,
+            identitySource: 'selector:.notification-page .user-avatar img',
+          },
+        };
+      },
+      async inspectLoginState() {
+        return {
+          currentUrl: 'https://www.xiaohongshu.com/notification',
+          title: 'xiaohongshu',
+          loggedIn: true,
+          loginStateDetected: true,
+          identityConfirmed: true,
+          identitySource: 'selector:.notification-page .user-avatar img',
+        };
+      },
+      async waitForAuthenticatedSession() {
+        throw new Error('manual wait should not be used');
+      },
+    });
+
+    assert.equal(
+      startupUrls[0],
+      'https://www.xiaohongshu.com/login?redirectPath=https%3A%2F%2Fwww.xiaohongshu.com%2Fnotification',
+    );
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('siteLogin recovers a reusable Xiaohongshu session before entering manual wait', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-login-xiaohongshu-reuse-probe-'));
+  const startupUrls = [];
+  const navigatedUrls = [];
+  let inspectCalls = 0;
+
+  try {
+    const report = await siteLogin('https://www.xiaohongshu.com/explore', {
+      outDir: workspace,
+      profilePath: path.resolve('profiles/www.xiaohongshu.com.json'),
+      headless: false,
+      waitForManualLogin: true,
+      autoLogin: false,
+    }, {
+      async resolveSiteAuthProfile() {
+        return createXiaohongshuResolvedProfile();
+      },
+      async resolveSiteBrowserSessionOptions() {
+        return createXiaohongshuResolvedBrowserOptions(workspace);
+      },
+      async inspectPersistentProfileHealth() {
+        return {
+          healthy: true,
+          warnings: [],
+        };
+      },
+      async openBrowserSession() {
+        startupUrls.push(arguments[0]?.startupUrl ?? null);
+        return {
+          browserStartUrl: arguments[0]?.startupUrl ?? null,
+          browserAttachedVia: 'existing-target',
+          async navigateAndWait(url) {
+            navigatedUrls.push(url);
+          },
+          async close() {
+            return {
+              shutdownMode: 'graceful',
+              profileFlush: { stable: true },
+            };
+          },
+        };
+      },
+      async ensureAuthenticatedSession() {
+        return {
+          status: 'credentials-unavailable',
+          credentials: {
+            available: false,
+            source: null,
+          },
+          challengeRequired: false,
+          loginState: {
+            currentUrl: 'https://www.xiaohongshu.com/login?redirectPath=https%3A%2F%2Fwww.xiaohongshu.com%2Fnotification',
+            title: 'xiaohongshu login',
+            loggedIn: false,
+            loginStateDetected: false,
+            identityConfirmed: false,
+            identitySource: null,
+          },
+        };
+      },
+      async inspectLoginState() {
+        inspectCalls += 1;
+        return {
+          currentUrl: 'https://www.xiaohongshu.com/notification',
+          title: 'xiaohongshu notification',
+          loggedIn: true,
+          loginStateDetected: true,
+          identityConfirmed: true,
+          identitySource: 'selector:.notification-page',
+        };
+      },
+      async waitForAuthenticatedSession() {
+        throw new Error('manual wait should not be used when reusable session is recovered');
+      },
+    });
+
+    assert.equal(report.auth.status, 'session-reused');
+    assert.equal(report.auth.waitedForManualLogin, false);
+    assert.equal(report.auth.currentUrl, 'https://www.xiaohongshu.com/notification');
+    assert.equal(report.auth.identityConfirmed, true);
+    assert.equal(startupUrls[0], 'https://www.xiaohongshu.com/login?redirectPath=https%3A%2F%2Fwww.xiaohongshu.com%2Fnotification');
+    assert.deepEqual(navigatedUrls, [
+      'https://www.xiaohongshu.com/notification',
+      'https://www.xiaohongshu.com/notification',
+    ]);
+    assert.equal(inspectCalls, 2);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('siteLogin uses the Xiaohongshu notification URL for keepalive runtime startup and persistence checks', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-login-xiaohongshu-keepalive-runtime-'));
+  const startupUrls = [];
+
+  try {
+    const report = await siteLogin('https://www.xiaohongshu.com/explore', {
+      outDir: workspace,
+      profilePath: path.resolve('profiles/www.xiaohongshu.com.json'),
+      waitForManualLogin: false,
+      autoLogin: false,
+      runtimePurpose: 'keepalive',
+    }, {
+      async resolveSiteAuthProfile() {
+        return createXiaohongshuResolvedProfile();
+      },
+      async resolveSiteBrowserSessionOptions() {
+        return createXiaohongshuResolvedBrowserOptions(workspace);
+      },
+      async inspectPersistentProfileHealth() {
+        return {
+          healthy: true,
+          warnings: [],
+        };
+      },
+      async openBrowserSession() {
+        startupUrls.push(arguments[0]?.startupUrl ?? null);
+        return {
+          browserStartUrl: arguments[0]?.startupUrl ?? null,
+          browserAttachedVia: 'existing-target',
+          async navigateAndWait() {},
+          async close() {
+            return {
+              shutdownMode: 'graceful',
+              profileFlush: { stable: true },
+            };
+          },
+        };
+      },
+      async ensureAuthenticatedSession() {
+        return {
+          status: 'already-authenticated',
+          credentials: null,
+          challengeRequired: false,
+          loginState: {
+            currentUrl: 'https://www.xiaohongshu.com/notification',
+            title: 'xiaohongshu keepalive',
+            loggedIn: true,
+            loginStateDetected: true,
+            identityConfirmed: true,
+            identitySource: 'selector:.notification-page .user-avatar img',
+          },
+        };
+      },
+      async inspectLoginState() {
+        return {
+          currentUrl: 'https://www.xiaohongshu.com/notification',
+          title: 'xiaohongshu keepalive',
+          loggedIn: true,
+          loginStateDetected: true,
+          identityConfirmed: true,
+          identitySource: 'selector:.notification-page .user-avatar img',
+        };
+      },
+      async waitForAuthenticatedSession() {
+        throw new Error('manual wait should not be used');
+      },
+    });
+
+    assert.equal(report.site.runtimePurpose, 'keepalive');
+    assert.equal(report.site.browserStartUrl, 'https://www.xiaohongshu.com/notification');
+    assert.equal(report.auth.runtimeUrl, 'https://www.xiaohongshu.com/notification');
+    assert.equal(report.auth.autoLogin, false);
+    assert.equal(report.auth.warmupSummary?.attempted, true);
+    assert.equal(report.auth.warmupSummary?.completed, true);
+    assert.deepEqual(report.auth.warmupSummary?.urls, [
+      'https://www.xiaohongshu.com/notification',
+    ]);
+    assert.equal(report.auth.keepaliveUrl, 'https://www.xiaohongshu.com/notification');
+    assert.equal(report.auth.keepaliveIntervalMinutes, 180);
+    assert.equal(report.auth.cooldownMinutesAfterRisk, 180);
+    assert.equal(report.auth.preferVisibleBrowserForAuthenticatedFlows, true);
+    assert.equal(report.auth.requireStableNetworkForAuthenticatedFlows, true);
+    assert.equal(report.auth.verificationUrl, 'https://www.xiaohongshu.com/notification');
+    assert.equal(report.auth.sessionHealthSummary?.successfulKeepalives, 1);
+    assert.deepEqual(startupUrls, [
+      'https://www.xiaohongshu.com/notification',
+      'https://www.xiaohongshu.com/notification',
     ]);
   } finally {
     await rm(workspace, { recursive: true, force: true });

@@ -5,9 +5,18 @@ import { fileURLToPath } from 'node:url';
 
 import { initializeCliUtf8 } from '../../infra/cli.mjs';
 import { NETWORK_IDLE_QUIET_MS, openBrowserSession } from '../../infra/browser/session.mjs';
-import { ensureAuthenticatedSession, resolveSiteBrowserSessionOptions } from '../../infra/auth/site-auth.mjs';
-import { mergeRuntimeEvidence } from '../../shared/runtime-evidence.mjs';
-import { deriveDouyinAntiCrawlReasonCode, detectDouyinAntiCrawlSignals } from '../../sites/douyin/model/diagnosis.mjs';
+import {
+  ensureAuthenticatedSession,
+  resolveSiteBrowserSessionOptions,
+  shouldEnsureAuthenticatedNavigationSession,
+  shouldUsePersistentProfileForNavigation,
+} from '../../infra/auth/site-auth.mjs';
+import {
+  computePageStateSignature as computeSharedPageStateSignature,
+  createPageStateHelperBundleSource,
+  createPageStateHelperFallbackFunction,
+} from '../../shared/page-state-runtime.mjs';
+import { isXiaohongshuUrl } from '../../shared/xiaohongshu-risk.mjs';
 import { resolveDouyinHeadlessDefault } from '../../sites/douyin/model/site.mjs';
 
 const DEFAULT_OPTIONS = {
@@ -32,6 +41,10 @@ const DEFAULT_OPTIONS = {
   autoLogin: undefined,
 };
 
+const CAPTURE_HELPER_NAMESPACE = '__BWS_CAPTURE__';
+const CAPTURE_HELPER_BUNDLE_SOURCE = createPageStateHelperBundleSource(CAPTURE_HELPER_NAMESPACE);
+const pageComputeStateSignature = createPageStateHelperFallbackFunction(CAPTURE_HELPER_NAMESPACE);
+
 function createError(code, message) {
   return { code, message };
 }
@@ -47,6 +60,26 @@ function isDouyinSiteProfile(siteProfile = null, inputUrl = '') {
   } catch {
     return false;
   }
+}
+
+function isXiaohongshuSiteProfile(siteProfile = null, inputUrl = '') {
+  const profileHost = String(siteProfile?.host ?? '').toLowerCase();
+  if (profileHost === 'www.xiaohongshu.com' || profileHost === 'xiaohongshu.com') {
+    return true;
+  }
+  try {
+    const parsed = new URL(inputUrl);
+    return parsed.hostname === 'www.xiaohongshu.com' || parsed.hostname === 'xiaohongshu.com';
+  } catch {
+    return false;
+  }
+}
+
+function resolveCaptureHeadlessDefault(inputUrl, fallback = true, siteProfile = null) {
+  const douyinDefault = resolveDouyinHeadlessDefault(inputUrl, fallback, siteProfile);
+  return isXiaohongshuSiteProfile(siteProfile, inputUrl) || isXiaohongshuUrl(inputUrl)
+    ? false
+    : douyinDefault;
 }
 
 function isTransientCaptureBootstrapError(error) {
@@ -67,20 +100,33 @@ async function closeSessionQuietly(session) {
   }
 }
 
-function pageInspectRuntimeSurface() {
-  const rootText = document.body?.innerText || document.documentElement?.innerText || '';
-  return {
-    title: document.title || '',
-    documentText: rootText,
-    readyCount: [
-      ...document.querySelectorAll('input[placeholder*="搜索"], input[type="search"], form[role="search"], a[href*="/video/"], a[href*="/user/"]'),
-    ].length,
-    pageType: 'unknown-page',
+async function collectCaptureStateSignature(session, siteProfile = null) {
+  const normalizeSignature = (signature) => {
+    if (signature?.pageFacts || signature?.runtimeEvidence || signature?.fingerprint) {
+      return signature;
+    }
+    return computeSharedPageStateSignature({
+      finalUrl: signature?.finalUrl ?? '',
+      title: signature?.title ?? '',
+      pageType: signature?.pageType,
+      rawHtml: signature?.rawHtml ?? '',
+      documentText: signature?.documentText ?? '',
+    }, siteProfile);
   };
+  if (typeof session?.invokeHelperMethod === 'function') {
+    return normalizeSignature(await session.invokeHelperMethod('pageComputeStateSignature', [siteProfile], {
+      namespace: CAPTURE_HELPER_NAMESPACE,
+      bundleSource: CAPTURE_HELPER_BUNDLE_SOURCE,
+      fallbackFn: pageComputeStateSignature,
+    }));
+  }
+  return normalizeSignature(await session.callPageFunction(pageComputeStateSignature, siteProfile));
 }
 
 async function inspectCaptureRuntime(session, inputUrl, siteProfile = null) {
-  if (!isDouyinSiteProfile(siteProfile, inputUrl)) {
+  const douyinProfile = isDouyinSiteProfile(siteProfile, inputUrl);
+  const xiaohongshuProfile = isXiaohongshuSiteProfile(siteProfile, inputUrl);
+  if (!douyinProfile && !xiaohongshuProfile) {
     return {
       pageFacts: null,
       runtimeEvidence: null,
@@ -89,12 +135,16 @@ async function inspectCaptureRuntime(session, inputUrl, siteProfile = null) {
   }
 
   try {
-    const inspection = await session.callPageFunction(pageInspectRuntimeSurface);
-    const antiCrawlSignals = detectDouyinAntiCrawlSignals({
-      title: inspection?.title,
-      documentText: inspection?.documentText,
-    });
-    if (antiCrawlSignals.length === 0) {
+    const signature = await collectCaptureStateSignature(session, siteProfile);
+    const pageFacts = signature?.pageFacts ?? null;
+    const runtimeEvidence = signature?.runtimeEvidence ?? null;
+    const antiCrawlDetected = pageFacts?.antiCrawlDetected === true || runtimeEvidence?.antiCrawlDetected === true;
+    const antiCrawlSignals = Array.isArray(pageFacts?.antiCrawlSignals)
+      ? pageFacts.antiCrawlSignals
+      : Array.isArray(runtimeEvidence?.antiCrawlEvidence?.signals)
+        ? runtimeEvidence.antiCrawlEvidence.signals
+        : [];
+    if (!antiCrawlDetected || antiCrawlSignals.length === 0) {
       return {
         pageFacts: null,
         runtimeEvidence: null,
@@ -102,17 +152,27 @@ async function inspectCaptureRuntime(session, inputUrl, siteProfile = null) {
       };
     }
 
-    const antiCrawlReasonCode = deriveDouyinAntiCrawlReasonCode(antiCrawlSignals);
-    const normalized = mergeRuntimeEvidence({
-      antiCrawlDetected: true,
-      antiCrawlSignals,
-      antiCrawlReasonCode,
-    }, null, {
-      antiCrawlReasonCode,
-    });
+    if (xiaohongshuProfile) {
+      const restrictionDetected = pageFacts?.riskPageDetected === true
+        || /\/website-login\/error(?:[/?#]|$)/iu.test(String(signature?.finalUrl ?? inputUrl))
+        || /\/website-login\/error(?:[/?#]|$)/iu.test(String(inputUrl));
+      if (!restrictionDetected) {
+        return {
+          pageFacts: null,
+          runtimeEvidence: null,
+          error: null,
+        };
+      }
+      return {
+        pageFacts,
+        runtimeEvidence,
+        error: null,
+      };
+    }
+
     return {
-      pageFacts: normalized.pageFacts,
-      runtimeEvidence: normalized.runtimeEvidence,
+      pageFacts,
+      runtimeEvidence,
       error: createError(
         'ANTI_CRAWL_CHALLENGE',
         `Detected Douyin anti-crawl challenge while capturing ${inputUrl}: ${antiCrawlSignals.join(', ')}`,
@@ -264,7 +324,7 @@ function mergeOptions(inputUrl = '', options = {}) {
     merged.userDataDir = path.resolve(merged.userDataDir);
   }
   if (!Object.prototype.hasOwnProperty.call(options, 'headless')) {
-    merged.headless = resolveDouyinHeadlessDefault(inputUrl, DEFAULT_OPTIONS.headless);
+    merged.headless = resolveCaptureHeadlessDefault(inputUrl, DEFAULT_OPTIONS.headless, merged.siteProfile);
   }
   merged.timeoutMs = normalizeNumber(merged.timeoutMs, 'timeoutMs');
   merged.idleMs = normalizeNumber(merged.idleMs, 'idleMs');
@@ -317,16 +377,16 @@ async function createCaptureSession(settings, inputUrl) {
     profilePath: settings.profilePath,
     siteProfile: settings.siteProfile,
   });
+  const usePersistentProfile = shouldUsePersistentProfileForNavigation(inputUrl, settings, authContext);
   const session = await openBrowserSession({
     ...settings,
-    userDataDir: authContext.userDataDir,
-    cleanupUserDataDirOnShutdown: authContext.cleanupUserDataDirOnShutdown,
+    userDataDir: usePersistentProfile ? authContext.userDataDir : null,
+    cleanupUserDataDirOnShutdown: usePersistentProfile ? authContext.cleanupUserDataDirOnShutdown : true,
     startupUrl: inputUrl,
   }, {
     userDataDirPrefix: 'capture-browser-',
   });
-  const shouldEnsureAuth = Boolean(authContext.authConfig)
-    && (authContext.reuseLoginState || settings.autoLogin === true || authContext.authConfig.autoLoginByDefault);
+  const shouldEnsureAuth = shouldEnsureAuthenticatedNavigationSession(inputUrl, settings, authContext);
   if (shouldEnsureAuth) {
     session.siteAuth = await ensureAuthenticatedSession(session, inputUrl, settings, {
       authContext,
@@ -674,7 +734,7 @@ Options:
   --no-reuse-login-state   Disable persistent login-state reuse
   --auto-login             Best-effort credential login when credentials exist
   --no-auto-login          Disable credential auto-login
-  --headless               Run browser headless (default except visible-by-default Douyin flows)
+  --headless               Run browser headless (default except visible-by-default Douyin and Xiaohongshu flows)
   --no-headless            Run browser with a visible window
   --help                   Show this help
 `;

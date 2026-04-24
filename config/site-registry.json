@@ -6,31 +6,46 @@
       "canonicalBaseUrl": "https://www.22biqu.com/",
       "host": "www.22biqu.com",
       "downloadEntrypoint": "src/sites/chapter-content/download/python/book.py",
-      "crawlerScriptsDir": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\crawler-scripts"
+      "crawlerScriptsDir": "crawler-scripts"
     },
     "moodyz.com": {
       "canonicalBaseUrl": "https://moodyz.com/works/date",
-      "repoSkillDir": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\skills\\moodyz-works",
+      "repoSkillDir": "skills/moodyz-works",
       "host": "moodyz.com"
     },
     "jable.tv": {
       "canonicalBaseUrl": "https://jable.tv/",
       "siteArchetype": "catalog-detail",
       "host": "jable.tv",
-      "repoSkillDir": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\skills\\jable",
-      "rankingQueryEntrypoint": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\query-jable-ranking.mjs"
+      "repoSkillDir": "skills/jable",
+      "rankingQueryEntrypoint": "src/entrypoints/sites/jable-ranking.mjs"
     },
     "www.bilibili.com": {
       "canonicalBaseUrl": "https://www.bilibili.com/",
       "siteArchetype": "catalog-detail",
       "host": "www.bilibili.com",
-      "repoSkillDir": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\skills\\bilibili"
+      "repoSkillDir": "skills/bilibili"
     },
     "www.douyin.com": {
       "canonicalBaseUrl": "https://www.douyin.com/?recommend=1",
       "siteArchetype": "catalog-detail",
       "host": "www.douyin.com",
-      "repoSkillDir": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\skills\\douyin"
+      "repoSkillDir": "skills/douyin"
+    },
+    "www.xiaohongshu.com": {
+      "canonicalBaseUrl": "https://www.xiaohongshu.com/explore",
+      "siteArchetype": "catalog-detail",
+      "host": "www.xiaohongshu.com",
+      "downloadEntrypoint": "src/entrypoints/sites/xiaohongshu-action.mjs",
+      "scriptLanguage": "python",
+      "interpreterRequired": "pypy3",
+      "templateVersion": 3,
+      "capabilityFamilies": [
+        "download-content"
+      ],
+      "siteKey": "xiaohongshu",
+      "adapterId": "xiaohongshu",
+      "repoSkillDir": "skills/xiaohongshu-explore"
     }
   }
 }

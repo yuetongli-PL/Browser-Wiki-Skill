@@ -216,6 +216,29 @@ test('site registry stores volatile runtime fields outside stable config while m
   }
 });
 
+test('site registry stores stable implementation paths as repo-relative config while merged reads resolve workspace paths', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-registry-relative-paths-'));
+  try {
+    const repoSkillDir = path.join(workspace, 'skills', 'jable');
+    const rankingQueryEntrypoint = path.join(workspace, 'src', 'entrypoints', 'sites', 'jable-ranking.mjs');
+    await upsertSiteRegistryRecord(workspace, 'jable.tv', {
+      canonicalBaseUrl: 'https://jable.tv/',
+      repoSkillDir,
+      rankingQueryEntrypoint,
+    });
+
+    const stableRegistry = JSON.parse(await readFile(buildSiteRegistryPath(workspace), 'utf8'));
+    const mergedRegistry = await readSiteRegistry(workspace);
+
+    assert.equal(stableRegistry.sites['jable.tv'].repoSkillDir, 'skills/jable');
+    assert.equal(stableRegistry.sites['jable.tv'].rankingQueryEntrypoint, 'src/entrypoints/sites/jable-ranking.mjs');
+    assert.equal(mergedRegistry.sites['jable.tv'].repoSkillDir, repoSkillDir);
+    assert.equal(mergedRegistry.sites['jable.tv'].rankingQueryEntrypoint, rankingQueryEntrypoint);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test('site capabilities keep stable facts in config and timestamps in runtime snapshot', async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-capabilities-runtime-split-'));
   try {
@@ -225,6 +248,7 @@ test('site capabilities keep stable facts in config and timestamps in runtime sn
       adapterId: 'jable',
       capabilityFamilies: ['search-content'],
       supportedIntents: ['search-video'],
+      rankingQueryEntrypoint: path.join(workspace, 'src', 'entrypoints', 'sites', 'jable-ranking.mjs'),
     });
 
     const stableCapabilities = JSON.parse(await readFile(buildSiteCapabilitiesPath(workspace), 'utf8'));
@@ -234,8 +258,10 @@ test('site capabilities keep stable facts in config and timestamps in runtime sn
     assert.equal(stableCapabilities.sites['jable.tv'].baseUrl, 'https://jable.tv/');
     assert.equal(stableCapabilities.sites['jable.tv'].siteKey, 'jable');
     assert.equal(stableCapabilities.sites['jable.tv'].updatedAt, undefined);
+    assert.equal(stableCapabilities.sites['jable.tv'].rankingQueryEntrypoint, undefined);
 
     assert.equal(typeof runtimeCapabilities.sites['jable.tv'].updatedAt, 'string');
+    assert.equal(runtimeCapabilities.sites['jable.tv'].rankingQueryEntrypoint, path.join(workspace, 'src', 'entrypoints', 'sites', 'jable-ranking.mjs'));
     assert.equal(mergedCapabilities.sites['jable.tv'].siteKey, 'jable');
     assert.deepEqual(mergedCapabilities.sites['jable.tv'].supportedIntents, ['search-video']);
     assert.equal(typeof mergedCapabilities.sites['jable.tv'].updatedAt, 'string');
