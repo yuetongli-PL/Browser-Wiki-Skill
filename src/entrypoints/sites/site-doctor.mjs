@@ -10,6 +10,7 @@ import { initializeCliUtf8, writeJsonStdout } from '../../infra/cli.mjs';
 import { openBrowserSession } from '../../infra/browser/session.mjs';
 import { ensureDir, pathExists, readJsonFile, writeJsonFile, writeTextFile } from '../../infra/io.mjs';
 import { sanitizeHost, toArray, uniqueSortedStrings } from '../../shared/normalize.mjs';
+import { detectXiaohongshuRestrictionPage, isXiaohongshuUrl } from '../../shared/xiaohongshu-risk.mjs';
 import { PROFILE_ARCHETYPES } from '../../sites/core/archetypes.mjs';
 import { resolveSite } from '../../sites/core/adapters/resolver.mjs';
 import { resolveProfilePathForUrl } from '../../sites/core/profiles.mjs';
@@ -18,6 +19,7 @@ import { validateProfileFile } from '../../sites/core/profile-validation.mjs';
 import { maybeRunAuthenticatedKeepalivePreflight } from '../../infra/auth/auth-keepalive-preflight.mjs';
 import {
   ensureAuthenticatedSession,
+  exportSiteDownloadPassthrough,
   inspectLoginState,
   resolveAuthVerificationUrl,
   resolveSiteAuthProfile,
@@ -30,11 +32,13 @@ import { ensureCrawlerScript } from '../pipeline/generate-crawler-script.mjs';
 import { capture } from '../pipeline/capture.mjs';
 import { derivePageFacts, expandStates } from '../pipeline/expand-states.mjs';
 import { siteKeepalive } from './site-keepalive.mjs';
+import { siteLogin } from './site-login.mjs';
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(MODULE_DIR, '..', '..', '..');
 const BILIBILI_DOWNLOAD_PYTHON_ENTRY = path.join(REPO_ROOT, 'src', 'sites', 'bilibili', 'download', 'python', 'bilibili.py');
 const BOOK_DOWNLOAD_PYTHON_ENTRY = path.join(REPO_ROOT, 'src', 'sites', 'chapter-content', 'download', 'python', 'book.py');
+const XIAOHONGSHU_ACTION_ENTRY = path.join(REPO_ROOT, 'src', 'entrypoints', 'sites', 'xiaohongshu-action.mjs');
 const DEFAULT_OPTIONS = {
   outDir: path.join(REPO_ROOT, 'runs', 'sites', 'site-doctor'),
   profilePath: null,
@@ -118,7 +122,7 @@ function mergeOptions(inputUrl, options = {}) {
   merged.headless = normalizeBoolean(
     hasExplicitHeadless
       ? merged.headless
-      : (resolveCanonicalSiteKey({ inputUrl }) === 'douyin' ? false : DEFAULT_OPTIONS.headless),
+      : (resolveCanonicalSiteKey({ inputUrl }) === 'douyin' || isXiaohongshuUrl(inputUrl) ? false : DEFAULT_OPTIONS.headless),
     'headless',
   );
   merged.checkDownload = normalizeBoolean(merged.checkDownload, 'checkDownload');
@@ -234,7 +238,29 @@ function extractAntiCrawlSignals(state = null) {
   return uniqueSortedStrings(toArray(state?.pageFacts?.antiCrawlSignals).filter(Boolean));
 }
 
-function resolveScenarioSampleUrl(definition, samples, authSamples) {
+function resolveScenarioSampleUrl(definition, samples, authSamples, context = {}) {
+  if (typeof definition.resolveStartUrl === 'function') {
+    const resolved = definition.resolveStartUrl({
+      samples,
+      authSamples,
+      ...context,
+    });
+    if (typeof resolved === 'string' && resolved.trim()) {
+      return {
+        startUrl: resolved.trim(),
+        missingFieldPaths: [],
+        missingFieldMessage: null,
+      };
+    }
+    if (resolved && typeof resolved === 'object' && String(resolved.startUrl ?? '').trim()) {
+      return {
+        startUrl: String(resolved.startUrl).trim(),
+        missingFieldPaths: Array.isArray(resolved.missingFieldPaths) ? resolved.missingFieldPaths : [],
+        missingFieldMessage: resolved.missingFieldMessage ?? null,
+      };
+    }
+  }
+
   const resolveValue = (containerName, fieldName) => {
     if (!containerName || !fieldName) {
       return '';
@@ -284,6 +310,97 @@ function buildNetworkIdentityFingerprint(inputUrl, userDataDir = null) {
   }
   const fingerprintSource = [normalizedUrl, normalizedUserDataDir].filter(Boolean).join('|');
   return createHash('sha1').update(fingerprintSource).digest('hex').slice(0, 16);
+}
+
+function normalizeNetworkIdentityFingerprint(value) {
+  if (!value) {
+    return null;
+  }
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (typeof value === 'object') {
+    return String(value.fingerprint ?? '').trim() || null;
+  }
+  return null;
+}
+
+function buildXiaohongshuDirectSearchUrl(queryText = '') {
+  const normalizedQuery = String(queryText ?? '').trim();
+  if (!normalizedQuery) {
+    return '';
+  }
+  const url = new URL('https://www.xiaohongshu.com/search_result');
+  url.searchParams.set('keyword', normalizedQuery);
+  url.searchParams.set('type', '51');
+  return url.toString();
+}
+
+function isXiaohongshuTouristSearchState(state = null) {
+  const finalUrl = String(state?.finalUrl ?? '').trim();
+  if (!finalUrl) {
+    return false;
+  }
+  try {
+    const parsed = new URL(finalUrl);
+    return parsed.hostname === 'www.xiaohongshu.com'
+      && parsed.pathname.replace(/\/+$/u, '') === '/explore'
+      && parsed.searchParams.get('source') === 'tourist_search';
+  } catch {
+    return false;
+  }
+}
+
+async function runXiaohongshuDirectSearchFallback(queryText, settings, runtime, validatedProfile, reportDir) {
+  const startUrl = buildXiaohongshuDirectSearchUrl(queryText);
+  if (!startUrl) {
+    return null;
+  }
+  const captureManifest = await runtime.capture(startUrl, {
+    outDir: path.join(reportDir, 'capture-direct-search'),
+    profilePath: validatedProfile.filePath,
+    browserPath: settings.browserPath,
+    browserProfileRoot: settings.browserProfileRoot,
+    userDataDir: settings.userDataDir,
+    timeoutMs: settings.timeoutMs,
+    headless: settings.headless,
+    reuseLoginState: settings.reuseLoginState,
+    autoLogin: settings.autoLogin,
+  });
+  if (!captureManifest?.files?.manifest || captureManifest?.status === 'failed') {
+    return null;
+  }
+  const expandManifest = await runtime.expandStates(startUrl, {
+    initialManifestPath: captureManifest.files.manifest,
+    outDir: path.join(reportDir, 'expand-direct-search'),
+    profilePath: validatedProfile.filePath,
+    browserPath: settings.browserPath,
+    browserProfileRoot: settings.browserProfileRoot,
+    userDataDir: settings.userDataDir,
+    timeoutMs: settings.timeoutMs,
+    headless: settings.headless,
+    reuseLoginState: settings.reuseLoginState,
+    autoLogin: settings.autoLogin,
+    maxTriggers: settings.maxTriggers,
+    maxCapturedStates: settings.maxCapturedStates,
+    searchQueries: [],
+  });
+  const states = await collectExpandedStates(expandManifest, validatedProfile.profile, runtime);
+  return {
+    startUrl,
+    captureManifest,
+    expandManifest,
+    states,
+    searchState: {
+      state_id: 'xiaohongshu-direct-search',
+      finalUrl: captureManifest.finalUrl || startUrl,
+      pageType: 'search-results-page',
+      semanticPageType: 'search-results-page',
+      trigger: { kind: 'search-form' },
+    },
+    detailState: findFirstDetailState(states),
+    authorState: findFirstState(states, (state) => ['author-page', 'author-list-page'].includes(String(state.pageType ?? ''))),
+  };
 }
 
 function deriveNoDedicatedIpRiskAssessment({
@@ -356,6 +473,23 @@ function summarizeReportRisk(report) {
     profileQuarantined: report.authSession.profileQuarantined === true,
   } : null;
   const ranked = [...scenarioCandidates, authCandidate].filter(Boolean);
+  const xiaohongshuRestrictionDetected = isXiaohongshuUrl(report?.site?.url)
+    && (
+      report?.capture?.details?.restrictionDetected === true
+      || ['still-blocked', 'recovery-failed', 'not-eligible'].includes(String(report?.recoveryStatus ?? ''))
+      || report?.antiCrawlReasonCode === 'anti-crawl-verify'
+    );
+  if (xiaohongshuRestrictionDetected) {
+    const restrictionCandidate = ranked.find((candidate) => candidate?.riskCauseCode === 'browser-fingerprint-risk');
+    if (restrictionCandidate) {
+      return {
+        riskCauseCode: restrictionCandidate.riskCauseCode ?? null,
+        riskAction: restrictionCandidate.riskAction ?? null,
+        networkIdentityFingerprint: restrictionCandidate.networkIdentityFingerprint ?? authCandidate?.networkIdentityFingerprint ?? null,
+        profileQuarantined: ranked.some((candidate) => candidate?.profileQuarantined === true),
+      };
+    }
+  }
   let selected = null;
   for (const candidate of ranked) {
     if (!selected || riskPriority(candidate.riskCauseCode) > riskPriority(selected.riskCauseCode)) {
@@ -419,6 +553,23 @@ function buildReportMarkdown(report) {
     lines.push(`- stop reason: ${report.expand.details.budget.stopReason ?? 'none'}`);
   }
 
+  if (report.download?.details?.authPassthrough) {
+    const passthrough = report.download.details.authPassthrough;
+    lines.push('', '## Download Auth Passthrough', '');
+    lines.push(`- Available: ${passthrough.available ? 'yes' : 'no'}`);
+    lines.push(`- Reason code: ${passthrough.reasonCode ?? 'none'}`);
+    lines.push(`- Mode: ${passthrough.passthroughMode ?? 'unavailable'}`);
+    lines.push(`- Session profile available: ${passthrough.sessionProfileAvailable ? 'yes' : 'no'}`);
+    lines.push(`- Cookie header available: ${passthrough.cookieHeaderAvailable ? 'yes' : 'no'}`);
+    lines.push(`- Cookie count: ${passthrough.cookieCount ?? 0}`);
+    lines.push(`- Header names: ${Array.isArray(passthrough.headerNames) && passthrough.headerNames.length ? passthrough.headerNames.join(', ') : 'none'}`);
+    lines.push(`- Cookie file: ${passthrough.cookieFile ?? 'none'}`);
+    lines.push(`- Sidecar path: ${passthrough.sidecarPath ?? 'none'}`);
+    lines.push(`- User data dir: ${passthrough.userDataDir ?? 'none'}`);
+    lines.push(`- Verification URL: ${passthrough.verificationUrl ?? 'none'}`);
+    lines.push(`- Current URL: ${passthrough.currentUrl ?? 'none'}`);
+  }
+
   lines.push('', '## Missing fields', '');
   lines.push(...(report.missingFields.length ? report.missingFields.map((field) => `- ${field}`) : ['- none']));
   lines.push('', '## Next actions', '');
@@ -445,6 +596,14 @@ function buildReportMarkdown(report) {
       lines.push(`- Risk cause code: ${report.authSession.riskCauseCode ?? 'none'}`);
       lines.push(`- Risk action: ${report.authSession.riskAction ?? 'none'}`);
       lines.push(`- Profile quarantined: ${report.authSession.profileQuarantined ? 'yes' : 'no'}`);
+      lines.push(`- Auth bootstrap attempted: ${report.authSession.bootstrapAttempted ? 'yes' : 'no'}`);
+      lines.push(`- Auth bootstrap status: ${report.authSession.bootstrapStatus ?? 'none'}`);
+      lines.push(`- Auth bootstrap credential source: ${report.authSession.bootstrapCredentialsSource ?? 'none'}`);
+      lines.push(`- Auth bootstrap persistence verified: ${report.authSession.bootstrapPersistenceVerified ? 'yes' : 'no'}`);
+      lines.push(`- Manual login still required: ${report.authSession.bootstrapManualLoginRequired ? 'yes' : 'no'}`);
+      if (report.authSession.bootstrapError) {
+        lines.push(`- Auth bootstrap error: ${report.authSession.bootstrapError}`);
+      }
       if (report.authSession.probeFailed) {
         lines.push('- Probe failed: yes');
         lines.push(`- Probe error: ${report.authSession.probeError ?? 'unknown'}`);
@@ -457,6 +616,25 @@ function buildReportMarkdown(report) {
     lines.push(`- Risk action: ${report.riskAction ?? 'none'}`);
     lines.push(`- Network identity fingerprint: ${report.networkIdentityFingerprint ?? 'none'}`);
     lines.push(`- Profile quarantined: ${report.profileQuarantined ? 'yes' : 'no'}`);
+  }
+  if (
+    report.antiCrawlReasonCode
+    || (Array.isArray(report.antiCrawlSignals) && report.antiCrawlSignals.length > 0)
+    || report.recoveryAttempted
+    || report.recoveryStatus
+  ) {
+    lines.push('', '## Restriction Recovery', '');
+    lines.push(`- Anti-crawl reason code: ${report.antiCrawlReasonCode ?? 'none'}`);
+    lines.push(`- Anti-crawl signals: ${Array.isArray(report.antiCrawlSignals) && report.antiCrawlSignals.length ? report.antiCrawlSignals.join(', ') : 'none'}`);
+    lines.push(`- Recovery attempted: ${report.recoveryAttempted ? 'yes' : 'no'}`);
+    lines.push(`- Recovery status: ${report.recoveryStatus ?? 'none'}`);
+    if (report.riskRecovery) {
+      lines.push(`- Initial restriction URL: ${report.riskRecovery.initialUrl ?? 'unknown'}`);
+      lines.push(`- Initial restriction code: ${report.riskRecovery.initialRiskPageCode ?? 'none'}`);
+      lines.push(`- Final URL: ${report.riskRecovery.finalUrl ?? 'unknown'}`);
+      lines.push(`- Final restriction code: ${report.riskRecovery.finalRiskPageCode ?? 'none'}`);
+      lines.push(`- Reused login state: ${report.riskRecovery.reusedLoginState ? 'yes' : 'no'}`);
+    }
   }
   if (Array.isArray(report.scenarios) && report.scenarios.length > 0) {
     lines.push('', '## Scenarios', '');
@@ -621,6 +799,10 @@ async function runCaptureExpandScenario(startUrl, scenarioId, settings, runtime,
       error.runtimeGovernance = captureManifest?.runtimeGovernance ?? null;
       throw error;
     }
+    const restriction = extractXiaohongshuRestrictionFromManifest(startUrl, captureManifest, validatedProfile?.profile);
+    if (restriction) {
+      throw buildRestrictionPageError(restriction);
+    }
     const expandManifest = await runtime.expandStates(startUrl, {
       initialManifestPath: captureManifest.files.manifest,
       outDir: path.join(scenarioDir, 'expand'),
@@ -703,10 +885,51 @@ function buildKeepaliveProbeResult(keepaliveReport, fallbackFingerprint = null) 
     identitySource: loginReportAuth.identitySource ?? null,
     currentUrl: loginReportAuth.currentUrl ?? keepalive.runtimeUrl ?? keepalive.keepaliveUrl ?? null,
     title: loginReportAuth.currentTitle ?? loginReportAuth.title ?? null,
-    networkIdentityFingerprint: keepalive.networkIdentityFingerprint ?? loginReportAuth.networkIdentityFingerprint ?? fallbackFingerprint,
+    networkIdentityFingerprint: normalizeNetworkIdentityFingerprint(keepalive.networkIdentityFingerprint)
+      ?? normalizeNetworkIdentityFingerprint(loginReportAuth.networkIdentityFingerprint)
+      ?? fallbackFingerprint,
     riskCauseCode: keepalive.riskCauseCode ?? loginReportAuth.riskCauseCode ?? null,
     riskAction: keepalive.riskAction ?? loginReportAuth.riskAction ?? null,
     profileQuarantined: keepalive.profileQuarantined === true || loginReportAuth.profileQuarantined === true,
+    bootstrapAttempted: false,
+    bootstrapStatus: null,
+    bootstrapCredentialsSource: null,
+    bootstrapPersistenceVerified: false,
+    bootstrapWaitedForManualLogin: false,
+    bootstrapManualLoginRequired: false,
+    bootstrapReports: null,
+    bootstrapError: null,
+  };
+}
+
+function buildLoginBootstrapProbeResult(loginReport, fallbackFingerprint = null, baseResult = null) {
+  const auth = loginReport?.auth ?? {};
+  const status = String(auth.status ?? '').trim();
+  const authAvailable = auth.persistenceVerified === true
+    || auth.identityConfirmed === true
+    || ['already-authenticated', 'authenticated', 'session-reused', 'manual-login-complete'].includes(status);
+  return {
+    attempted: true,
+    authAvailable,
+    loginStateDetected: auth.loginStateDetected === true || authAvailable || baseResult?.loginStateDetected === true,
+    identityConfirmed: auth.identityConfirmed === true || authAvailable,
+    identitySource: auth.identitySource ?? baseResult?.identitySource ?? null,
+    currentUrl: auth.currentUrl ?? auth.runtimeUrl ?? baseResult?.currentUrl ?? null,
+    title: auth.title ?? baseResult?.title ?? null,
+    networkIdentityFingerprint: normalizeNetworkIdentityFingerprint(auth.networkIdentityFingerprint)
+      ?? baseResult?.networkIdentityFingerprint
+      ?? fallbackFingerprint,
+    riskCauseCode: auth.riskCauseCode ?? baseResult?.riskCauseCode ?? null,
+    riskAction: auth.riskAction ?? baseResult?.riskAction ?? null,
+    profileQuarantined: auth.profileQuarantined === true || baseResult?.profileQuarantined === true,
+    bootstrapAttempted: true,
+    bootstrapStatus: status || null,
+    bootstrapCredentialsSource: auth.credentialsSource ?? null,
+    bootstrapPersistenceVerified: auth.persistenceVerified === true,
+    bootstrapWaitedForManualLogin: auth.waitedForManualLogin === true,
+    bootstrapManualLoginRequired: status === 'credentials-unavailable' || auth.waitStatus === 'timeout',
+    bootstrapReports: loginReport?.reports ?? null,
+    bootstrapError: null,
   };
 }
 
@@ -733,10 +956,20 @@ async function probeReusableLoginSession(inputUrl, settings, runtime, validatedP
       loginStateDetected: false,
       identityConfirmed: false,
       identitySource: null,
+      currentUrl: null,
+      title: null,
       networkIdentityFingerprint: null,
       riskCauseCode: null,
       riskAction: null,
       profileQuarantined: false,
+      bootstrapAttempted: false,
+      bootstrapStatus: null,
+      bootstrapCredentialsSource: null,
+      bootstrapPersistenceVerified: false,
+      bootstrapWaitedForManualLogin: false,
+      bootstrapManualLoginRequired: false,
+      bootstrapReports: null,
+      bootstrapError: null,
     };
   }
 
@@ -745,6 +978,8 @@ async function probeReusableLoginSession(inputUrl, settings, runtime, validatedP
     || inputUrl;
   const networkIdentityFingerprint = buildNetworkIdentityFingerprint(inputUrl, authContext.userDataDir);
   const maxAttempts = isDouyinProfile(validatedProfile?.profile) ? 3 : 2;
+  const canRunXiaohongshuBootstrap = isXiaohongshuUrl(inputUrl)
+    && typeof runtime.siteLogin === 'function';
   let lastError = null;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     let session = null;
@@ -779,7 +1014,7 @@ async function probeReusableLoginSession(inputUrl, settings, runtime, validatedP
         networkIdentityFingerprint: loginState?.networkIdentityFingerprint ?? networkIdentityFingerprint,
         profileQuarantined: loginState?.profileQuarantined === true,
       });
-      return {
+      const probeResult = {
         attempted: true,
         authAvailable: loginState?.identityConfirmed === true,
         loginStateDetected: loginState?.loginStateDetected === true || loginState?.loggedIn === true,
@@ -791,7 +1026,40 @@ async function probeReusableLoginSession(inputUrl, settings, runtime, validatedP
         riskCauseCode: probeRisk.riskCauseCode,
         riskAction: probeRisk.riskAction,
         profileQuarantined: probeRisk.profileQuarantined,
+        bootstrapAttempted: false,
+        bootstrapStatus: null,
+        bootstrapCredentialsSource: null,
+        bootstrapPersistenceVerified: false,
+        bootstrapWaitedForManualLogin: false,
+        bootstrapManualLoginRequired: false,
+        bootstrapReports: null,
+        bootstrapError: null,
       };
+      if (probeResult.authAvailable || !canRunXiaohongshuBootstrap) {
+        return probeResult;
+      }
+      try {
+        const loginReport = await runtime.siteLogin(inputUrl, {
+          profilePath: settings.profilePath,
+          outDir: path.join(settings.reportDir, 'auth-probe-login'),
+          browserPath: settings.browserPath,
+          browserProfileRoot: settings.browserProfileRoot,
+          userDataDir: settings.userDataDir,
+          timeoutMs: settings.timeoutMs,
+          headless: resolveAuthFlowHeadless(settings, validatedProfile?.profile),
+          reuseLoginState: true,
+          waitForManualLogin: false,
+          ...(settings.autoLogin !== undefined ? { autoLogin: settings.autoLogin } : {}),
+        });
+        return buildLoginBootstrapProbeResult(loginReport, networkIdentityFingerprint, probeResult);
+      } catch (bootstrapError) {
+        return {
+          ...probeResult,
+          bootstrapAttempted: true,
+          bootstrapStatus: 'bootstrap-failed',
+          bootstrapError: bootstrapError?.message ?? String(bootstrapError),
+        };
+      }
     } catch (error) {
       lastError = error;
       if (!isRetryableAuthProbeFailure(error) || attempt + 1 >= maxAttempts) {
@@ -813,9 +1081,9 @@ async function probeReusableLoginSession(inputUrl, settings, runtime, validatedP
       browserProfileRoot: settings.browserProfileRoot,
       userDataDir: settings.userDataDir,
       timeoutMs: settings.timeoutMs,
-      headless: settings.headless,
+      headless: resolveAuthFlowHeadless(settings, validatedProfile?.profile),
       reuseLoginState: true,
-      autoLogin: settings.autoLogin,
+      ...(settings.autoLogin !== undefined ? { autoLogin: settings.autoLogin } : {}),
     });
     return buildKeepaliveProbeResult(keepaliveReport, networkIdentityFingerprint);
   }
@@ -848,6 +1116,7 @@ async function validateScenarioMatrix(inputUrl, settings, runtime, validatedProf
   const samples = validatedProfile.profile?.validationSamples ?? {};
   const authSamples = validatedProfile.profile?.authValidationSamples ?? {};
   const authFingerprint = authProbe?.networkIdentityFingerprint ?? null;
+  const primaryRestriction = primaryContext?.restriction ?? null;
   const primaryScenario = suite.buildPrimaryScenario(primaryContext, inputUrl);
   const primaryRisk = deriveNoDedicatedIpRiskAssessment({
     reasonCode: primaryScenario.reasonCode,
@@ -863,7 +1132,11 @@ async function validateScenarioMatrix(inputUrl, settings, runtime, validatedProf
   const missingScenarioFields = [];
 
   for (const definition of suite.scenarioDefinitions) {
-    const sampleResolution = resolveScenarioSampleUrl(definition, samples, authSamples);
+    const sampleResolution = resolveScenarioSampleUrl(definition, samples, authSamples, {
+      primaryContext,
+      profile: validatedProfile.profile,
+      suite,
+    });
     const startUrl = sampleResolution.startUrl;
     if (!startUrl) {
       scenarios.push(buildScenarioResult(definition.id, null, 'skipped', {
@@ -888,6 +1161,24 @@ async function validateScenarioMatrix(inputUrl, settings, runtime, validatedProf
         error: new Error(`Reusable ${suite.siteLabel} login state is unavailable for this authenticated scenario.`),
       }));
       scenarioWarnings.push(`Skipped ${suite.siteLabel} scenario ${definition.id} because no reusable logged-in ${suite.siteLabel} session was detected.`);
+      continue;
+    }
+
+    if (primaryRestriction?.restrictionDetected && !definition.authRequired) {
+      scenarios.push(buildScenarioResult(definition.id, startUrl, 'fail', {
+        expectedSemanticPageType: definition.expectedSemanticPageType,
+        authRequired: false,
+        reasonCode: primaryRestriction.antiCrawlReasonCode ?? 'anti-crawl-verify',
+        antiCrawlSignals: primaryRestriction.antiCrawlSignals ?? [],
+        featuredAuthorCount: 0,
+        featuredContentCount: 0,
+        riskCauseCode: primaryRestriction.riskCauseCode ?? 'browser-fingerprint-risk',
+        riskAction: primaryRestriction.riskAction ?? 'use-visible-browser-warmup',
+        networkIdentityFingerprint: authFingerprint,
+        note: `Capture succeeded on restriction page before ${definition.id} could run.`,
+        error: new Error(`Scenario ${definition.id} was blocked by Xiaohongshu restriction page${primaryRestriction.riskPageCode ? ` ${primaryRestriction.riskPageCode}` : ''}.`),
+      }));
+      scenarioWarnings.push(`Skipped live execution for ${suite.siteLabel} scenario ${definition.id} because capture remained on restriction page${primaryRestriction.riskPageCode ? ` ${primaryRestriction.riskPageCode}` : ''}.`);
       continue;
     }
 
@@ -956,6 +1247,22 @@ async function validateScenarioMatrix(inputUrl, settings, runtime, validatedProf
         scenarioWarnings.push(`${suite.siteLabel} scenario ${definition.id} quarantined the reusable profile for fingerprint ${risk.networkIdentityFingerprint ?? 'unknown'}.`);
       }
     } catch (error) {
+      if (error?.restriction?.restrictionDetected) {
+        const restriction = error.restriction;
+        scenarios.push(buildScenarioResult(definition.id, startUrl, 'fail', {
+          expectedSemanticPageType: definition.expectedSemanticPageType,
+          authRequired: definition.authRequired,
+          reasonCode: restriction.antiCrawlReasonCode ?? 'anti-crawl-verify',
+          antiCrawlSignals: restriction.antiCrawlSignals ?? [],
+          riskCauseCode: restriction.riskCauseCode ?? 'browser-fingerprint-risk',
+          riskAction: restriction.riskAction ?? 'use-visible-browser-warmup',
+          networkIdentityFingerprint: authFingerprint,
+          note: `Expected to validate ${definition.expectedSemanticPageType}.`,
+          error,
+        }));
+        scenarioWarnings.push(`${suite.siteLabel} scenario ${definition.id} was blocked by restriction page${restriction.riskPageCode ? ` ${restriction.riskPageCode}` : ''}.`);
+        continue;
+      }
       const risk = deriveNoDedicatedIpRiskAssessment({
         reasonCode: 'upstream-error',
         authRequired: definition.authRequired,
@@ -980,6 +1287,154 @@ async function validateScenarioMatrix(inputUrl, settings, runtime, validatedProf
   };
 }
 
+function extractXiaohongshuRestrictionFromManifest(inputUrl, manifest, siteProfile = null) {
+  if (!manifest) {
+    return null;
+  }
+  const resolvedPageType = manifest.pageType
+    ?? inferPageTypeFromUrl(manifest.finalUrl ?? inputUrl, siteProfile);
+  return detectXiaohongshuRestrictionPage({
+    inputUrl,
+    finalUrl: manifest.finalUrl ?? inputUrl,
+    title: manifest.title ?? '',
+    pageType: resolvedPageType,
+    pageFacts: manifest.pageFacts ?? null,
+    runtimeEvidence: manifest.runtimeEvidence ?? null,
+  });
+}
+
+function resolveAuthFlowHeadless(settings, siteProfile = null) {
+  return siteProfile?.authSession?.preferVisibleBrowserForAuthenticatedFlows === true
+    ? false
+    : settings.headless;
+}
+
+function buildRestrictionPageError(restriction) {
+  const message = `Scenario capture stayed on Xiaohongshu restriction page${restriction?.riskPageCode ? ` ${restriction.riskPageCode}` : ''}.`;
+  const error = new Error(message);
+  error.code = 'XIAOHONGSHU_RESTRICTION_PAGE';
+  error.restriction = restriction ?? null;
+  return error;
+}
+
+function summarizeRiskRecovery(result = null) {
+  if (!result) {
+    return null;
+  }
+  return {
+    attempted: result.attempted === true,
+    status: result.status ?? null,
+    trigger: result.trigger ?? null,
+    initialUrl: result.initialUrl ?? null,
+    initialRiskPageCode: result.initialRiskPageCode ?? null,
+    finalUrl: result.finalUrl ?? null,
+    finalRiskPageCode: result.finalRiskPageCode ?? null,
+    reusedLoginState: result.reusedLoginState === true,
+    warmupSummary: result.keepaliveReport?.keepalive?.warmupSummary ?? result.keepaliveReport?.loginReport?.auth?.warmupSummary ?? null,
+    sessionHealthSummary: result.keepaliveReport?.keepalive?.sessionHealthSummary
+      ?? result.keepaliveReport?.loginReport?.auth?.sessionHealthSummary
+      ?? null,
+    reports: result.keepaliveReport?.reports ?? null,
+  };
+}
+
+async function maybeRecoverXiaohongshuRestriction(inputUrl, settings, runtime, manifest, siteProfile = null) {
+  const initialRestriction = extractXiaohongshuRestrictionFromManifest(inputUrl, manifest, siteProfile);
+  if (!initialRestriction) {
+    return {
+      attempted: false,
+      status: null,
+      trigger: null,
+      initialRestriction: null,
+      finalRestriction: null,
+      captureManifest: manifest,
+      keepaliveReport: null,
+      initialUrl: manifest?.finalUrl ?? inputUrl,
+      finalUrl: manifest?.finalUrl ?? inputUrl,
+      initialRiskPageCode: null,
+      finalRiskPageCode: null,
+      reusedLoginState: false,
+    };
+  }
+
+  if (typeof runtime.siteKeepalive !== 'function' || !siteProfile?.authSession || settings.reuseLoginState === false) {
+    return {
+      attempted: false,
+      status: 'not-eligible',
+      trigger: null,
+      initialRestriction,
+      finalRestriction: initialRestriction,
+      captureManifest: manifest,
+      keepaliveReport: null,
+      initialUrl: manifest?.finalUrl ?? inputUrl,
+      finalUrl: manifest?.finalUrl ?? inputUrl,
+      initialRiskPageCode: initialRestriction.riskPageCode ?? null,
+      finalRiskPageCode: initialRestriction.riskPageCode ?? null,
+      reusedLoginState: settings.reuseLoginState !== false,
+    };
+  }
+
+  let keepaliveReport = null;
+  let recapturedManifest = manifest;
+  let status = 'still-blocked';
+  try {
+    keepaliveReport = await runtime.siteKeepalive(inputUrl, {
+      profilePath: settings.profilePath,
+      outDir: path.join(settings.reportDir, 'risk-recovery-keepalive'),
+      browserPath: settings.browserPath,
+      browserProfileRoot: settings.browserProfileRoot,
+      userDataDir: settings.userDataDir,
+      timeoutMs: settings.timeoutMs,
+      headless: resolveAuthFlowHeadless(settings, siteProfile),
+      reuseLoginState: true,
+      ...(settings.autoLogin !== undefined ? { autoLogin: settings.autoLogin } : {}),
+    });
+    recapturedManifest = await runtime.capture(inputUrl, {
+      outDir: path.join(settings.reportDir, 'capture-retry'),
+      profilePath: settings.profilePath,
+      browserPath: settings.browserPath,
+      browserProfileRoot: settings.browserProfileRoot,
+      userDataDir: settings.userDataDir,
+      timeoutMs: settings.timeoutMs,
+      headless: settings.headless,
+      reuseLoginState: settings.reuseLoginState,
+      autoLogin: settings.autoLogin,
+    });
+    const finalRestriction = extractXiaohongshuRestrictionFromManifest(inputUrl, recapturedManifest, siteProfile);
+    status = finalRestriction ? 'still-blocked' : 'recovered';
+    return {
+      attempted: true,
+      status,
+      trigger: 'restriction-page',
+      initialRestriction,
+      finalRestriction,
+      captureManifest: recapturedManifest,
+      keepaliveReport,
+      initialUrl: manifest?.finalUrl ?? inputUrl,
+      finalUrl: recapturedManifest?.finalUrl ?? inputUrl,
+      initialRiskPageCode: initialRestriction.riskPageCode ?? null,
+      finalRiskPageCode: finalRestriction?.riskPageCode ?? null,
+      reusedLoginState: true,
+    };
+  } catch (error) {
+    return {
+      attempted: true,
+      status: 'recovery-failed',
+      trigger: 'restriction-page',
+      initialRestriction,
+      finalRestriction: initialRestriction,
+      captureManifest: recapturedManifest,
+      keepaliveReport,
+      error: error?.message ?? String(error),
+      initialUrl: manifest?.finalUrl ?? inputUrl,
+      finalUrl: recapturedManifest?.finalUrl ?? inputUrl,
+      initialRiskPageCode: initialRestriction.riskPageCode ?? null,
+      finalRiskPageCode: initialRestriction.riskPageCode ?? null,
+      reusedLoginState: true,
+    };
+  }
+}
+
 function buildAdapterRecommendation(adapterId) {
   if (adapterId === 'generic-navigation') {
     return 'reuse-generic';
@@ -994,16 +1449,148 @@ function buildAdapterRecommendation(adapterId) {
 }
 
 function buildNextActions(report, sample) {
+  const xiaohongshuRestrictionDetected = isXiaohongshuUrl(report?.site?.url)
+    && (
+      report?.capture?.details?.restrictionDetected === true
+      || ['still-blocked', 'recovery-failed', 'not-eligible'].includes(String(report?.recoveryStatus ?? ''))
+      || report?.riskCauseCode === 'browser-fingerprint-risk'
+    );
+  if (xiaohongshuRestrictionDetected) {
+    return uniqueSortedStrings([
+      report.profile.status === 'fail' ? 'Fix profile validation errors before rerunning site-doctor.' : null,
+      !sample ? 'Add profile.validationSamples.videoSearchQuery, profile.search.knownQueries[0], or pass --query for search validation.' : null,
+      'Run Xiaohongshu keepalive in a visible browser before rerunning site-doctor.',
+      report.sessionReuseWorked === false
+        ? 'Reuse the persistent Xiaohongshu profile and complete one manual login in a visible browser before rerunning.'
+        : 'Reuse the persistent Xiaohongshu profile after keepalive confirms notification or verification access.',
+      ['still-blocked', 'recovery-failed', 'not-eligible'].includes(String(report.recoveryStatus ?? ''))
+        ? 'If Xiaohongshu still returns error_code=300012, switch to a reliable network identity and rerun site-doctor.'
+        : null,
+      'Treat this report as capture-on-restriction-page evidence until a real search/detail/author chain is recovered.',
+    ].filter(Boolean));
+  }
+  const xiaohongshuAuthBootstrapNeeded = isXiaohongshuUrl(report?.site?.url)
+    && report?.sessionReuseWorked === false
+    && (
+      report?.authSession?.bootstrapManualLoginRequired === true
+      || report?.authSession?.bootstrapStatus === 'credentials-unavailable'
+      || report?.authSession?.currentUrl?.startsWith?.('https://www.xiaohongshu.com/login')
+    );
   return uniqueSortedStrings([
     report.profile.status === 'fail' ? 'Fix profile validation errors before rerunning site-doctor.' : null,
     !sample ? 'Add profile.validationSamples.videoSearchQuery, profile.search.knownQueries[0], or pass --query for search validation.' : null,
+    xiaohongshuAuthBootstrapNeeded ? 'Run Xiaohongshu site-login in a visible browser and complete one manual login so /notification can be reused.' : null,
+    xiaohongshuAuthBootstrapNeeded ? 'After manual login finishes, rerun site-doctor to validate notification-inbox with the persistent Xiaohongshu profile.' : null,
     report.search?.status === 'fail' ? 'Update search selectors or the sample query until a search-results page is reachable.' : null,
     report.detail?.status === 'fail' ? 'Confirm content/detail path prefixes and result link selectors.' : null,
     report.author?.status === 'fail' ? 'Verify author path prefixes and author link selectors.' : null,
     report.chapter?.status === 'fail' ? 'Verify chapter selectors and chapter path detection.' : null,
-    report.download?.status === 'fail' ? 'Ensure downloader dependencies are installed and the bilibili login state is reusable before rerunning --check-download.' : null,
+    report.download?.status === 'fail' ? 'Ensure downloader dependencies are installed and any required reusable login state is available before rerunning --check-download.' : null,
     report.adapterRecommendation === 'unknown' ? 'Resolve site adapter selection before onboarding this host.' : null,
   ].filter(Boolean));
+}
+
+async function runProcess(command, args, deps, options = {}) {
+  const resolvedEnv = {
+    ...process.env,
+    PYTHONIOENCODING: 'utf-8',
+    PYTHONUTF8: '1',
+    ...(options.env ?? {}),
+  };
+  if (typeof deps.runProcess === 'function') {
+    return await deps.runProcess(command, args, {
+      cwd: options.cwd ?? REPO_ROOT,
+      env: resolvedEnv,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  }
+  return await new Promise((resolve) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd ?? REPO_ROOT,
+      env: resolvedEnv,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on('error', (error) => {
+      resolve({ code: 1, error: error.message, stdout, stderr });
+    });
+    child.on('close', (code) => {
+      resolve({ code: Number(code ?? 1), stdout, stderr });
+    });
+  });
+}
+
+function parseBilibiliDownloadCheckOutput(stdout = '') {
+  let details = null;
+  let warnings = [];
+  try {
+    const parsed = JSON.parse(stdout || '{}');
+    const diagnostics = Array.isArray(parsed.resolvedItems)
+      ? parsed.resolvedItems
+          .map((item) => ({
+            inputKind: item?.inputKind ?? null,
+            reasonCode: item?.diagnostics?.reasonCode ?? null,
+            status: item?.diagnostics?.status ?? null,
+            antiCrawlSignals: Array.isArray(item?.diagnostics?.antiCrawlSignals) ? item.diagnostics.antiCrawlSignals : [],
+          }))
+          .filter((item) => item.reasonCode || item.status)
+      : [];
+    const inputSources = (parsed.resolvedItems || [])
+      .map((item) => item.inputKind)
+      .filter(Boolean)
+      .map((value) => {
+        if (value === 'watch-later-list') return 'watch-later';
+        if (value === 'collection-list') return 'collection';
+        if (value === 'channel-list') return 'channel';
+        return value;
+      });
+    details = {
+      inputSources,
+      filters: parsed.filters ?? null,
+      usedLoginState: parsed.usedLoginState,
+      reasonCodes: uniqueSortedStrings(diagnostics.map((item) => item.reasonCode).filter(Boolean)),
+      diagnostics,
+      qualityWarning: parsed.qualityPolicy?.requiresLoginForHighestQuality && !parsed.usedLoginState
+        ? 'highest-quality-degraded'
+        : null,
+    };
+    warnings = Array.isArray(parsed.warnings) ? parsed.warnings : [];
+  } catch {}
+  return { details, warnings };
+}
+
+function parseXiaohongshuDownloadCheckOutput(stdout = '') {
+  let details = null;
+  let warnings = [];
+  try {
+    const parsed = JSON.parse(stdout || '{}');
+    const resolution = parsed?.resolution && typeof parsed.resolution === 'object' ? parsed.resolution : null;
+    details = {
+      inputSources: uniqueSortedStrings(Object.keys(resolution?.inputKinds ?? {})),
+      resolvedInputs: Array.isArray(parsed?.resolvedInputs) ? parsed.resolvedInputs : [],
+      resolution,
+      summary: parsed?.download?.summary ?? parsed?.actionSummary ?? null,
+      runDir: parsed?.download?.runDir ?? parsed?.actionSummary?.runDir ?? null,
+      downloadSession: parsed?.downloadSession ?? null,
+      reasonCodes: parsed?.reasonCode ? [parsed.reasonCode] : [],
+      qualityWarning: null,
+    };
+    warnings = uniqueSortedStrings([
+      ...toArray(parsed?.warnings).filter(Boolean),
+      ...toArray(parsed?.download?.warnings).filter(Boolean),
+      ...(parsed?.downloadSession?.status === 'session-export-failed'
+        ? [String(parsed.downloadSession.error ?? 'Xiaohongshu download session export failed.')]
+        : []),
+    ]);
+  } catch {}
+  return { details, warnings };
 }
 
 async function runDownloadCheck(inputUrl, sample, settings, siteProfile, deps) {
@@ -1011,7 +1598,70 @@ async function runDownloadCheck(inputUrl, sample, settings, siteProfile, deps) {
     return await deps.runDownloadCheck(inputUrl, sample, settings, siteProfile);
   }
 
+  const siteKey = resolveCanonicalSiteKey({ inputUrl, profile: siteProfile });
   if (siteProfile?.downloader) {
+    if (siteKey === 'xiaohongshu') {
+      const downloaderInputs = [];
+      if (sample?.url) {
+        downloaderInputs.push(sample.url);
+      }
+      const authorUrl = String(siteProfile?.validationSamples?.authorVideosUrl ?? siteProfile?.validationSamples?.authorUrl ?? '').trim();
+      if (authorUrl) {
+        downloaderInputs.push(authorUrl);
+      }
+      if (downloaderInputs.length === 0 && !String(sample?.query ?? '').trim()) {
+        return { ok: false, error: 'No Xiaohongshu downloader validation sample was available.' };
+      }
+
+      const args = [XIAOHONGSHU_ACTION_ENTRY, 'download', ...downloaderInputs, '--dry-run', '--output', 'full', '--format', 'json'];
+      if (sample?.query) {
+        args.push('--query', sample.query);
+      }
+      if (settings.profilePath) {
+        args.push('--profile-path', settings.profilePath);
+      }
+      if (settings.timeoutMs) {
+        args.push('--timeout', String(settings.timeoutMs));
+      }
+      if (settings.browserPath) {
+        args.push('--browser-path', settings.browserPath);
+      }
+      if (settings.browserProfileRoot) {
+        args.push('--browser-profile-root', settings.browserProfileRoot);
+      }
+      if (settings.userDataDir) {
+        args.push('--user-data-dir', settings.userDataDir);
+      }
+      if (settings.headless === true) {
+        args.push('--headless');
+      } else if (settings.headless === false) {
+        args.push('--no-headless');
+      }
+      if (settings.reuseLoginState === true) {
+        args.push('--reuse-login-state');
+      } else if (settings.reuseLoginState === false) {
+        args.push('--no-reuse-login-state');
+      }
+      if (settings.autoLogin === true) {
+        args.push('--auto-login');
+      } else if (settings.autoLogin === false) {
+        args.push('--no-auto-login');
+      }
+      const result = await runProcess(process.execPath, args, deps, {
+        env: deps.downloadPassthrough?.available ? deps.downloadPassthrough.env : {},
+      });
+      const parsed = parseXiaohongshuDownloadCheckOutput(result.stdout);
+      return {
+        ok: result.code === 0,
+        code: result.code,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        details: parsed.details,
+        warnings: parsed.warnings,
+        error: result.error ?? null,
+      };
+    }
+
     const downloaderInputs = [];
     if (sample?.url) {
       downloaderInputs.push(sample.url);
@@ -1050,86 +1700,28 @@ async function runDownloadCheck(inputUrl, sample, settings, siteProfile, deps) {
     if (settings.profilePath) {
       args.push('--profile-path', settings.profilePath);
     }
-    return await new Promise((resolve) => {
-      const child = spawn(settings.pythonCommand, args, {
-        cwd: REPO_ROOT,
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      let stdout = '';
-      let stderr = '';
-      child.stdout.on('data', (chunk) => {
-        stdout += String(chunk);
-      });
-      child.stderr.on('data', (chunk) => {
-        stderr += String(chunk);
-      });
-      child.on('error', (error) => {
-        resolve({ ok: false, error: error.message, stdout, stderr });
-      });
-      child.on('close', (code) => {
-        let details = null;
-        let warnings = [];
-        try {
-          const parsed = JSON.parse(stdout || '{}');
-          const diagnostics = Array.isArray(parsed.resolvedItems)
-            ? parsed.resolvedItems
-                .map((item) => ({
-                  inputKind: item?.inputKind ?? null,
-                  reasonCode: item?.diagnostics?.reasonCode ?? null,
-                  status: item?.diagnostics?.status ?? null,
-                  antiCrawlSignals: Array.isArray(item?.diagnostics?.antiCrawlSignals) ? item.diagnostics.antiCrawlSignals : [],
-                }))
-                .filter((item) => item.reasonCode || item.status)
-            : [];
-          const inputSources = (parsed.resolvedItems || [])
-            .map((item) => item.inputKind)
-            .filter(Boolean)
-            .map((value) => {
-              if (value === 'watch-later-list') return 'watch-later';
-              if (value === 'collection-list') return 'collection';
-              if (value === 'channel-list') return 'channel';
-              return value;
-            });
-          details = {
-            inputSources,
-            filters: parsed.filters ?? null,
-            usedLoginState: parsed.usedLoginState,
-            reasonCodes: uniqueSortedStrings(diagnostics.map((item) => item.reasonCode).filter(Boolean)),
-            diagnostics,
-            qualityWarning: parsed.qualityPolicy?.requiresLoginForHighestQuality && !parsed.usedLoginState
-              ? 'highest-quality-degraded'
-              : null,
-          };
-          warnings = Array.isArray(parsed.warnings) ? parsed.warnings : [];
-        } catch {}
-        resolve({ ok: code === 0, code, stdout, stderr, details, warnings });
-      });
-    });
+    const result = await runProcess(settings.pythonCommand, args, deps);
+    const parsed = parseBilibiliDownloadCheckOutput(result.stdout);
+    return {
+      ok: result.code === 0,
+      code: result.code,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      details: parsed.details,
+      warnings: parsed.warnings,
+      error: result.error ?? null,
+    };
   }
 
-  return await new Promise((resolve) => {
-    const args = [BOOK_DOWNLOAD_PYTHON_ENTRY, inputUrl, '--book-title', sample.title];
-    const child = spawn(settings.pythonCommand, args, {
-      cwd: REPO_ROOT,
-      env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (chunk) => {
-      stdout += String(chunk);
-    });
-    child.stderr.on('data', (chunk) => {
-      stderr += String(chunk);
-    });
-    child.on('error', (error) => {
-      resolve({ ok: false, error: error.message, stdout, stderr });
-    });
-    child.on('close', (code) => {
-      resolve({ ok: code === 0, code, stdout, stderr });
-    });
-  });
+  const args = [BOOK_DOWNLOAD_PYTHON_ENTRY, inputUrl, '--book-title', sample.title];
+  const result = await runProcess(settings.pythonCommand, args, deps);
+  return {
+    ok: result.code === 0,
+    code: result.code,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    error: result.error ?? null,
+  };
 }
 
 export async function siteDoctor(inputUrl, options = {}, deps = {}) {
@@ -1149,8 +1741,10 @@ export async function siteDoctor(inputUrl, options = {}, deps = {}) {
     readJsonFile,
     resolveSiteAuthProfile,
     resolveSiteBrowserSessionOptions,
+    exportSiteDownloadPassthrough,
     runAuthenticatedKeepalivePreflight: maybeRunAuthenticatedKeepalivePreflight,
     siteKeepalive,
+    siteLogin,
     validateProfileFile,
     resolveSite,
     ...deps,
@@ -1179,10 +1773,15 @@ export async function siteDoctor(inputUrl, options = {}, deps = {}) {
     scenarios: [],
     sessionReuseWorked: null,
     authSession: null,
+    antiCrawlSignals: [],
+    antiCrawlReasonCode: null,
     riskCauseCode: null,
     riskAction: null,
     networkIdentityFingerprint: null,
     profileQuarantined: false,
+    recoveryAttempted: false,
+    recoveryStatus: null,
+    riskRecovery: null,
     warnings: [],
     missingFields: [],
     nextActions: [],
@@ -1304,6 +1903,14 @@ export async function siteDoctor(inputUrl, options = {}, deps = {}) {
               riskAction: authProbe.riskAction ?? null,
               networkIdentityFingerprint: authProbe.networkIdentityFingerprint ?? null,
               profileQuarantined: authProbe.profileQuarantined === true,
+              bootstrapAttempted: authProbe.bootstrapAttempted === true,
+              bootstrapStatus: authProbe.bootstrapStatus ?? null,
+              bootstrapCredentialsSource: authProbe.bootstrapCredentialsSource ?? null,
+              bootstrapPersistenceVerified: authProbe.bootstrapPersistenceVerified === true,
+              bootstrapWaitedForManualLogin: authProbe.bootstrapWaitedForManualLogin === true,
+              bootstrapManualLoginRequired: authProbe.bootstrapManualLoginRequired === true,
+              bootstrapReports: authProbe.bootstrapReports ?? null,
+              bootstrapError: authProbe.bootstrapError ?? null,
               sessionHealthSummary: keepalivePreflight?.sessionHealthSummaryAfter ?? keepalivePreflight?.sessionHealthSummary ?? null,
               keepalivePreflight: {
                 ran: keepalivePreflight?.ran === true,
@@ -1316,6 +1923,15 @@ export async function siteDoctor(inputUrl, options = {}, deps = {}) {
           : null;
         if (authProbe.attempted && !authProbe.authAvailable) {
           report.warnings.push(`No reusable logged-in ${scenarioSuite.siteLabel} session was detected; authenticated-only scenarios may be skipped.`);
+        }
+        if (authProbe.bootstrapAttempted && authProbe.bootstrapStatus) {
+          report.warnings.push(`Attempted ${scenarioSuite.siteLabel} auth bootstrap via site-login; status=${authProbe.bootstrapStatus}.`);
+        }
+        if (authProbe.bootstrapManualLoginRequired) {
+          report.warnings.push(`Automatic ${scenarioSuite.siteLabel} login bootstrap could not authenticate; complete one manual login in the visible browser to reuse authenticated scenarios.`);
+        }
+        if (authProbe.bootstrapError) {
+          report.warnings.push(`Could not complete ${scenarioSuite.siteLabel} auth bootstrap: ${authProbe.bootstrapError}`);
         }
         if (authProbe.attempted && authProbe.profileQuarantined) {
           report.warnings.push(`Reusable ${scenarioSuite.siteLabel} profile was quarantined for fingerprint ${authProbe.networkIdentityFingerprint ?? 'unknown'}.`);
@@ -1333,6 +1949,14 @@ export async function siteDoctor(inputUrl, options = {}, deps = {}) {
           riskCauseCode: null,
           riskAction: null,
           profileQuarantined: false,
+          bootstrapAttempted: false,
+          bootstrapStatus: null,
+          bootstrapCredentialsSource: null,
+          bootstrapPersistenceVerified: false,
+          bootstrapWaitedForManualLogin: false,
+          bootstrapManualLoginRequired: false,
+          bootstrapReports: null,
+          bootstrapError: null,
         };
         report.sessionReuseWorked = false;
         report.authSession = {
@@ -1347,6 +1971,14 @@ export async function siteDoctor(inputUrl, options = {}, deps = {}) {
           riskAction: null,
           networkIdentityFingerprint: null,
           profileQuarantined: false,
+          bootstrapAttempted: false,
+          bootstrapStatus: null,
+          bootstrapCredentialsSource: null,
+          bootstrapPersistenceVerified: false,
+          bootstrapWaitedForManualLogin: false,
+          bootstrapManualLoginRequired: false,
+          bootstrapReports: null,
+          bootstrapError: null,
           sessionHealthSummary: keepalivePreflight?.sessionHealthSummaryAfter ?? keepalivePreflight?.sessionHealthSummary ?? null,
           keepalivePreflight: {
             ran: keepalivePreflight?.ran === true,
@@ -1387,6 +2019,9 @@ export async function siteDoctor(inputUrl, options = {}, deps = {}) {
   }
 
   let captureManifest = null;
+  let initialRestriction = null;
+  let activeRestriction = null;
+  let restrictionRecovery = null;
   try {
     captureManifest = await runtime.capture(inputUrl, {
       outDir: path.join(reportDir, 'capture'),
@@ -1399,11 +2034,41 @@ export async function siteDoctor(inputUrl, options = {}, deps = {}) {
       reuseLoginState: settings.reuseLoginState,
       autoLogin: settings.autoLogin,
     });
+    initialRestriction = extractXiaohongshuRestrictionFromManifest(inputUrl, captureManifest, validatedProfile.profile);
+    if (initialRestriction) {
+      restrictionRecovery = await maybeRecoverXiaohongshuRestriction(inputUrl, settings, runtime, captureManifest, validatedProfile.profile);
+      if (restrictionRecovery?.captureManifest) {
+        captureManifest = restrictionRecovery.captureManifest;
+      }
+      activeRestriction = restrictionRecovery?.finalRestriction ?? initialRestriction;
+      report.antiCrawlSignals = initialRestriction.antiCrawlSignals ?? [];
+      report.antiCrawlReasonCode = initialRestriction.antiCrawlReasonCode ?? null;
+      report.recoveryAttempted = restrictionRecovery?.attempted === true;
+      report.recoveryStatus = restrictionRecovery?.status ?? (restrictionRecovery?.attempted ? 'unknown' : null);
+      report.riskRecovery = summarizeRiskRecovery(restrictionRecovery);
+      if (initialRestriction.restrictionDetected) {
+        report.warnings.push(`Xiaohongshu capture succeeded on restriction page${initialRestriction.riskPageCode ? ` ${initialRestriction.riskPageCode}` : ''}.`);
+      }
+      if (restrictionRecovery?.error) {
+        report.warnings.push(`Xiaohongshu restriction recovery failed: ${restrictionRecovery.error}`);
+      }
+    }
     if (['success', 'partial'].includes(captureManifest.status)) {
       markPass(report.capture, {
         status: captureManifest.status,
         finalUrl: captureManifest.finalUrl,
         manifestPath: captureManifest.files.manifest,
+        initialRestrictionDetected: initialRestriction?.restrictionDetected === true,
+        restrictionDetected: activeRestriction?.restrictionDetected === true,
+        initialRiskPageCode: initialRestriction?.riskPageCode ?? null,
+        riskPageCode: activeRestriction?.riskPageCode ?? null,
+        antiCrawlSignals: initialRestriction?.antiCrawlSignals ?? [],
+        antiCrawlReasonCode: initialRestriction?.antiCrawlReasonCode ?? null,
+        recoveryAttempted: report.recoveryAttempted,
+        recoveryStatus: report.recoveryStatus,
+        note: initialRestriction?.restrictionDetected
+          ? 'Capture succeeded on restriction page.'
+          : null,
       });
       if (captureManifest.error?.message) {
         report.warnings.push(captureManifest.error.message);
@@ -1422,8 +2087,42 @@ export async function siteDoctor(inputUrl, options = {}, deps = {}) {
   report.author = isChapter ? null : createCheck('author');
   report.chapter = isChapter ? createCheck('chapter') : null;
   report.download = (isChapter || hasDownloader) ? createCheck('download') : null;
+  const downloadSiteKey = resolveCanonicalSiteKey({ inputUrl, profile: validatedProfile.profile });
 
   if (captureManifest?.files?.manifest) {
+    if (activeRestriction?.restrictionDetected) {
+      const restrictionMessage = `Xiaohongshu capture remained on restriction page${activeRestriction.riskPageCode ? ` ${activeRestriction.riskPageCode}` : ''}.`;
+      markSkipped(report.expand, restrictionMessage);
+      if (sample && report.search.status === 'pending') {
+        markFail(report.search, new Error(`${restrictionMessage} Search validation did not run.`));
+      }
+      if (report.detail.status === 'pending') {
+        markFail(report.detail, new Error(`${restrictionMessage} Detail validation did not run.`));
+      }
+      if (report.author && report.author.status === 'pending') {
+        markFail(report.author, new Error(`${restrictionMessage} Author validation did not run.`));
+      }
+      if (report.chapter && report.chapter.status === 'pending') {
+        markFail(report.chapter, new Error(`${restrictionMessage} Chapter validation did not run.`));
+      }
+      if (scenarioSuite) {
+        const scenarioMatrix = await validateScenarioMatrix(inputUrl, settings, runtime, validatedProfile, {
+          siteIdentity,
+          captureManifest,
+          restriction: activeRestriction,
+          searchState: null,
+          detailState: null,
+          authorState: null,
+        }, authProbe);
+        report.scenarios = scenarioMatrix.scenarios;
+        report.warnings.push(...scenarioMatrix.warnings);
+        report.missingFields.push(...scenarioMatrix.missingFields);
+        Object.assign(report, summarizeReportRisk(report));
+      } else {
+        report.riskCauseCode = activeRestriction.riskCauseCode ?? report.riskCauseCode;
+        report.riskAction = activeRestriction.riskAction ?? report.riskAction;
+      }
+    } else {
     try {
       const expandManifest = await runtime.expandStates(inputUrl, {
         initialManifestPath: captureManifest.files.manifest,
@@ -1442,12 +2141,33 @@ export async function siteDoctor(inputUrl, options = {}, deps = {}) {
       });
       const states = await collectExpandedStates(expandManifest, validatedProfile.profile, runtime);
       const budget = summarizeDoctorBudget(expandManifest, settings);
-      const searchState = sample
+      let searchState = sample
         ? findFirstState(states, (state) => state.pageType === 'search-results-page' || state.trigger?.kind === 'search-form')
         : null;
-      const detailState = findFirstDetailState(states);
-      const authorState = findFirstState(states, (state) => ['author-page', 'author-list-page'].includes(String(state.pageType ?? '')));
+      let detailState = findFirstDetailState(states);
+      let authorState = findFirstState(states, (state) => ['author-page', 'author-list-page'].includes(String(state.pageType ?? '')));
       const chapterState = findFirstState(states, (state) => state.pageType === 'chapter-page');
+
+      if (
+        resolveCanonicalSiteKey({ inputUrl }) === 'xiaohongshu'
+        && sample?.query
+        && !detailState
+        && isXiaohongshuTouristSearchState(searchState)
+      ) {
+        const directSearchFallback = await runXiaohongshuDirectSearchFallback(
+          sample.query,
+          settings,
+          runtime,
+          validatedProfile,
+          reportDir,
+        );
+        if (directSearchFallback?.detailState) {
+          searchState = directSearchFallback.searchState ?? searchState;
+          detailState = directSearchFallback.detailState;
+          authorState = directSearchFallback.authorState ?? authorState;
+          report.warnings.push('Xiaohongshu doctor fell back from tourist_search to a canonical /search_result capture.');
+        }
+      }
 
       markPass(report.expand, {
         manifestPath: expandManifest.outDir ? path.join(expandManifest.outDir, 'states-manifest.json') : null,
@@ -1513,6 +2233,8 @@ export async function siteDoctor(inputUrl, options = {}, deps = {}) {
       if (scenarioSuite) {
         const scenarioMatrix = await validateScenarioMatrix(inputUrl, settings, runtime, validatedProfile, {
           siteIdentity,
+          captureManifest,
+          restriction: activeRestriction,
           searchState,
           detailState,
           authorState,
@@ -1542,6 +2264,7 @@ export async function siteDoctor(inputUrl, options = {}, deps = {}) {
         ];
         Object.assign(report, summarizeReportRisk(report));
       }
+    }
     }
   } else {
     markSkipped(report.expand, 'Capture did not produce a manifest for expansion.');
@@ -1574,12 +2297,39 @@ export async function siteDoctor(inputUrl, options = {}, deps = {}) {
       markSkipped(report.download, 'Sample title is missing; provide a knownQueries entry with title before enabling download validation.');
       report.missingFields.push('profile.search.knownQueries[0].title');
     } else {
-      const downloadResult = await runDownloadCheck(inputUrl, sample, settings, validatedProfile.profile, runtime);
+      let downloadPassthrough = null;
+      if (downloadSiteKey === 'xiaohongshu') {
+        downloadPassthrough = await runtime.exportSiteDownloadPassthrough(inputUrl, {
+          profilePath: settings.profilePath,
+          browserPath: settings.browserPath,
+          browserProfileRoot: settings.browserProfileRoot,
+          userDataDir: settings.userDataDir,
+          timeoutMs: settings.timeoutMs,
+          headless: resolveAuthFlowHeadless(settings, validatedProfile.profile),
+          reuseLoginState: settings.reuseLoginState,
+          autoLogin: settings.autoLogin,
+        }, {
+          profilePath: settings.profilePath,
+          siteKey: 'xiaohongshu',
+          envToken: 'xiaohongshu',
+          artifactStem: 'xiaohongshu-download',
+        });
+        if (downloadPassthrough?.error) {
+          report.warnings.push(`Could not export Xiaohongshu download auth passthrough: ${downloadPassthrough.error}`);
+        } else if (downloadPassthrough && !downloadPassthrough.available) {
+          report.warnings.push(`Xiaohongshu download auth passthrough is unavailable (${downloadPassthrough.reasonCode ?? 'unknown'}).`);
+        }
+      }
+      const downloadResult = await runDownloadCheck(inputUrl, sample, settings, validatedProfile.profile, {
+        ...runtime,
+        downloadPassthrough,
+      });
       if (downloadResult.ok) {
         const downloadDetails = {
           ...(sample?.title ? { title: sample.title } : {}),
           ...(sample?.url ? { url: sample.url } : {}),
           ...(downloadResult.details ?? {}),
+          ...(downloadPassthrough ? { authPassthrough: downloadPassthrough } : {}),
         };
         markPass(report.download, {
           ...downloadDetails,
@@ -1589,6 +2339,7 @@ export async function siteDoctor(inputUrl, options = {}, deps = {}) {
         markFail(report.download, new Error(downloadResult.error ?? `download validation exited with code ${downloadResult.code ?? 'unknown'}`), {
           stderr: downloadResult.stderr,
           ...(downloadResult.details ?? {}),
+          ...(downloadPassthrough ? { authPassthrough: downloadPassthrough } : {}),
         });
       }
     }

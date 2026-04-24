@@ -90,6 +90,24 @@ export function remapSupportedIntent(intentType, context) {
         default:
           return intentType;
       }
+    case 'xiaohongshu':
+      switch (intentType) {
+        case 'search-video':
+        case 'search-work':
+          return 'search-book';
+        case 'open-video':
+        case 'open-work':
+          return 'open-book';
+        case 'open-up':
+        case 'open-model':
+        case 'open-actress':
+          return 'open-author';
+        case 'download-video':
+        case 'download-work':
+          return 'download-book';
+        default:
+          return intentType;
+      }
     default:
       return intentType;
   }

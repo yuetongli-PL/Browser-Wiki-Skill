@@ -135,6 +135,9 @@ function deriveCrawlerCapabilities(profile) {
   if ((profile?.navigation?.utilityPathPrefixes ?? []).length) {
     capabilities.push('navigate-to-utility-page');
   }
+  if (profile?.downloader) {
+    capabilities.push('download-content');
+  }
   capabilities.push('switch-in-page-state');
   return [...new Set(capabilities)];
 }
@@ -168,6 +171,9 @@ function deriveSupportedIntents(profile, host) {
   }
   if ((profile?.navigation?.utilityPathPrefixes ?? []).length) {
     intents.push('open-utility-page');
+  }
+  if (profile?.downloader) {
+    intents.push('download-book');
   }
   return [...new Set(intents)];
 }

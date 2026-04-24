@@ -4,6 +4,7 @@ import path from 'node:path';
 import { buildBilibiliStateAttributeFacts } from '../../../sites/bilibili/kb/augmentation.mjs';
 import { enrichBilibiliPageFactsForState } from '../../../sites/bilibili/model/surfacing.mjs';
 import { resolveCanonicalSiteKey } from '../../../sites/core/site-identity.mjs';
+import { buildXiaohongshuStateAttributeFacts } from '../../../sites/xiaohongshu/kb/augmentation.mjs';
 import { displayIntentName, normalizeDisplayLabel } from '../../../sites/core/terminology.mjs';
 import {
   cleanText,
@@ -102,8 +103,16 @@ export function buildDataModel(artifacts, options = {}) {
   const riskCategories = toArray(artifacts.governance.riskTaxonomyDocument?.categories);
   const approvalRules = toArray(artifacts.governance.approvalRulesDocument?.rules);
   const recoveryRules = toArray(artifacts.governance.recoveryRulesDocument?.rules);
+  const siteKey = resolveCanonicalSiteKey({
+    baseUrl: artifacts.baseUrl,
+    inputUrl: artifacts.baseUrl,
+    siteContext: options.siteContext ?? null,
+    siteProfile: siteProfile,
+    siteProfileDocument: siteProfile,
+    host: options.host ?? null,
+  });
 
-  if (isBilibiliKnowledgeBase(artifacts.baseUrl, {
+  if (siteKey === 'bilibili' && isBilibiliKnowledgeBase(artifacts.baseUrl, {
     siteContext: options.siteContext ?? null,
     siteProfile: siteProfile,
   })) {
@@ -124,6 +133,10 @@ export function buildDataModel(artifacts, options = {}) {
         statesById,
       });
       state.pageFactHighlights = buildBilibiliStateAttributeFacts(state.pageFacts);
+    }
+  } else if (siteKey === 'xiaohongshu') {
+    for (const state of states) {
+      state.pageFactHighlights = buildXiaohongshuStateAttributeFacts(state.pageFacts);
     }
   }
 

@@ -235,6 +235,7 @@ test('site-doctor entrypoint reaches site-specific scenario suites only through 
   const invalid = resolved.filter((entry) => (
     entry.startsWith('src/sites/bilibili/')
     || entry.startsWith('src/sites/douyin/')
+    || entry.startsWith('src/sites/xiaohongshu/')
   ));
 
   assert.deepEqual(

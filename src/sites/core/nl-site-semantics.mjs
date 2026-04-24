@@ -2,6 +2,7 @@ import { resolveCanonicalSiteKey } from './site-identity.mjs';
 import { createDouyinNlSemantics } from '../douyin/nl/semantics.mjs';
 import { createJableNlSemantics } from '../jable/nl/semantics.mjs';
 import { createMoodyzNlSemantics } from '../moodyz/nl/semantics.mjs';
+import { createXiaohongshuNlSemantics } from '../xiaohongshu/nl/semantics.mjs';
 
 export function resolveSiteNlSemantics({ baseUrl = '', siteProfileDocument = null, deps = {} } = {}) {
   const siteKey = resolveCanonicalSiteKey({
@@ -16,6 +17,8 @@ export function resolveSiteNlSemantics({ baseUrl = '', siteProfileDocument = nul
       return createMoodyzNlSemantics(deps);
     case 'jable':
       return createJableNlSemantics(deps);
+    case 'xiaohongshu':
+      return createXiaohongshuNlSemantics(deps);
     default:
       return null;
   }

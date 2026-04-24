@@ -653,3 +653,172 @@ test('runPipeline runs authenticated keepalive preflight before executing stages
     await rm(workspace, { recursive: true, force: true });
   }
 });
+
+test('runPipeline performs one visible-browser Xiaohongshu keepalive retry and resumes the pipeline after recovery', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-run-pipeline-xiaohongshu-recover-'));
+  let captureCalls = 0;
+  const captureHeadlessModes = [];
+  const keepaliveCalls = [];
+
+  try {
+    const runtime = {
+      stageSpecs: PIPELINE_STAGE_SPECS,
+      stageImpls: createSuccessfulStageImpls(workspace, {
+        async capture(url, options) {
+          captureCalls += 1;
+          captureHeadlessModes.push(options.headless);
+          if (captureCalls === 1) {
+            return {
+              status: 'success',
+              outDir: buildStageDir(workspace, 'capture-risk'),
+              files: { manifest: path.join(buildStageDir(workspace, 'capture-risk'), 'manifest.json') },
+              finalUrl: 'https://www.xiaohongshu.com/website-login/error?error_code=300012&redirectPath=%2Fexplore',
+              title: '安全限制',
+              pageType: 'auth-page',
+              pageFacts: {
+                antiCrawlDetected: true,
+                antiCrawlSignals: ['ip-risk', 'risk-control', 'verify'],
+                antiCrawlReasonCode: 'anti-crawl-verify',
+                riskPageDetected: true,
+                riskPageCode: '300012',
+                redirectPath: '/explore',
+              },
+              runtimeEvidence: {
+                antiCrawlDetected: true,
+                antiCrawlSignals: ['ip-risk', 'risk-control', 'verify'],
+                antiCrawlReasonCode: 'anti-crawl-verify',
+                networkRiskDetected: true,
+                noDedicatedIpRiskDetected: true,
+              },
+              capturedAt: '2026-04-23T00:00:00.000Z',
+            };
+          }
+          return {
+            status: 'success',
+            outDir: buildStageDir(workspace, 'capture-ok'),
+            files: { manifest: path.join(buildStageDir(workspace, 'capture-ok'), 'manifest.json') },
+            finalUrl: url,
+            title: 'Recovered Capture',
+            capturedAt: '2026-04-23T00:01:00.000Z',
+          };
+        },
+      }),
+      async siteKeepalive(_url, options) {
+        keepaliveCalls.push(options);
+        return {
+          keepalive: {
+            status: 'kept-alive',
+            warmupSummary: {
+              attempted: true,
+              completed: true,
+              urls: ['https://www.xiaohongshu.com/notification'],
+            },
+          },
+          reports: {
+            json: path.join(workspace, 'keepalive', 'report.json'),
+            markdown: path.join(workspace, 'keepalive', 'report.md'),
+          },
+        };
+      },
+    };
+
+    const result = await runPipeline('https://www.xiaohongshu.com/explore', {
+      reuseLoginState: true,
+      autoLogin: false,
+    }, runtime);
+
+    assert.equal(captureCalls, 2);
+    assert.deepEqual(captureHeadlessModes, [false, false]);
+    assert.equal(keepaliveCalls.length, 1);
+    assert.equal(keepaliveCalls[0].headless, false);
+    assert.equal(keepaliveCalls[0].reuseLoginState, true);
+    assert.equal(result.pipelineBlockedByRisk, false);
+    assert.equal(result.riskRecovery?.attempted, true);
+    assert.equal(result.riskRecovery?.status, 'recovered');
+    assert.equal(result.kbDir, buildStageDir(workspace, 'kb'));
+    assert.equal(result.skillDir, buildStageDir(workspace, 'skill'));
+    assert.equal(result.stages.capture.status, 'success');
+    assert.equal(result.stages.expanded.status, 'success');
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('runPipeline blocks after one Xiaohongshu keepalive retry when capture stays on the restriction page', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-run-pipeline-xiaohongshu-blocked-'));
+  let captureCalls = 0;
+  const captureHeadlessModes = [];
+  const keepaliveCalls = [];
+
+  try {
+    const runtime = {
+      stageSpecs: PIPELINE_STAGE_SPECS,
+      stageImpls: createSuccessfulStageImpls(workspace, {
+        async capture() {
+          captureCalls += 1;
+          captureHeadlessModes.push(arguments[1]?.headless);
+          return {
+            status: 'success',
+            outDir: buildStageDir(workspace, `capture-${captureCalls}`),
+            files: { manifest: path.join(buildStageDir(workspace, `capture-${captureCalls}`), 'manifest.json') },
+            finalUrl: 'https://www.xiaohongshu.com/website-login/error?error_code=300012&redirectPath=%2Fexplore',
+            title: '安全限制',
+            pageType: 'auth-page',
+            pageFacts: {
+              antiCrawlDetected: true,
+              antiCrawlSignals: ['ip-risk', 'risk-control', 'verify'],
+              antiCrawlReasonCode: 'anti-crawl-verify',
+              riskPageDetected: true,
+              riskPageCode: '300012',
+              redirectPath: '/explore',
+            },
+            runtimeEvidence: {
+              antiCrawlDetected: true,
+              antiCrawlSignals: ['ip-risk', 'risk-control', 'verify'],
+              antiCrawlReasonCode: 'anti-crawl-verify',
+              networkRiskDetected: true,
+              noDedicatedIpRiskDetected: true,
+            },
+            capturedAt: '2026-04-23T00:00:00.000Z',
+          };
+        },
+        async expandStates() {
+          throw new Error('expandStates should not run when Xiaohongshu stays blocked by the restriction page');
+        },
+      }),
+      async siteKeepalive(_url, options) {
+        keepaliveCalls.push(options);
+        return {
+          keepalive: {
+            status: 'kept-alive',
+          },
+          reports: {
+            json: path.join(workspace, 'keepalive', 'report.json'),
+            markdown: path.join(workspace, 'keepalive', 'report.md'),
+          },
+        };
+      },
+    };
+
+    const result = await runPipeline('https://www.xiaohongshu.com/explore', {
+      reuseLoginState: true,
+      autoLogin: false,
+    }, runtime);
+
+    assert.equal(captureCalls, 2);
+    assert.deepEqual(captureHeadlessModes, [false, false]);
+    assert.equal(keepaliveCalls.length, 1);
+    assert.equal(result.pipelineBlockedByRisk, true);
+    assert.equal(result.kbDir, null);
+    assert.equal(result.skillDir, null);
+    assert.equal(result.riskRecovery?.status, 'still-blocked');
+    assert.equal(result.antiCrawlReasonCode, 'anti-crawl-verify');
+    assert.deepEqual(result.antiCrawlSignals, ['ip-risk', 'risk-control', 'verify']);
+    assert.equal(result.riskCauseCode, 'browser-fingerprint-risk');
+    assert.equal(result.riskAction, 'use-visible-browser-warmup');
+    assert.equal(result.stages.capture.status, 'success');
+    assert.equal(result.stages.expanded.status, 'skipped');
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});

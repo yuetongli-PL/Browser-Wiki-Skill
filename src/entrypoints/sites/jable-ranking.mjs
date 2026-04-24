@@ -348,7 +348,6 @@ export async function queryJableRanking(url, options = {}) {
     rankingSupported: true,
     rankingModes: SUPPORTED_RANKING_MODES,
     categoryTaxonomySupported: true,
-    rankingQueryEntrypoint: entrypointPath,
   }, runtimeOptions.siteMetadataOptions ?? {});
   return {
     ok: true,

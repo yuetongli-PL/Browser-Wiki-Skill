@@ -508,6 +508,46 @@ function deriveReportedAuthStatus(authResult, finalLoginState, reopenVerificatio
   return authResult.status;
 }
 
+async function probeReusableSessionBeforeManualWait(session, inputUrl, settings, authContext, authResult, navigationPlan, runtime) {
+  if (!settings.waitForManualLogin || settings.headless) {
+    return null;
+  }
+  if (!authContext?.reuseLoginState || !authContext?.userDataDir || !authContext?.authConfig) {
+    return null;
+  }
+  if (!['credentials-unavailable', 'unauthenticated'].includes(String(authResult?.status ?? ''))) {
+    return null;
+  }
+  if (authResult?.challengeRequired) {
+    return null;
+  }
+
+  const candidateUrls = uniqueUrls([
+    navigationPlan?.verificationUrl,
+    authContext.authConfig.postLoginUrl,
+    navigationPlan?.runtimeUrl,
+  ]);
+
+  for (const url of candidateUrls) {
+    try {
+      await session.navigateAndWait(url, createWaitPolicy(settings.timeoutMs));
+      const loginState = await runtime.inspectLoginState(session, authContext.authConfig);
+      if (loginState?.identityConfirmed === true) {
+        return {
+          ...authResult,
+          status: 'already-authenticated',
+          loginState,
+          reusedLoginStateDetected: true,
+        };
+      }
+    } catch {
+      // Ignore transient navigation failures and keep checking the next auth surface.
+    }
+  }
+
+  return null;
+}
+
 export async function siteLogin(inputUrl, options = {}, deps = {}) {
   const settings = mergeOptions(inputUrl, options);
   const reportDir = path.join(settings.outDir, `${formatTimestampForDir()}_${sanitizeHost(settings.host)}`);
@@ -605,6 +645,18 @@ export async function siteLogin(inputUrl, options = {}, deps = {}) {
     authResult = await runtime.ensureAuthenticatedSession(session, inputUrl, settings, {
       authContext,
     });
+    const reusableSessionProbe = await probeReusableSessionBeforeManualWait(
+      session,
+      inputUrl,
+      settings,
+      authContext,
+      authResult,
+      navigationPlan,
+      runtime,
+    );
+    if (reusableSessionProbe) {
+      authResult = reusableSessionProbe;
+    }
 
     let waitedForManualLogin = false;
     if (
@@ -777,7 +829,7 @@ export async function siteLogin(inputUrl, options = {}, deps = {}) {
     await writeTextFile(reportMarkdownPath, buildReportMarkdown(report));
     return report;
   } finally {
-    if (!closed) {
+    if (!closed && session) {
       await session.close();
     }
     if (!governanceFinalized && governance?.lease) {

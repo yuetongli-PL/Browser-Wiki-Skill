@@ -43,6 +43,248 @@ async function createInitialManifest(workspace, url) {
   return manifestPath;
 }
 
+function createXiaohongshuSiteProfile() {
+  return {
+    host: 'www.xiaohongshu.com',
+    pageTypes: {
+      homeExact: ['/explore'],
+      homePrefixes: [],
+      searchResultsPrefixes: ['/search_result'],
+      contentDetailPrefixes: ['/explore/'],
+      authorPrefixes: ['/user/profile/'],
+      authorListExact: [],
+      authorListPrefixes: [],
+      authorDetailPrefixes: ['/user/profile/'],
+      chapterPrefixes: [],
+      historyPrefixes: [],
+      authPrefixes: ['/login', '/register'],
+      categoryPrefixes: ['/explore'],
+    },
+    search: {
+      formSelectors: ['.search-layout', '.search-layout__top', '.search-input-box'],
+      inputSelectors: [
+        'input#search-input',
+        'input.search-input',
+        'input[placeholder*="搜索"]',
+        'input[type="search"]',
+      ],
+      submitSelectors: [
+        '[aria-label*="搜索"]',
+        '.search-icon',
+        'button[type="submit"]',
+      ],
+      queryParamNames: ['keyword', 'searchkey'],
+      resultBookSelectors: [
+        'section.note-item a[href*="/explore/"]',
+        'a.cover[href*="/explore/"]',
+        'a.title[href*="/explore/"]',
+        'a[href*="/explore/"]',
+      ],
+    },
+    contentDetail: {
+      titleSelectors: [
+        '.note-content .title',
+        '.note-content .desc',
+        'h1',
+        'title',
+      ],
+      authorLinkSelectors: ['a[href*="/user/profile/"]'],
+    },
+    author: {
+      workLinkSelectors: [
+        'section.note-item a[href*="/explore/"]',
+        'a.cover[href*="/explore/"]',
+        'a.title[href*="/explore/"]',
+        'a[href*="/explore/"]',
+      ],
+    },
+  };
+}
+
+class FakeDomElement {
+  constructor(tagName = 'div', attributes = {}, queryMap = {}) {
+    this.tagName = String(tagName).toUpperCase();
+    this.attributes = { ...attributes };
+    this.id = String(attributes.id ?? '');
+    this.innerText = String(attributes.innerText ?? '');
+    this.textContent = String(attributes.textContent ?? this.innerText);
+    this.isConnected = true;
+    this.hidden = false;
+    this._queryMap = new Map(Object.entries(queryMap));
+  }
+
+  getAttribute(name) {
+    return Object.prototype.hasOwnProperty.call(this.attributes, name) ? this.attributes[name] : null;
+  }
+
+  setAttribute(name, value) {
+    this.attributes[name] = String(value);
+    if (name === 'id') {
+      this.id = String(value);
+    }
+  }
+
+  hasAttribute(name) {
+    return Object.prototype.hasOwnProperty.call(this.attributes, name);
+  }
+
+  querySelector(selector) {
+    return this._queryMap.get(selector) ?? null;
+  }
+
+  closest() {
+    return null;
+  }
+
+  getBoundingClientRect() {
+    return { width: 16, height: 16 };
+  }
+}
+
+class FakeDomHTMLElement extends FakeDomElement {
+  constructor(tagName = 'div', attributes = {}, queryMap = {}) {
+    super(tagName, attributes, queryMap);
+  }
+}
+
+class FakeDomFormElement extends FakeDomHTMLElement {
+  constructor(attributes = {}, queryMap = {}) {
+    super('form', attributes, queryMap);
+    this.elements = [];
+  }
+
+  addElement(element) {
+    this.elements.push(element);
+    element.form = this;
+  }
+
+  submit() {
+    this.submitted = true;
+  }
+
+  requestSubmit() {
+    this.requestedSubmit = true;
+  }
+}
+
+class FakeDomInputElement extends FakeDomHTMLElement {
+  constructor(attributes = {}, value = '') {
+    super('input', attributes);
+    this.value = value;
+    this.type = String(attributes.type ?? 'text');
+    this.form = null;
+  }
+
+  focus() {}
+
+  dispatchEvent() {
+    return true;
+  }
+}
+
+class FakeDomTextareaElement extends FakeDomHTMLElement {
+  constructor(attributes = {}, value = '') {
+    super('textarea', attributes);
+    this.value = value;
+    this.form = null;
+  }
+
+  focus() {}
+
+  dispatchEvent() {
+    return true;
+  }
+}
+
+class FakeDomSelectElement extends FakeDomHTMLElement {
+  constructor(attributes = {}, value = '') {
+    super('select', attributes);
+    this.value = value;
+    this.form = null;
+  }
+}
+
+async function withGlobalOverrides(overrides, callback) {
+  const originals = new Map();
+  for (const [key, value] of Object.entries(overrides)) {
+    originals.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
+    Object.defineProperty(globalThis, key, {
+      configurable: true,
+      writable: true,
+      value,
+    });
+  }
+
+  try {
+    return await callback();
+  } finally {
+    for (const [key, descriptor] of originals.entries()) {
+      if (descriptor) {
+        Object.defineProperty(globalThis, key, descriptor);
+      } else {
+        delete globalThis[key];
+      }
+    }
+  }
+}
+
+async function runWithFakeXiaohongshuSearchDom({
+  currentUrl,
+  formAction,
+  inputName = '',
+}, callback) {
+  const input = new FakeDomInputElement({ id: 'search-input', type: 'search', name: inputName });
+  const submit = new FakeDomHTMLElement('button', { 'aria-label': 'Search', type: 'submit' });
+  const form = new FakeDomFormElement({ action: formAction, method: 'get' }, {
+    '[aria-label*="搜索"]': submit,
+    '.search-icon': submit,
+    'button[type="submit"]': submit,
+  });
+  form.addElement(input);
+
+  const queryMap = new Map([
+    ['.search-layout', form],
+    ['.search-layout__top', form],
+    ['.search-input-box', form],
+    ['input#search-input', input],
+    ['input.search-input', input],
+    ['input[placeholder*="搜索"]', input],
+    ['input[type="search"]', input],
+    ['[aria-label*="搜索"]', submit],
+    ['.search-icon', submit],
+    ['button[type="submit"]', submit],
+  ]);
+
+  const document = {
+    baseURI: currentUrl,
+    body: {},
+    querySelector(selector) {
+      return queryMap.get(selector) ?? null;
+    },
+  };
+
+  const location = {
+    href: currentUrl,
+    hostname: new URL(currentUrl).hostname,
+    assign(nextUrl) {
+      const resolved = new URL(nextUrl, this.href).toString();
+      this.href = resolved;
+      this.hostname = new URL(resolved).hostname;
+    },
+  };
+
+  return await withGlobalOverrides({
+    document,
+    location,
+    Element: FakeDomElement,
+    HTMLElement: FakeDomHTMLElement,
+    HTMLFormElement: FakeDomFormElement,
+    HTMLInputElement: FakeDomInputElement,
+    HTMLTextAreaElement: FakeDomTextareaElement,
+    HTMLSelectElement: FakeDomSelectElement,
+  }, callback);
+}
+
 test('capture keeps manifest shape and screenshot fallback behavior when runtime falls back to viewport capture', async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-capture-contract-'));
   const screenshotBase64 = Buffer.from('fake-image').toString('base64');
@@ -814,6 +1056,80 @@ test('expandStates recovers Douyin home navigations from document-ready timeouts
   }
 });
 
+test('expandStates recovers Xiaohongshu explore navigations from document-ready timeouts by waiting for ready markers', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-expand-xiaohongshu-explore-timeout-'));
+  const baseUrl = 'https://www.xiaohongshu.com/explore';
+  const manifestPath = await createInitialManifest(workspace, baseUrl);
+  const navigateCalls = [];
+  const readyMarkerChecks = [];
+  let closed = false;
+  let timeoutCount = 0;
+
+  const fakeSession = {
+    currentViewKey: baseUrl,
+    async navigateAndWait(url, waitPolicy) {
+      navigateCalls.push({ url, waitPolicy });
+      this.currentViewKey = url;
+      if (url === baseUrl && timeoutCount < 1) {
+        timeoutCount += 1;
+        throw new Error('Timed out waiting for document ready');
+      }
+    },
+    async callPageFunction(_fn, selectors) {
+      readyMarkerChecks.push({ url: this.currentViewKey, selectors });
+      return Array.isArray(selectors) && selectors.some((selector) => /note-item|\/explore\//iu.test(String(selector)))
+        ? 2
+        : 0;
+    },
+    async invokeHelperMethod(methodName) {
+      if (methodName === 'pageComputeStateSignature') {
+        return {
+          finalUrl: baseUrl,
+          title: 'Xiaohongshu Explore',
+          viewportWidth: 1280,
+          viewportHeight: 720,
+          pageType: 'home',
+          pageFacts: null,
+          fingerprint: { state: `xhs-home-${navigateCalls.length}` },
+        };
+      }
+      if (methodName === 'pageDiscoverTriggers') {
+        return [];
+      }
+      throw new Error(`unexpected helper method: ${methodName}`);
+    },
+    async close() {
+      closed = true;
+    },
+  };
+
+  try {
+    const manifest = await expandStates(baseUrl, {
+      initialManifestPath: manifestPath,
+      outDir: path.join(workspace, 'expanded'),
+      runtimeFactory: async () => fakeSession,
+      siteProfile: createXiaohongshuSiteProfile(),
+      maxTriggers: 1,
+      searchQueries: [],
+      captureChapterArtifacts: false,
+    });
+
+    assert.equal(manifest.summary.capturedStates, 0);
+    assert.equal(timeoutCount, 1);
+    assert.ok(navigateCalls.length >= 1);
+    assert.equal(navigateCalls[0].waitPolicy.useLoadEvent, false);
+    assert.equal(navigateCalls[0].waitPolicy.useNetworkIdle, false);
+    assert.ok(readyMarkerChecks.length >= 2);
+    assert.equal(
+      readyMarkerChecks.some((entry) => Array.isArray(entry.selectors) && entry.selectors.some((selector) => /note-item|\/explore\//iu.test(String(selector)))),
+      true,
+    );
+    assert.equal(closed, true);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test('expandStates retries the initial bootstrap with a fresh session after a transient CDP disconnect', async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-expand-initial-retry-'));
   const baseUrl = 'https://www.douyin.com/';
@@ -1055,6 +1371,506 @@ test('expandStates uses bilibili search wait policy after submitted search-form 
     assert.equal(postTriggerWaitPolicies[0].useLoadEvent, false);
     assert.equal(postTriggerWaitPolicies[0].useNetworkIdle, false);
     assert.equal(postTriggerWaitPolicies[0].domQuietMs, 160);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('expandStates falls back Xiaohongshu explore search submissions to /search_result and waits for hydrated note cards', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-expand-xiaohongshu-search-wait-'));
+  const baseUrl = 'https://www.xiaohongshu.com/explore';
+  const searchUrl = 'https://www.xiaohongshu.com/search_result?keyword=outfit&type=51';
+  const manifestPath = await createInitialManifest(workspace, baseUrl);
+  const screenshotBase64 = Buffer.from('xiaohongshu-search-image').toString('base64');
+  const navigateCalls = [];
+  const readyMarkerChecks = [];
+
+  const views = {
+    [baseUrl]: {
+      signature: {
+        finalUrl: baseUrl,
+        title: 'Xiaohongshu Explore',
+        viewportWidth: 1280,
+        viewportHeight: 720,
+        pageType: 'home',
+        pageFacts: null,
+        fingerprint: { state: 'xhs-home' },
+      },
+      triggers: [
+        {
+          kind: 'search-form',
+          label: 'Search: outfit',
+          queryText: 'outfit',
+          locator: { tagName: 'form', role: 'search' },
+        },
+      ],
+    },
+    [searchUrl]: {
+      signature: {
+        finalUrl: searchUrl,
+        title: 'outfit - Xiaohongshu Search',
+        viewportWidth: 1280,
+        viewportHeight: 720,
+        pageType: 'search-results-page',
+        pageFacts: { queryText: 'outfit' },
+        fingerprint: { state: 'xhs-search' },
+      },
+      triggers: [],
+    },
+  };
+
+  const fakeSession = {
+    currentViewKey: baseUrl,
+    async navigateAndWait(url, waitPolicy) {
+      navigateCalls.push({ url, waitPolicy });
+      this.currentViewKey = url;
+    },
+    async waitForSettled() {},
+    async callPageFunction(_fn, selectors) {
+      readyMarkerChecks.push({ url: this.currentViewKey, selectors });
+      if (this.currentViewKey === searchUrl) {
+        return Array.isArray(selectors) && selectors.some((selector) => /note-item|\/explore\//iu.test(String(selector)))
+          ? 3
+          : 0;
+      }
+      return Array.isArray(selectors) && selectors.some((selector) => /note-item|\/explore\//iu.test(String(selector)))
+        ? 2
+        : 0;
+    },
+    async invokeHelperMethod(methodName, args, options) {
+      if (methodName === 'pageComputeStateSignature') {
+        return views[this.currentViewKey].signature;
+      }
+      if (methodName === 'pageDiscoverTriggers') {
+        return views[this.currentViewKey].triggers;
+      }
+      if (methodName === 'pageExecuteTrigger') {
+        const result = await runWithFakeXiaohongshuSearchDom({
+          currentUrl: baseUrl,
+          formAction: baseUrl,
+          inputName: '',
+        }, async () => await options.fallbackFn(...args));
+        if (result?.navigationUrl) {
+          this.currentViewKey = result.navigationUrl;
+        }
+        return result;
+      }
+      throw new Error(`unexpected helper method: ${methodName}`);
+    },
+    async captureHtml() {
+      return `<html><body>${this.currentViewKey}</body></html>`;
+    },
+    async captureSnapshot() {
+      return { view: this.currentViewKey };
+    },
+    async captureScreenshot() {
+      return {
+        data: screenshotBase64,
+        usedViewportFallback: false,
+        primaryError: null,
+      };
+    },
+    async close() {},
+  };
+
+  try {
+    const manifest = await expandStates(baseUrl, {
+      initialManifestPath: manifestPath,
+      outDir: path.join(workspace, 'expanded'),
+      runtimeFactory: async () => fakeSession,
+      siteProfile: createXiaohongshuSiteProfile(),
+      maxTriggers: 1,
+      searchQueries: ['outfit'],
+      captureChapterArtifacts: false,
+    });
+
+    assert.equal(manifest.summary.capturedStates, 1);
+    assert.equal(manifest.states.some((state) => state.finalUrl === searchUrl), true);
+    assert.equal(
+      navigateCalls.some((entry) => entry.url === baseUrl && entry.waitPolicy.useLoadEvent === false && entry.waitPolicy.useNetworkIdle === false),
+      true,
+    );
+    assert.equal(
+      navigateCalls.some(
+        (entry) => entry.url === searchUrl
+          && entry.waitPolicy.useLoadEvent === true
+          && entry.waitPolicy.useNetworkIdle === false
+          && entry.waitPolicy.documentReadyTimeoutMs === 5_800
+          && entry.waitPolicy.domQuietMs === 180,
+      ),
+      true,
+    );
+    assert.equal(
+      readyMarkerChecks.some(
+        (entry) => entry.url === searchUrl
+          && Array.isArray(entry.selectors)
+          && entry.selectors.some((selector) => /note-item|\/explore\//iu.test(String(selector))),
+      ),
+      true,
+    );
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('expandStates retries Xiaohongshu tourist_search landings with a canonical /search_result navigation', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-expand-xiaohongshu-tourist-search-'));
+  const baseUrl = 'https://www.xiaohongshu.com/explore';
+  const touristSearchUrl = 'https://www.xiaohongshu.com/explore?source=tourist_search';
+  const searchUrl = 'https://www.xiaohongshu.com/search_result?keyword=outfit&type=51';
+  const manifestPath = await createInitialManifest(workspace, baseUrl);
+  const screenshotBase64 = Buffer.from('xiaohongshu-tourist-search-image').toString('base64');
+  const navigateCalls = [];
+
+  const views = {
+    [baseUrl]: {
+      signature: {
+        finalUrl: baseUrl,
+        title: 'Xiaohongshu Explore',
+        viewportWidth: 1280,
+        viewportHeight: 720,
+        pageType: 'home',
+        pageFacts: null,
+        fingerprint: { state: 'xhs-home' },
+      },
+      triggers: [
+        {
+          kind: 'search-form',
+          label: 'Search: outfit',
+          queryText: 'outfit',
+          locator: { tagName: 'form', role: 'search' },
+        },
+      ],
+    },
+    [touristSearchUrl]: {
+      signature: {
+        finalUrl: touristSearchUrl,
+        title: 'Xiaohongshu Explore Tourist Search',
+        viewportWidth: 1280,
+        viewportHeight: 720,
+        pageType: 'home',
+        pageFacts: null,
+        fingerprint: { state: 'xhs-tourist-search' },
+      },
+      triggers: [],
+    },
+    [searchUrl]: {
+      signature: {
+        finalUrl: searchUrl,
+        title: 'outfit - Xiaohongshu Search',
+        viewportWidth: 1280,
+        viewportHeight: 720,
+        pageType: 'search-results-page',
+        pageFacts: {
+          queryText: 'outfit',
+          resultCount: 1,
+          resultUrls: ['https://www.xiaohongshu.com/explore/note-1'],
+        },
+        fingerprint: { state: 'xhs-search-result' },
+      },
+      triggers: [],
+    },
+  };
+
+  const fakeSession = {
+    currentViewKey: baseUrl,
+    routedThroughTouristSearch: false,
+    async navigateAndWait(url, waitPolicy) {
+      navigateCalls.push({ url, waitPolicy, from: this.currentViewKey });
+      if (url === searchUrl && !this.routedThroughTouristSearch) {
+        this.routedThroughTouristSearch = true;
+        this.currentViewKey = touristSearchUrl;
+        return;
+      }
+      this.currentViewKey = url;
+    },
+    async waitForSettled() {},
+    async callPageFunction() {
+      return this.currentViewKey === searchUrl ? 2 : 0;
+    },
+    async invokeHelperMethod(methodName) {
+      if (methodName === 'pageComputeStateSignature') {
+        return views[this.currentViewKey].signature;
+      }
+      if (methodName === 'pageDiscoverTriggers') {
+        return views[this.currentViewKey].triggers;
+      }
+      throw new Error(`unexpected helper method: ${methodName}`);
+    },
+    async captureHtml() {
+      return `<html><body>${this.currentViewKey}</body></html>`;
+    },
+    async captureSnapshot() {
+      return { view: this.currentViewKey };
+    },
+    async captureScreenshot() {
+      return {
+        data: screenshotBase64,
+        usedViewportFallback: false,
+        primaryError: null,
+      };
+    },
+    async close() {},
+  };
+
+  try {
+    const manifest = await expandStates(baseUrl, {
+      initialManifestPath: manifestPath,
+      outDir: path.join(workspace, 'expanded'),
+      runtimeFactory: async () => fakeSession,
+      siteProfile: createXiaohongshuSiteProfile(),
+      maxTriggers: 1,
+      searchQueries: ['outfit'],
+      captureChapterArtifacts: false,
+    });
+
+    assert.equal(fakeSession.routedThroughTouristSearch, true);
+    assert.equal(manifest.states.some((state) => state.finalUrl === searchUrl), true);
+    assert.equal(manifest.states.some((state) => state.finalUrl === touristSearchUrl), false);
+    assert.equal(navigateCalls.filter((entry) => entry.url === searchUrl).length >= 2, true);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('expandStates chains Xiaohongshu search-results detail selection into detail author selection via page-facts triggers', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-expand-xiaohongshu-selection-chain-'));
+  const baseUrl = 'https://www.xiaohongshu.com/explore';
+  const searchUrl = 'https://www.xiaohongshu.com/search_result?keyword=outfit&type=51';
+  const detailUrl = 'https://www.xiaohongshu.com/explore/6718e70f0000000021031147';
+  const relatedUrl = 'https://www.xiaohongshu.com/explore/6718e70f0000000021031148';
+  const authorUrl = 'https://www.xiaohongshu.com/user/profile/5f123456000000000100abcd';
+  const utilityUrl = 'https://www.xiaohongshu.com/login';
+  const manifestPath = await createInitialManifest(workspace, baseUrl);
+  const screenshotBase64 = Buffer.from('xiaohongshu-selection-chain-image').toString('base64');
+  const navigateCalls = [];
+
+  const views = {
+    [baseUrl]: {
+      signature: {
+        finalUrl: baseUrl,
+        title: 'Xiaohongshu Explore',
+        viewportWidth: 1280,
+        viewportHeight: 720,
+        pageType: 'home',
+        pageFacts: null,
+        fingerprint: { state: 'xhs-home' },
+      },
+      triggers: [
+        {
+          kind: 'search-form',
+          label: 'Search: outfit',
+          queryText: 'outfit',
+          locator: { tagName: 'form', role: 'search', primary: 'search-url-template' },
+        },
+        {
+          kind: 'safe-nav-link',
+          label: 'Login',
+          href: utilityUrl,
+          semanticRole: 'auth',
+          locator: { tagName: 'a', role: 'link', primary: 'nav-link' },
+        },
+      ],
+    },
+    [searchUrl]: {
+      signature: {
+        finalUrl: searchUrl,
+        title: 'outfit - Xiaohongshu Search',
+        viewportWidth: 1280,
+        viewportHeight: 720,
+        pageType: 'search-results-page',
+        pageFacts: {
+          queryText: 'outfit',
+          resultCount: 1,
+          resultUrls: [detailUrl],
+        },
+        fingerprint: { state: 'xhs-search' },
+      },
+      triggers: [
+        {
+          kind: 'safe-nav-link',
+          label: 'Stylist Lab',
+          href: authorUrl,
+          semanticRole: 'author',
+          locator: { tagName: 'a', role: 'link', primary: 'result-author' },
+        },
+        {
+          kind: 'safe-nav-link',
+          label: 'Login',
+          href: utilityUrl,
+          semanticRole: 'auth',
+          locator: { tagName: 'a', role: 'link', primary: 'result-utility' },
+        },
+      ],
+    },
+    [detailUrl]: {
+      signature: {
+        finalUrl: detailUrl,
+        title: 'Spring Outfit Guide',
+        viewportWidth: 1280,
+        viewportHeight: 720,
+        pageType: 'content-detail-page',
+        pageFacts: {
+          contentTitle: 'Spring Outfit Guide',
+          authorName: 'Stylist Lab',
+          authorUrl,
+        },
+        fingerprint: { state: 'xhs-detail' },
+      },
+      triggers: [
+        {
+          kind: 'content-link',
+          label: 'Related Note',
+          href: relatedUrl,
+          semanticRole: 'content',
+          locator: { tagName: 'a', role: 'link', primary: 'detail-related' },
+        },
+      ],
+    },
+    [authorUrl]: {
+      signature: {
+        finalUrl: authorUrl,
+        title: 'Stylist Lab',
+        viewportWidth: 1280,
+        viewportHeight: 720,
+        pageType: 'author-page',
+        pageFacts: {
+          authorName: 'Stylist Lab',
+          featuredContentCount: 2,
+        },
+        fingerprint: { state: 'xhs-author' },
+      },
+      triggers: [],
+    },
+    [relatedUrl]: {
+      signature: {
+        finalUrl: relatedUrl,
+        title: 'Related Note',
+        viewportWidth: 1280,
+        viewportHeight: 720,
+        pageType: 'content-detail-page',
+        pageFacts: null,
+        fingerprint: { state: 'xhs-related' },
+      },
+      triggers: [],
+    },
+    [utilityUrl]: {
+      signature: {
+        finalUrl: utilityUrl,
+        title: 'Login',
+        viewportWidth: 1280,
+        viewportHeight: 720,
+        pageType: 'auth-page',
+        pageFacts: null,
+        fingerprint: { state: 'xhs-login' },
+      },
+      triggers: [],
+    },
+  };
+
+  const fakeSession = {
+    currentViewKey: baseUrl,
+    async navigateAndWait(url, waitPolicy) {
+      navigateCalls.push({ url, waitPolicy, from: this.currentViewKey });
+      this.currentViewKey = url;
+    },
+    async waitForSettled() {},
+    async callPageFunction() {
+      return 2;
+    },
+    async invokeHelperMethod(methodName, args, options) {
+      if (methodName === 'pageComputeStateSignature') {
+        return views[this.currentViewKey].signature;
+      }
+      if (methodName === 'pageDiscoverTriggers') {
+        return views[this.currentViewKey].triggers;
+      }
+      if (methodName === 'pageExecuteTrigger') {
+        const [trigger] = args;
+        assert.equal(trigger.kind, 'search-form');
+        const result = await runWithFakeXiaohongshuSearchDom({
+          currentUrl: baseUrl,
+          formAction: baseUrl,
+          inputName: '',
+        }, async () => await options.fallbackFn(...args));
+        if (result?.navigationUrl) {
+          this.currentViewKey = result.navigationUrl;
+        }
+        return result;
+      }
+      throw new Error(`unexpected helper method: ${methodName}`);
+    },
+    async captureHtml() {
+      return `<html><body>${this.currentViewKey}</body></html>`;
+    },
+    async captureSnapshot() {
+      return { view: this.currentViewKey };
+    },
+    async captureScreenshot() {
+      return {
+        data: screenshotBase64,
+        usedViewportFallback: false,
+        primaryError: null,
+      };
+    },
+    async close() {},
+  };
+
+  try {
+    const manifest = await expandStates(baseUrl, {
+      initialManifestPath: manifestPath,
+      outDir: path.join(workspace, 'expanded'),
+      runtimeFactory: async () => fakeSession,
+      siteProfile: createXiaohongshuSiteProfile(),
+      maxTriggers: 6,
+      maxCapturedStates: 3,
+      searchQueries: ['outfit'],
+      captureChapterArtifacts: false,
+    });
+
+    const searchState = manifest.states.find((state) => state.finalUrl === searchUrl);
+    const detailState = manifest.states.find((state) => state.finalUrl === detailUrl);
+    const authorState = manifest.states.find((state) => state.finalUrl === authorUrl);
+    const capturedStates = manifest.states
+      .filter((state) => state.status === 'captured')
+      .map((state) => ({
+        finalUrl: state.finalUrl,
+        fromState: state.from_state,
+        triggerKind: state.trigger?.kind ?? null,
+        semanticRole: state.trigger?.semanticRole ?? null,
+        locatorPrimary: state.trigger?.locator?.primary ?? null,
+      }));
+
+    assert.equal(manifest.summary.capturedStates, 3);
+    assert.deepEqual(capturedStates, [
+      {
+        finalUrl: searchUrl,
+        fromState: manifest.initialStateId,
+        triggerKind: 'search-form',
+        semanticRole: null,
+        locatorPrimary: 'search-url-template',
+      },
+      {
+        finalUrl: detailUrl,
+        fromState: searchState?.state_id ?? null,
+        triggerKind: 'content-link',
+        semanticRole: 'content',
+        locatorPrimary: 'page-facts',
+      },
+      {
+        finalUrl: authorUrl,
+        fromState: detailState?.state_id ?? null,
+        triggerKind: 'safe-nav-link',
+        semanticRole: 'author',
+        locatorPrimary: 'page-facts',
+      },
+    ]);
+    assert.equal(manifest.states.some((state) => state.finalUrl === relatedUrl), false);
+    assert.equal(manifest.states.some((state) => state.finalUrl === utilityUrl), false);
+    assert.equal(navigateCalls.some((entry) => entry.url === detailUrl), true);
+    assert.equal(navigateCalls.some((entry) => entry.url === authorUrl), true);
+    assert.equal(navigateCalls.some((entry) => entry.url === relatedUrl), false);
+    assert.equal(navigateCalls.some((entry) => entry.url === utilityUrl), false);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

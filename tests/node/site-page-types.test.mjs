@@ -111,6 +111,39 @@ test('inferPageTypeFromUrl recognizes Douyin public, authenticated, and category
   );
 });
 
+test('inferPageTypeFromUrl recognizes Xiaohongshu explore, search, note, and user routes', async () => {
+  const siteProfile = await readJsonFile(path.resolve('profiles/www.xiaohongshu.com.json'));
+
+  assert.equal(
+    inferPageTypeFromUrl('https://www.xiaohongshu.com/explore', siteProfile),
+    'home',
+  );
+  assert.equal(
+    inferPageTypeFromUrl('https://www.xiaohongshu.com/search_result?keyword=%E7%A9%BF%E6%90%AD', siteProfile),
+    'search-results-page',
+  );
+  assert.equal(
+    inferPageTypeFromUrl('https://www.xiaohongshu.com/explore/646f34fd000000001300755c', siteProfile),
+    'book-detail-page',
+  );
+  assert.equal(
+    inferPageTypeFromUrl('https://www.xiaohongshu.com/explore/646f34fd000000001300755c?xsec_token=test', siteProfile),
+    'book-detail-page',
+  );
+  assert.equal(
+    inferPageTypeFromUrl('https://www.xiaohongshu.com/user/profile/5acc62a7e8ac2b04829875e1', siteProfile),
+    'author-page',
+  );
+  assert.equal(
+    inferPageTypeFromUrl('https://www.xiaohongshu.com/website-login/error?error_code=300012&redirectPath=%2Fexplore', siteProfile),
+    'auth-page',
+  );
+  assert.equal(
+    inferPageTypeFromUrl('https://www.xiaohongshu.com/livelist', siteProfile),
+    'unknown-page',
+  );
+});
+
 test('inferPageTypeFromUrl uses adapter-aware Jable model routes while keeping profile-configured routes', async () => {
   const siteProfile = await readJsonFile(path.resolve('profiles/jable.tv.json'));
 
@@ -201,5 +234,18 @@ test('resolveConfiguredPageTypes exposes Douyin author-list and detail page type
   assert.ok(pageTypes.includes('content-detail-page'));
   assert.ok(pageTypes.includes('author-page'));
   assert.ok(pageTypes.includes('author-list-page'));
+  assert.ok(pageTypes.includes('category-page'));
+});
+
+test('resolveConfiguredPageTypes exposes Xiaohongshu author and detail page types', async () => {
+  const siteProfile = await readJsonFile(path.resolve('profiles/www.xiaohongshu.com.json'));
+  const pageTypes = resolveConfiguredPageTypes(siteProfile);
+
+  assert.ok(pageTypes.includes('auth-page'));
+  assert.ok(pageTypes.includes('home'));
+  assert.ok(pageTypes.includes('search-results-page'));
+  assert.ok(pageTypes.includes('book-detail-page'));
+  assert.ok(pageTypes.includes('content-detail-page'));
+  assert.ok(pageTypes.includes('author-page'));
   assert.ok(pageTypes.includes('category-page'));
 });

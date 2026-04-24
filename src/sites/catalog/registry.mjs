@@ -1,5 +1,6 @@
 // @ts-check
 
+import path from 'node:path';
 import { createSiteIndexStore } from './index.mjs';
 
 export const SITE_REGISTRY_FILE_NAME = 'site-registry.json';
@@ -24,6 +25,13 @@ const siteRuntimeRegistryStore = createSiteIndexStore({
   resultPathKey: 'runtimeRegistryPath',
 });
 
+const REGISTRY_STABLE_PATH_KEYS = Object.freeze([
+  'downloadEntrypoint',
+  'rankingQueryEntrypoint',
+  'repoSkillDir',
+  'crawlerScriptsDir',
+]);
+
 function normalizeRegistryPathOptions(pathOptions = {}) {
   return {
     configDir: pathOptions?.configDir ?? pathOptions?.siteMetadataConfigDir ?? null,
@@ -38,18 +46,64 @@ function normalizeRuntimeRegistryPathOptions(pathOptions = {}) {
   };
 }
 
-function mergeSiteDocuments(stableDocument, runtimeDocument) {
+function isUrlLike(value) {
+  return /^[a-z][a-z0-9+.-]*:\/\//iu.test(String(value ?? '').trim());
+}
+
+function toRepoRelativePath(workspaceRoot, value) {
+  const text = String(value ?? '').trim();
+  if (!text || isUrlLike(text)) {
+    return value;
+  }
+  const resolvedRoot = path.resolve(workspaceRoot);
+  const resolvedValue = path.isAbsolute(text) ? path.normalize(text) : path.resolve(resolvedRoot, text);
+  const relative = path.relative(resolvedRoot, resolvedValue);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+    return value;
+  }
+  return relative.split(path.sep).join('/');
+}
+
+function resolveRepoRelativePath(workspaceRoot, value) {
+  const text = String(value ?? '').trim();
+  if (!text || isUrlLike(text) || path.isAbsolute(text)) {
+    return value;
+  }
+  return path.resolve(workspaceRoot, text.split('/').join(path.sep));
+}
+
+function normalizeStableRegistryPatch(workspaceRoot, patch = {}) {
+  const normalizedPatch = { ...patch };
+  for (const key of REGISTRY_STABLE_PATH_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(normalizedPatch, key)) {
+      normalizedPatch[key] = toRepoRelativePath(workspaceRoot, normalizedPatch[key]);
+    }
+  }
+  return normalizedPatch;
+}
+
+function resolveRegistryRecordPaths(workspaceRoot, record = {}) {
+  const resolvedRecord = { ...record };
+  for (const key of REGISTRY_STABLE_PATH_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(resolvedRecord, key)) {
+      resolvedRecord[key] = resolveRepoRelativePath(workspaceRoot, resolvedRecord[key]);
+    }
+  }
+  return resolvedRecord;
+}
+
+function mergeSiteDocuments(stableDocument, runtimeDocument, workspaceRoot = process.cwd()) {
   const mergedSites = {};
   const siteKeys = new Set([
     ...Object.keys(stableDocument?.sites ?? {}),
     ...Object.keys(runtimeDocument?.sites ?? {}),
   ]);
   for (const siteKey of siteKeys) {
-    mergedSites[siteKey] = {
+    mergedSites[siteKey] = resolveRegistryRecordPaths(workspaceRoot, {
       ...(stableDocument?.sites?.[siteKey] ?? {}),
       ...(runtimeDocument?.sites?.[siteKey] ?? {}),
       host: siteKey,
-    };
+    });
   }
   return {
     ...(stableDocument ?? {}),
@@ -98,13 +152,14 @@ export async function readSiteRegistry(workspaceRoot = process.cwd(), pathOption
     siteRegistryStore.read(workspaceRoot, normalizeRegistryPathOptions(pathOptions)),
     siteRuntimeRegistryStore.read(workspaceRoot, normalizeRuntimeRegistryPathOptions(pathOptions)),
   ]);
-  return mergeSiteDocuments(stableDocument, runtimeDocument);
+  return mergeSiteDocuments(stableDocument, runtimeDocument, workspaceRoot);
 }
 
 export async function upsertSiteRegistryRecord(workspaceRoot, host, patch, pathOptions = {}) {
   const { stablePatch, runtimePatch } = splitRegistryPatch(patch);
-  const stableResult = Object.keys(stablePatch).length > 0
-    ? await siteRegistryStore.upsert(workspaceRoot, host, stablePatch, normalizeRegistryPathOptions(pathOptions))
+  const normalizedStablePatch = normalizeStableRegistryPatch(workspaceRoot, stablePatch);
+  const stableResult = Object.keys(normalizedStablePatch).length > 0
+    ? await siteRegistryStore.upsert(workspaceRoot, host, normalizedStablePatch, normalizeRegistryPathOptions(pathOptions))
     : {
       registryPath: buildSiteRegistryPath(workspaceRoot, pathOptions),
       record: null,
@@ -119,7 +174,7 @@ export async function upsertSiteRegistryRecord(workspaceRoot, host, patch, pathO
     ...stableResult,
     ...runtimeResult,
     record: {
-      ...(stableResult.record ?? {}),
+      ...resolveRegistryRecordPaths(workspaceRoot, stableResult.record ?? {}),
       ...(runtimeResult.record ?? {}),
       host: stableResult.record?.host ?? runtimeResult.record?.host ?? host,
     },

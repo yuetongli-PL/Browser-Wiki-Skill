@@ -3,6 +3,7 @@ import { BILIBILI_SITE_RENDERER } from './sites/bilibili.mjs';
 import { DOUYIN_SITE_RENDERER } from './sites/douyin.mjs';
 import { JABLE_SITE_RENDERER } from './sites/jable.mjs';
 import { MOODYZ_SITE_RENDERER } from './sites/moodyz.mjs';
+import { XIAOHONGSHU_SITE_RENDERER } from './sites/xiaohongshu.mjs';
 
 export const KNOWN_SITE_RENDERERS = Object.freeze({
   moodyz: MOODYZ_SITE_RENDERER,
@@ -10,4 +11,5 @@ export const KNOWN_SITE_RENDERERS = Object.freeze({
   '22biqu': BIQU_22_SITE_RENDERER,
   bilibili: BILIBILI_SITE_RENDERER,
   douyin: DOUYIN_SITE_RENDERER,
+  xiaohongshu: XIAOHONGSHU_SITE_RENDERER,
 });

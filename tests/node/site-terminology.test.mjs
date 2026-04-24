@@ -21,9 +21,15 @@ test('resolveSiteTerminology returns jable Chinese labels', () => {
   assert.equal(terms.personLabel, '演员');
 });
 
+test('resolveSiteTerminology returns Xiaohongshu note and user labels', () => {
+  const terms = resolveSiteTerminology({ host: 'www.xiaohongshu.com' }, 'https://www.xiaohongshu.com/explore');
+  assert.equal(terms.entityLabel, '笔记');
+  assert.equal(terms.personLabel, '用户');
+});
+
 test('normalizeDisplayLabel strips jable site suffix and keeps code', () => {
   const label = normalizeDisplayLabel(
-    'JUR-652 性欲が強過ぎる彼女の母がどストライクな僕は - Jable.TV',
+    'JUR-652 性慾が歓迎される彼女の母がストライクな僕は...- Jable.TV',
     { siteContext: { host: 'jable.tv' }, inputUrl: 'https://jable.tv/', url: 'https://jable.tv/videos/jur-652/', pageType: 'book-detail-page' },
   );
   assert.match(label, /^JUR-652 /u);
@@ -31,7 +37,7 @@ test('normalizeDisplayLabel strips jable site suffix and keeps code', () => {
 });
 
 test('normalizeDisplayLabel maps jable models root to actor list', () => {
-  const label = normalizeDisplayLabel('👩 按女優', {
+  const label = normalizeDisplayLabel('👯 按女优', {
     siteContext: { host: 'jable.tv' },
     inputUrl: 'https://jable.tv/',
     url: 'https://jable.tv/models/',
@@ -73,19 +79,19 @@ test('normalizeDisplayLabel localizes jable category pages', () => {
 
 test('normalizeDisplayLabel extracts jable actor name from author page title', () => {
   assert.equal(
-    normalizeDisplayLabel('愛才りあ 出演的AV在線看 - Jable.TV | 免費高清AV在線看 | J片 AV看到飽', {
+    normalizeDisplayLabel('愈々あき 出演的AV在线观看- Jable.TV | 免費高清AV在线观看| JAPORN.TV', {
       siteContext: { host: 'jable.tv' },
       inputUrl: 'https://jable.tv/',
       url: 'https://jable.tv/models/95898564176258a0cff5ef1f3e45431e/',
       pageType: 'author-page',
     }),
-    '愛才りあ',
+    '愈々あき',
   );
 });
 
 test('normalizeDisplayLabel extracts jable category label from page title', () => {
   assert.equal(
-    normalizeDisplayLabel('Cosplay AV在線看 - Jable.TV | 免費高清AV在線看 | J片 AV看到飽', {
+    normalizeDisplayLabel('Cosplay AV在线观看- Jable.TV | 免費高清AV在线观看| JAPORN.TV', {
       siteContext: { host: 'jable.tv' },
       inputUrl: 'https://jable.tv/',
       url: 'https://jable.tv/tags/Cosplay/',
@@ -100,4 +106,15 @@ test('displayIntentName localizes jable intents', () => {
   assert.equal(displayIntentName('open-video', { host: 'jable.tv' }, 'https://jable.tv/'), '打开影片');
   assert.equal(displayIntentName('open-model', { host: 'jable.tv' }, 'https://jable.tv/'), '打开演员页');
   assert.equal(displayIntentName('open-category', { host: 'jable.tv' }, 'https://jable.tv/'), '打开分类页');
+});
+
+test('displayIntentName localizes Xiaohongshu intents', () => {
+  assert.equal(displayIntentName('search-book', { host: 'www.xiaohongshu.com' }, 'https://www.xiaohongshu.com/explore'), '搜索笔记');
+  assert.equal(displayIntentName('open-book', { host: 'www.xiaohongshu.com' }, 'https://www.xiaohongshu.com/explore'), '打开笔记');
+  assert.equal(displayIntentName('open-author', { host: 'www.xiaohongshu.com' }, 'https://www.xiaohongshu.com/explore'), '打开用户主页');
+  assert.equal(displayIntentName('open-category', { host: 'www.xiaohongshu.com' }, 'https://www.xiaohongshu.com/explore'), '打开发现页');
+  assert.equal(displayIntentName('open-utility-page', { host: 'www.xiaohongshu.com' }, 'https://www.xiaohongshu.com/explore'), '打开通知页');
+  assert.equal(displayIntentName('download-book', { host: 'www.xiaohongshu.com' }, 'https://www.xiaohongshu.com/explore'), '下载笔记');
+  assert.equal(displayIntentName('list-followed-users', { host: 'www.xiaohongshu.com' }, 'https://www.xiaohongshu.com/explore'), '查询关注用户列表');
+  assert.equal(displayIntentName('list-followed-updates', { host: 'www.xiaohongshu.com' }, 'https://www.xiaohongshu.com/explore'), '查询关注用户最近更新');
 });

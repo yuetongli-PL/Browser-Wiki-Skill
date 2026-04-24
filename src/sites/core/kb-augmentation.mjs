@@ -1,6 +1,7 @@
 // @ts-check
 
 import { bilibiliKnowledgeBaseAugmentation } from '../bilibili/kb/augmentation.mjs';
+import { xiaohongshuKnowledgeBaseAugmentation } from '../xiaohongshu/kb/augmentation.mjs';
 import { resolveCanonicalSiteKey } from './site-identity.mjs';
 
 export const emptyKnowledgeBaseAugmentation = Object.freeze({
@@ -34,6 +35,8 @@ export function resolveKnowledgeBaseAugmentation({
   switch (siteKey) {
     case 'bilibili':
       return bilibiliKnowledgeBaseAugmentation;
+    case 'xiaohongshu':
+      return xiaohongshuKnowledgeBaseAugmentation;
     default:
       return emptyKnowledgeBaseAugmentation;
   }

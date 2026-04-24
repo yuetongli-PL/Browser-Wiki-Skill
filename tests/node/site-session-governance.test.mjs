@@ -339,3 +339,75 @@ test('finalizeSiteSessionGovernance persists auth session state and exposes a se
     await rm(workspace, { recursive: true, force: true });
   }
 });
+
+test('finalizeSiteSessionGovernance clears active quarantine after a healthy authenticated recovery', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-auth-session-recovery-'));
+  try {
+    await writeProfileQuarantine(workspace, {
+      riskCauseCode: 'browser-fingerprint-risk',
+      riskAction: 'use-visible-browser-warmup',
+      antiCrawlSignals: ['verify'],
+      cooldownMinutes: 180,
+    }, {
+      now: new Date('2026-04-23T15:56:24.006Z'),
+    });
+
+    const governance = await prepareSiteSessionGovernance(
+      'https://www.xiaohongshu.com/notification',
+      {
+        authConfig: {
+          loginUrl: 'https://www.xiaohongshu.com/login?redirectPath=https%3A%2F%2Fwww.xiaohongshu.com%2Fnotification',
+          postLoginUrl: 'https://www.xiaohongshu.com/notification',
+          verificationUrl: 'https://www.xiaohongshu.com/notification',
+          keepaliveUrl: 'https://www.xiaohongshu.com/notification',
+          keepaliveIntervalMinutes: 180,
+          cooldownMinutesAfterRisk: 180,
+          preferVisibleBrowserForAuthenticatedFlows: true,
+          requireStableNetworkForAuthenticatedFlows: true,
+        },
+        userDataDir: workspace,
+      },
+      {
+        reuseLoginState: true,
+        userDataDir: workspace,
+      },
+      {
+        operation: 'site-login',
+        now: new Date('2026-04-23T16:05:00.000Z'),
+        networkOptions: {
+          disableExternalLookup: true,
+        },
+      },
+    );
+
+    assert.equal(governance.policyDecision.allowed, true);
+    assert.equal(governance.policyDecision.profileQuarantined, true);
+
+    const summary = await finalizeSiteSessionGovernance(governance, {
+      authRequired: true,
+      authAvailable: true,
+      identityConfirmed: true,
+      loginStateDetected: true,
+      persistedHealthySession: true,
+      sessionReuseVerified: true,
+      warmupSummary: {
+        attempted: false,
+        completed: false,
+        urls: [],
+      },
+    }, {
+      now: new Date('2026-04-23T16:05:00.000Z'),
+    });
+
+    const persistedState = await readAuthSessionState(workspace);
+    assert.equal(summary.riskCauseCode, null);
+    assert.equal(summary.riskAction, null);
+    assert.equal(summary.profileQuarantined, false);
+    assert.equal(persistedState?.profileQuarantined, false);
+    assert.equal(await readProfileQuarantine(workspace, {
+      now: new Date('2026-04-23T16:05:00.000Z'),
+    }), null);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});

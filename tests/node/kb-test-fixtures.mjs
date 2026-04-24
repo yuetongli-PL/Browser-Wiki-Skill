@@ -755,6 +755,288 @@ async function createBilibiliSourceFixture(rootDir) {
   };
 }
 
+async function createXiaohongshuSourceFixture(rootDir) {
+  const url = 'https://www.xiaohongshu.com/explore';
+  const host = 'www.xiaohongshu.com';
+  const searchUrl = 'https://www.xiaohongshu.com/search_result?keyword=%E6%98%A5%E6%97%A5%E7%A9%BF%E6%90%AD';
+  const noteUrl = 'https://www.xiaohongshu.com/explore/6718e70f0000000021031147';
+  const userUrl = 'https://www.xiaohongshu.com/user/profile/5f123456000000000100abcd';
+  const loginUrl = 'https://www.xiaohongshu.com/login';
+  const registerUrl = 'https://www.xiaohongshu.com/register';
+  const fixture = await createSiteKnowledgeBaseFixture(rootDir, {
+    host,
+    inputUrl: url,
+    baseUrl: url,
+    siteProfile: {
+      host,
+      navigation: {
+        allowedHosts: ['www.xiaohongshu.com'],
+        categoryLabelKeywords: ['发现'],
+        authPathPrefixes: ['/login', '/register'],
+      },
+      search: {
+        defaultQueries: ['春日穿搭'],
+        knownQueries: [
+          {
+            query: '春日穿搭',
+            title: '春日穿搭模板',
+            authorName: '穿搭研究所',
+          },
+        ],
+      },
+      validationSamples: {
+        categoryPopularUrl: url,
+        videoSearchQuery: '春日穿搭',
+        videoDetailUrl: noteUrl,
+        authorUrl: userUrl,
+      },
+      authSession: {
+        loginUrl,
+        postLoginUrl: url,
+      },
+      authValidationSamples: {
+        notificationUrl: 'https://www.xiaohongshu.com/notification',
+      },
+      pageTypes: {
+        authPrefixes: ['/login', '/register'],
+        categoryPrefixes: ['/explore'],
+      },
+    },
+    pageIndex: [
+      { pageId: 'page_readme', kind: 'readme', path: 'wiki/README.md' },
+    ],
+    capture: {
+      inputUrl: url,
+      finalUrl: url,
+      title: '小红书发现页',
+    },
+    expandedStates: {
+      inputUrl: url,
+      baseUrl: url,
+      states: [
+        {
+          stateId: 's_home',
+          slug: 'discover',
+          stateName: '发现页',
+          finalUrl: url,
+          title: '发现',
+          pageType: 'home',
+          pageFacts: {
+            categoryName: '发现',
+          },
+        },
+        {
+          stateId: 's_search',
+          slug: 'search',
+          stateName: '搜索结果',
+          finalUrl: searchUrl,
+          title: '搜索 春日穿搭',
+          pageType: 'search-results-page',
+          pageFacts: {
+            queryText: '春日穿搭',
+            resultCount: 1,
+            resultNoteIds: ['6718e70f0000000021031147'],
+            resultAuthorUserIds: ['5f123456000000000100abcd'],
+          },
+        },
+        {
+          stateId: 's_note',
+          slug: 'note',
+          stateName: '笔记详情',
+          finalUrl: noteUrl,
+          title: '春日穿搭模板',
+          pageType: 'content-detail-page',
+          pageFacts: {
+            noteId: '6718e70f0000000021031147',
+            noteTitle: '春日穿搭模板',
+            contentTitle: '春日穿搭模板',
+            authorName: '穿搭研究所',
+            authorUserId: '5f123456000000000100abcd',
+          },
+        },
+        {
+          stateId: 's_user',
+          slug: 'user',
+          stateName: '用户主页',
+          finalUrl: userUrl,
+          title: '穿搭研究所',
+          pageType: 'author-page',
+          pageFacts: {
+            authorName: '穿搭研究所',
+            authorUserId: '5f123456000000000100abcd',
+            userName: '穿搭研究所',
+            featuredContentCount: 2,
+            featuredContentComplete: true,
+            featuredContentCards: [
+              {
+                title: '春日穿搭模板',
+                url: noteUrl,
+                noteId: '6718e70f0000000021031147',
+                authorName: '穿搭研究所',
+                authorUserId: '5f123456000000000100abcd',
+                contentType: 'normal',
+              },
+              {
+                title: '通勤极简公式',
+                url: 'https://www.xiaohongshu.com/explore/6718e70f0000000021031148',
+                noteId: '6718e70f0000000021031148',
+                authorName: '穿搭研究所',
+                authorUserId: '5f123456000000000100abcd',
+                contentType: 'video',
+              },
+            ],
+          },
+        },
+        {
+          stateId: 's_auth',
+          slug: 'login',
+          stateName: '登录页',
+          finalUrl: loginUrl,
+          title: '登录页',
+          pageType: 'auth-page',
+        },
+      ],
+    },
+    elements: [
+      { elementId: 'search-form', kind: 'search-form-group' },
+      { elementId: 'note-link', kind: 'content-link-group' },
+      { elementId: 'user-link', kind: 'author-link-group' },
+      { elementId: 'discover-link', kind: 'category-link-group' },
+      { elementId: 'auth-link', kind: 'auth-link-group' },
+    ],
+    states: [
+      stateRecord({
+        stateId: 's_home',
+        stateName: '发现页',
+        pageType: 'home',
+        finalUrl: url,
+        title: '发现',
+        pageFacts: {
+          categoryName: '发现',
+        },
+      }),
+      stateRecord({
+        stateId: 's_search',
+        stateName: '搜索结果',
+        pageType: 'search-results-page',
+        finalUrl: searchUrl,
+        title: '搜索 春日穿搭',
+        pageFacts: {
+          queryText: '春日穿搭',
+          resultCount: 1,
+          resultNoteIds: ['6718e70f0000000021031147'],
+          resultAuthorUserIds: ['5f123456000000000100abcd'],
+        },
+      }),
+      stateRecord({
+        stateId: 's_note',
+        stateName: '笔记详情',
+        pageType: 'content-detail-page',
+        finalUrl: noteUrl,
+        title: '春日穿搭模板',
+        pageFacts: {
+          noteId: '6718e70f0000000021031147',
+          noteTitle: '春日穿搭模板',
+          contentTitle: '春日穿搭模板',
+          authorName: '穿搭研究所',
+          authorUserId: '5f123456000000000100abcd',
+        },
+      }),
+      stateRecord({
+        stateId: 's_user',
+        stateName: '用户主页',
+        pageType: 'author-page',
+        finalUrl: userUrl,
+        title: '穿搭研究所',
+        pageFacts: {
+          authorName: '穿搭研究所',
+          authorUserId: '5f123456000000000100abcd',
+          userName: '穿搭研究所',
+          featuredContentCount: 2,
+          featuredContentComplete: true,
+          featuredContentCards: [
+            {
+              title: '春日穿搭模板',
+              url: noteUrl,
+              noteId: '6718e70f0000000021031147',
+              authorName: '穿搭研究所',
+              authorUserId: '5f123456000000000100abcd',
+              contentType: 'normal',
+            },
+            {
+              title: '通勤极简公式',
+              url: 'https://www.xiaohongshu.com/explore/6718e70f0000000021031148',
+              noteId: '6718e70f0000000021031148',
+              authorName: '穿搭研究所',
+              authorUserId: '5f123456000000000100abcd',
+              contentType: 'video',
+            },
+          ],
+        },
+      }),
+      stateRecord({
+        stateId: 's_auth',
+        stateName: '登录页',
+        pageType: 'auth-page',
+        finalUrl: loginUrl,
+        title: '登录页',
+      }),
+    ],
+    intents: [
+      { intentId: 'intent-search-note', intentType: 'search-book', actionId: 'search', elementId: 'search-form', targetDomain: { actionableValues: [{ value: 'query', label: '春日穿搭' }], candidateValues: [] } },
+      { intentId: 'intent-open-note', intentType: 'open-book', actionId: 'open-note', elementId: 'note-link', targetDomain: { actionableValues: [{ value: 'note', label: '春日穿搭模板' }], candidateValues: [] } },
+      { intentId: 'intent-open-user', intentType: 'open-author', actionId: 'open-user', elementId: 'user-link', targetDomain: { actionableValues: [{ value: 'user', label: '穿搭研究所' }], candidateValues: [] } },
+      { intentId: 'intent-open-discover', intentType: 'open-category', actionId: 'open-discover', elementId: 'discover-link', targetDomain: { actionableValues: [{ value: 'discover', label: '发现页' }], candidateValues: [] } },
+      { intentId: 'intent-open-auth', intentType: 'open-auth-page', actionId: 'open-auth', elementId: 'auth-link', targetDomain: { actionableValues: [{ value: 'auth', label: '登录页' }, { value: 'register', label: '注册页' }], candidateValues: [] } },
+    ],
+    actions: [
+      { actionId: 'search', actionKind: 'search-submit' },
+      { actionId: 'open-note', actionKind: 'safe-nav-link' },
+      { actionId: 'open-user', actionKind: 'safe-nav-link' },
+      { actionId: 'open-discover', actionKind: 'safe-nav-link' },
+      { actionId: 'open-auth', actionKind: 'safe-nav-link' },
+    ],
+    decisionRules: [
+      { ruleId: 'rule-search-note', intentId: 'intent-search-note' },
+      { ruleId: 'rule-open-note', intentId: 'intent-open-note' },
+      { ruleId: 'rule-open-user', intentId: 'intent-open-user' },
+      { ruleId: 'rule-open-discover', intentId: 'intent-open-discover' },
+      { ruleId: 'rule-open-auth', intentId: 'intent-open-auth' },
+    ],
+    capabilityFamilies: ['search-content', 'navigate-to-content', 'navigate-to-author', 'navigate-to-category', 'open-auth-page'],
+    slotSchemaIntents: [
+      { intentId: 'intent-search-note', slots: [{ slotId: 'queryText', required: true }] },
+      { intentId: 'intent-open-note', slots: [{ slotId: 'noteTitle', required: true }] },
+      { intentId: 'intent-open-user', slots: [{ slotId: 'userName', required: true }] },
+      { intentId: 'intent-open-discover', slots: [{ slotId: 'targetMemberId', required: false }] },
+      { intentId: 'intent-open-auth', slots: [{ slotId: 'targetMemberId', required: false }] },
+    ],
+    utterancePatterns: [
+      { patternId: 'pattern-search-note', intentId: 'intent-search-note', patternType: 'example', examples: ['搜索笔记 春日穿搭'] },
+      { patternId: 'pattern-open-note', intentId: 'intent-open-note', patternType: 'example', examples: ['打开笔记 春日穿搭模板'] },
+      { patternId: 'pattern-open-user', intentId: 'intent-open-user', patternType: 'example', examples: ['打开用户主页 穿搭研究所'] },
+      { patternId: 'pattern-open-discover', intentId: 'intent-open-discover', patternType: 'example', examples: ['浏览发现页'] },
+      { patternId: 'pattern-open-auth', intentId: 'intent-open-auth', patternType: 'example', examples: ['打开登录页但不自动提交凭证'] },
+    ],
+    docs: [
+      doc('intent-search-note', '搜索笔记', 'intent-search-note.md', '# 搜索笔记\n'),
+      doc('intent-open-note', '打开笔记', 'intent-open-note.md', '# 打开笔记\n'),
+      doc('intent-open-user', '打开用户主页', 'intent-open-user.md', '# 打开用户主页\n'),
+      doc('intent-open-discover', '浏览发现页', 'intent-open-discover.md', '# 浏览发现页\n'),
+      doc('intent-open-auth', '打开登录页', 'intent-open-auth.md', '# 打开登录页\n'),
+    ],
+    wikiReadme: '# Xiaohongshu Wiki',
+    nlEntryMd: '# Xiaohongshu NL Entry',
+    interactionModelMd: '# Xiaohongshu Interaction Model',
+    recoveryMd: '# Recovery\n',
+    approvalMd: '# Approval\n',
+  });
+  return {
+    ...fixture,
+    rawDirs: rawDirsFromFixture(fixture),
+  };
+}
+
 export function buildExampleStageSpec() {
   return buildStageSpec('example.com', 'https://example.com/', createExampleSourceFixture);
 }
@@ -773,6 +1055,10 @@ export function build22BiquStageSpec() {
 
 export function buildBilibiliStageSpec() {
   return buildStageSpec('www.bilibili.com', 'https://www.bilibili.com/', createBilibiliSourceFixture);
+}
+
+export function buildXiaohongshuStageSpec() {
+  return buildStageSpec('www.xiaohongshu.com', 'https://www.xiaohongshu.com/explore', createXiaohongshuSourceFixture);
 }
 
 export async function createStageFixtures(rootDir, spec) {

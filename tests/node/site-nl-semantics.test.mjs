@@ -42,3 +42,20 @@ test('resolveSiteNlSemantics returns the jable site hook and exposes taxonomy al
   assert.ok(aliases.includes('Cosplay'));
   assert.ok(aliases.includes('#Cosplay'));
 });
+
+test('resolveSiteNlSemantics returns the xiaohongshu site hook with note, notify, discover, and follow phrasing', () => {
+  const semantics = resolveSiteNlSemantics({
+    baseUrl: 'https://www.xiaohongshu.com/explore',
+    deps: createDeps(),
+  });
+
+  assert.equal(semantics?.siteKey, 'xiaohongshu');
+  assert.equal(semantics?.intentLabels?.['search-book']?.canonical, '搜索笔记');
+  assert.equal(semantics?.intentLabels?.['download-book']?.canonical, '下载笔记');
+  assert.equal(semantics?.intentLabels?.['open-category']?.canonical, '打开发现页');
+  assert.equal(semantics?.intentLabels?.['open-utility-page']?.canonical, '打开通知页');
+  assert.equal(semantics?.intentLabels?.['list-followed-users']?.canonical, '查询关注用户列表');
+  assert.equal(semantics?.intentLabels?.['list-followed-updates']?.canonical, '查询关注用户最近更新');
+  assert.equal(typeof semantics?.buildGeneratedPatternExamples, 'function');
+  assert.equal(typeof semantics?.rewriteClarificationRule, 'function');
+});

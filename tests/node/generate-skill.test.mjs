@@ -10,6 +10,7 @@ import {
   build22BiquStageSpec,
   buildJableStageSpec,
   buildMoodyzStageSpec,
+  buildXiaohongshuStageSpec,
   compileFixtureKnowledgeBase,
 } from './kb-test-fixtures.mjs';
 import { assertRepoMetadataUnchanged, captureRepoMetadataSnapshot } from './helpers/site-metadata-sandbox.mjs';
@@ -124,6 +125,91 @@ test('generateSkill produces stable moodyz skill documents from a self-contained
     assert.match(flowsMd, /MIAA-001/u);
     assert.match(flowsMd, /Alice/u);
     assert.match(flowsMd, /This site flow set is currently navigation-first, not chapter-download oriented\./u);
+    await assertRepoMetadataUnchanged(repoMetadataSnapshot);
+  } finally {
+    process.chdir(previousCwd);
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('generateSkill produces stable xiaohongshu skill documents from a self-contained compiled knowledge base', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-generate-skill-xiaohongshu-'));
+  const previousCwd = process.cwd();
+  const repoMetadataSnapshot = await captureRepoMetadataSnapshot();
+
+  try {
+    const spec = buildXiaohongshuStageSpec();
+    const fixture = await compileFixtureKnowledgeBase(workspace, spec);
+    process.chdir(workspace);
+
+    const result = await generateSkill(spec.inputUrl, {
+      kbDir: fixture.kbDir,
+      outDir: path.join(workspace, 'out', 'xiaohongshu'),
+      skillName: 'xiaohongshu',
+      siteMetadataOptions: fixture.metadataSandbox.siteMetadataOptions,
+    });
+
+    assert.equal(result.skillName, 'xiaohongshu');
+    assert.deepEqual(result.references, [
+      'references/index.md',
+      'references/flows.md',
+      'references/recovery.md',
+      'references/approval.md',
+      'references/nl-intents.md',
+      'references/interaction-model.md',
+    ]);
+    assert.deepEqual(result.warnings, []);
+
+    const skillMd = normalizeEol(await readFile(path.join(result.skillDir, 'SKILL.md'), 'utf8'));
+    const indexMd = normalizeEol(await readFile(path.join(result.skillDir, 'references', 'index.md'), 'utf8'));
+    const flowsMd = normalizeEol(await readFile(path.join(result.skillDir, 'references', 'flows.md'), 'utf8'));
+    const nlIntentsMd = normalizeEol(await readFile(path.join(result.skillDir, 'references', 'nl-intents.md'), 'utf8'));
+    const interactionModelMd = normalizeEol(await readFile(path.join(result.skillDir, 'references', 'interaction-model.md'), 'utf8'));
+
+    assert.match(skillMd, /^---\nname: xiaohongshu\n/su);
+    assert.match(skillMd, /\n# xiaohongshu Skill\n/su);
+    assert.match(skillMd, /Instruction-only Skill for https:\/\/www\.xiaohongshu\.com\/explore/u);
+    assert.match(skillMd, /search_result\?keyword=\.\.\./u);
+    assert.match(skillMd, /\/explore\/<noteId>/u);
+    assert.match(skillMd, /browse the discover page/u);
+    assert.match(skillMd, /query followed users with a reusable authenticated profile/u);
+    assert.match(skillMd, /xiaohongshu-query-follow\.mjs/u);
+    assert.match(skillMd, /login\/register pages without submitting credentials automatically/u);
+    assert.match(skillMd, /credential input and submission are always manual and never automatic/u);
+
+    assert.match(indexMd, /^# xiaohongshu Index\n/su);
+    assert.match(indexMd, /search_result\?keyword=\.\.\./u);
+    assert.match(indexMd, /\/user\/profile\/<userId>/u);
+    assert.match(indexMd, /browse-discover/u);
+    assert.match(indexMd, /open-auth-page/u);
+    assert.match(indexMd, /read-only navigation to login\/register entrypoints/u);
+    assert.match(indexMd, /list-followed-users/u);
+    assert.match(indexMd, /official frontend follow-list runtime/u);
+
+    assert.match(flowsMd, /^# Flows\n/su);
+    assert.match(flowsMd, /Target state: a search results page on `www\.xiaohongshu\.com\/search_result`\./u);
+    assert.match(flowsMd, /Target state: a note detail page on `www\.xiaohongshu\.com\/explore\/<noteId>`\./u);
+    assert.match(flowsMd, /Target state: a public user homepage on `www\.xiaohongshu\.com\/user\/profile\/<userId>`\./u);
+    assert.match(flowsMd, /Target state: the discover surface rooted at `https:\/\/www\.xiaohongshu\.com\/explore`\./u);
+    assert.match(flowsMd, /Target state: a login or register page under `www\.xiaohongshu\.com\/login` or `www\.xiaohongshu\.com\/register`\./u);
+    assert.match(flowsMd, /40122\.tF\(\)/u);
+    assert.match(flowsMd, /\/api\/sns\/web\/v1\/intimacy\/intimacy_list/u);
+    assert.match(flowsMd, /do not auto-fill or auto-submit credentials/u);
+
+    assert.match(nlIntentsMd, /Search notes/u);
+    assert.match(nlIntentsMd, /Open note pages/u);
+    assert.match(nlIntentsMd, /Open user homepages/u);
+    assert.match(nlIntentsMd, /Browse discover page/u);
+    assert.match(nlIntentsMd, /Open login\/register pages/u);
+    assert.match(nlIntentsMd, /List followed users/u);
+    assert.match(nlIntentsMd, /我关注了哪些用户/u);
+
+    assert.match(interactionModelMd, /www\.xiaohongshu\.com/u);
+    assert.match(interactionModelMd, /read-only/u);
+    assert.match(interactionModelMd, /follow-users-query/u);
+    assert.match(interactionModelMd, /official frontend follow-list runtime/u);
+    assert.match(interactionModelMd, /Login\/register entrypoints are navigation-only targets/u);
+
     await assertRepoMetadataUnchanged(repoMetadataSnapshot);
   } finally {
     process.chdir(previousCwd);

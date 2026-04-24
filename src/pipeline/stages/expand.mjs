@@ -5,19 +5,25 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { initializeCliUtf8 } from '../../infra/cli.mjs';
 import { openBrowserSession } from '../../infra/browser/session.mjs';
-import { ensureAuthenticatedSession, inspectLoginState, resolveSiteBrowserSessionOptions } from '../../infra/auth/site-auth.mjs';
-import { mergeRuntimeEvidence } from '../../shared/runtime-evidence.mjs';
-import { inferPageTypeFromUrl, isContentDetailPageType as isSharedContentDetailPageType } from '../../sites/core/page-types.mjs';
-import { deriveBilibiliAntiCrawlReasonCode } from '../../sites/bilibili/model/diagnosis.mjs';
-import { canonicalizeDouyinAuthorUrl, canonicalizeDouyinVideoUrl } from '../../sites/douyin/download/enumerator.mjs';
-import { normalizeDouyinPublishFields, parseDouyinCreateTimeMapFromHtml } from '../../sites/douyin/queries/follow-query.mjs';
 import {
-  deriveDouyinAntiCrawlReasonCode,
-  detectDouyinAntiCrawlSignals,
-  normalizeDouyinAuthorSubpage,
+  ensureAuthenticatedSession,
+  inspectLoginState,
+  resolveSiteBrowserSessionOptions,
+  shouldEnsureAuthenticatedNavigationSession,
+  shouldUsePersistentProfileForNavigation,
+} from '../../infra/auth/site-auth.mjs';
+import {
+  createPageStateHelperBundleSource as createSharedPageStateHelperBundleSource,
+  createPageStateHelperFallbackFunction,
+  derivePageFacts as deriveSharedPageFacts,
+  mergePageStateEvidence,
+} from '../../shared/page-state-runtime.mjs';
+import { isXiaohongshuUrl } from '../../shared/xiaohongshu-risk.mjs';
+import { inferPageTypeFromUrl, isContentDetailPageType as isSharedContentDetailPageType } from '../../sites/core/page-types.mjs';
+import { isDouyinSiteProfile, resolveDouyinHeadlessDefault } from '../../sites/douyin/model/site.mjs';
+import {
   resolveDouyinReadySelectors,
 } from '../../sites/douyin/model/diagnosis.mjs';
-import { resolveDouyinAuthorSubpageFromUrl } from '../../sites/douyin/model/site.mjs';
 
 const DEFAULT_OPTIONS = {
   initialManifestPath: undefined,
@@ -82,6 +88,21 @@ function isDocumentReadyTimeout(error) {
   return /Timed out waiting for document ready/iu.test(String(error?.message ?? ''));
 }
 
+function isXiaohongshuSiteProfile(siteProfile = null, inputUrl = '') {
+  const profileHost = String(siteProfile?.host ?? '').toLowerCase();
+  if (profileHost === 'www.xiaohongshu.com' || profileHost === 'xiaohongshu.com') {
+    return true;
+  }
+  return isXiaohongshuUrl(inputUrl);
+}
+
+function resolveExpandHeadlessDefault(inputUrl, fallback = true, siteProfile = null) {
+  const douyinDefault = isDouyinSiteProfile(siteProfile, inputUrl)
+    ? resolveDouyinHeadlessDefault(inputUrl, fallback, siteProfile)
+    : fallback;
+  return isXiaohongshuSiteProfile(siteProfile, inputUrl) ? false : douyinDefault;
+}
+
 async function closeSessionQuietly(session) {
   try {
     await session?.close?.();
@@ -91,7 +112,7 @@ async function closeSessionQuietly(session) {
 }
 
 function normalizePageEvidence(pageFacts = null, runtimeEvidence = null, options = {}) {
-  return mergeRuntimeEvidence(pageFacts, runtimeEvidence, options);
+  return mergePageStateEvidence(pageFacts, runtimeEvidence, options);
 }
 
 function normalizeStateSignature(signature = null, options = {}) {
@@ -160,745 +181,7 @@ function normalizeNumber(value, flagName) {
   return parsed;
 }
 
-export function derivePageFacts({
-  pageType,
-  siteProfile = null,
-  finalUrl = '',
-  title = '',
-  rawHtml = '',
-  queryInputValue = '',
-  textFromSelectors = () => null,
-  hrefFromSelectors = () => null,
-  textsFromSelectors = () => [],
-  hrefsFromSelectors = () => [],
-  metaContent = () => null,
-  normalizeUrl = (value) => normalizeUrlNoFragment(value),
-  documentText = '',
-  extractStructuredBilibiliAuthorCards = null,
-} = {}) {
-  const normalizeText = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
-  const normalizeHost = (value) => String(value ?? '').trim().toLowerCase();
-  const uniqueValues = (values) => [...new Set(values.map((value) => normalizeText(value)).filter(Boolean))];
-  const finalizeFacts = (facts, options = {}) => normalizePageEvidence(facts, null, options).pageFacts;
-  const normalizedFinalUrl = normalizeUrl(finalUrl) || normalizeText(finalUrl);
-  const profileHost = normalizeHost(siteProfile?.host ?? '');
-  const currentHostname = (() => {
-    try {
-      return normalizeHost(new URL(normalizedFinalUrl).hostname);
-    } catch {
-      return profileHost;
-    }
-  })();
-  const isBilibiliProfile = ['www.bilibili.com', 'search.bilibili.com', 'space.bilibili.com'].includes(profileHost)
-    || ['www.bilibili.com', 'search.bilibili.com', 'space.bilibili.com'].includes(currentHostname);
-  const isDouyinProfile = profileHost === 'www.douyin.com' || currentHostname === 'www.douyin.com';
-  const rawHtmlSource = typeof rawHtml === 'function' ? String(rawHtml() ?? '') : String(rawHtml ?? '');
-  const readDocumentText = (() => {
-    let cached = null;
-    return () => {
-      if (cached !== null) {
-        return cached;
-      }
-      cached = normalizeText(typeof documentText === 'function' ? documentText() : documentText);
-      return cached;
-    };
-  })();
-  const readText = (selectors = []) => normalizeText(textFromSelectors(selectors)) || null;
-  const readHref = (selectors = []) => {
-    const value = hrefFromSelectors(selectors);
-    return value ? normalizeUrl(value) : null;
-  };
-  const readTexts = (selectors = [], limit = 20) => uniqueValues(textsFromSelectors(selectors)).slice(0, limit);
-  const readHrefs = (selectors = [], limit = 20) => uniqueValues(hrefsFromSelectors(selectors).map((value) => normalizeUrl(value))).slice(0, limit);
-  const readPattern = (patterns = []) => {
-    const source = readDocumentText();
-    for (const pattern of patterns) {
-      const matched = source.match(pattern);
-      const value = normalizeText(matched?.[1] ?? '');
-      if (value) {
-        return value;
-      }
-    }
-    return null;
-  };
-  const parsedUrl = (() => {
-    try {
-      return new URL(normalizedFinalUrl || finalUrl);
-    } catch {
-      return null;
-    }
-  })();
-  const pathname = parsedUrl?.pathname || '/';
-  const extractDouyinEncodedAuthorInfo = () => {
-    if (!rawHtmlSource) {
-      return null;
-    }
-    const secUidPatterns = [
-      /"sec_uid"\s*:\s*"([^"]+)"/u,
-      /%22sec_uid%22%3A%22([^"%]+)%22/u,
-    ];
-    const nicknamePatterns = [
-      /"nickname"\s*:\s*"([^"]+)"/u,
-      /%22nickname%22%3A%22([^"%]+)%22/u,
-    ];
-    const secUid = secUidPatterns
-      .map((pattern) => normalizeText(rawHtmlSource.match(pattern)?.[1] || ''))
-      .find(Boolean);
-    const nickname = nicknamePatterns
-      .map((pattern) => normalizeText(rawHtmlSource.match(pattern)?.[1] || ''))
-      .find(Boolean);
-    if (!secUid && !nickname) {
-      return null;
-    }
-    const authorUrl = secUid ? canonicalizeDouyinAuthorUrl(`https://www.douyin.com/user/${secUid}`) : null;
-    return {
-      authorName: nickname || null,
-      authorUserId: secUid || null,
-      authorUrl: authorUrl || null,
-    };
-  };
-  const buildDouyinContentCards = (urls = [], titles = [], currentAuthor = {}) => {
-    const canonicalUrls = uniqueValues(urls.map((value) => canonicalizeDouyinVideoUrl(value)).filter(Boolean));
-    const createTimeMap = parseDouyinCreateTimeMapFromHtml(rawHtmlSource, canonicalUrls.map((value) => normalizeText(value.match(/\/video\/([^/?#]+)/u)?.[1] || '')));
-    return canonicalUrls.map((url, index) => {
-      const videoId = normalizeText(url.match(/\/video\/([^/?#]+)/u)?.[1] || '') || null;
-      const published = normalizeDouyinPublishFields({
-        createTime: videoId ? createTimeMap.get(videoId) ?? null : null,
-      });
-      return {
-        title: titles[index] ?? null,
-        url,
-        videoId,
-        authorUrl: currentAuthor.authorUrl ?? null,
-        authorUserId: currentAuthor.authorUserId ?? null,
-        authorName: currentAuthor.authorName ?? null,
-        ...published,
-      };
-    }).filter((card) => card.url || card.videoId || card.title);
-  };
-  const buildDouyinAuthorCards = (urls = [], names = []) => {
-    const canonicalUrls = uniqueValues(urls.map((value) => canonicalizeDouyinAuthorUrl(value)).filter(Boolean));
-    return canonicalUrls.map((url, index) => {
-      const userId = normalizeText(url.match(/\/user\/([^/?#]+)/u)?.[1] || '') || null;
-      return {
-        name: names[index] ?? null,
-        url,
-        userId,
-      };
-    }).filter((card) => card.url || card.userId || card.name);
-  };
-  const bilibiliContentTypeFromUrl = (value) => {
-    const normalizedValue = normalizeText(value);
-    if (!normalizedValue) {
-      return null;
-    }
-    if (/\/bangumi\/play\//iu.test(normalizedValue)) {
-      return 'bangumi';
-    }
-    if (/\/video\/BV[0-9A-Za-z]+/iu.test(normalizedValue)) {
-      return 'video';
-    }
-    if (/space\.bilibili\.com\/\d+/iu.test(normalizedValue) || /\/upuser(?:\/|$)/iu.test(normalizedValue)) {
-      return 'author';
-    }
-    return null;
-  };
-  const bilibiliBvidFromUrl = (value) => normalizeText(value?.match(/\/video\/(BV[0-9A-Za-z]+)/u)?.[1] || '') || null;
-  const bilibiliMidFromUrl = (value) => normalizeText(value?.match(/space\.bilibili\.com\/(\d+)/u)?.[1] || '') || null;
-  const bilibiliAuthorSubpageFromPath = (value) => {
-    const matched = String(value || '').match(/^\/\d+(?:\/([^?#]+))?/u);
-    const normalized = normalizeText(String(matched?.[1] || '').replace(/^\/+|\/+$/gu, ''));
-    if (!normalized) {
-      return 'home';
-    }
-    if (normalized === 'fans/follow') {
-      return 'follow';
-    }
-    if (normalized === 'fans/fans') {
-      return 'fans';
-    }
-    return normalized;
-  };
-  const normalizeBilibiliAuthorCard = (card = {}, authorSubpage = null) => {
-    const name = normalizeText(card.name);
-    const url = card.url ? normalizeUrl(card.url) : null;
-    const mid = normalizeText(card.mid) || bilibiliMidFromUrl(url);
-    if (!name && !url && !mid) {
-      return null;
-    }
-    return {
-      name: name || null,
-      url: url || null,
-      mid: mid || null,
-      authorSubpage: normalizeText(card.authorSubpage) || authorSubpage || null,
-      cardKind: normalizeText(card.cardKind) || 'author',
-    };
-  };
-  const normalizeBilibiliContentCard = (card = {}, fallbackAuthorMid = null) => {
-    const url = card.url ? normalizeUrl(card.url) : null;
-    const titleValue = normalizeText(card.title);
-    const bvid = normalizeText(card.bvid) || bilibiliBvidFromUrl(url);
-    const authorMid = normalizeText(card.authorMid) || fallbackAuthorMid || null;
-    const contentType = normalizeText(card.contentType) || bilibiliContentTypeFromUrl(url);
-    const authorUrl = card.authorUrl ? normalizeUrl(card.authorUrl) : null;
-    const authorName = normalizeText(card.authorName);
-    if (!titleValue && !url && !bvid && !authorMid) {
-      return null;
-    }
-    return {
-      title: titleValue || null,
-      url: url || null,
-      bvid: bvid || null,
-      authorMid: authorMid || null,
-      contentType: contentType || null,
-      authorUrl: authorUrl || null,
-      authorName: authorName || null,
-    };
-  };
-  const dedupeBilibiliAuthorCards = (cards = [], authorSubpage = null) => {
-    const seen = new Set();
-    const result = [];
-    for (const rawCard of cards) {
-      const card = normalizeBilibiliAuthorCard(rawCard, authorSubpage);
-      if (!card) {
-        continue;
-      }
-      const key = card.mid
-        ? `mid::${card.mid}`
-        : card.url
-          ? `url::${card.url}`
-          : `name::${card.name}`;
-      if (!key || seen.has(key)) {
-        continue;
-      }
-      seen.add(key);
-      result.push(card);
-    }
-    return result.slice(0, 16);
-  };
-  const dedupeBilibiliContentCards = (cards = [], fallbackAuthorMid = null) => {
-    const seen = new Set();
-    const result = [];
-    for (const rawCard of cards) {
-      const card = normalizeBilibiliContentCard(rawCard, fallbackAuthorMid);
-      if (!card) {
-        continue;
-      }
-      const key = card.bvid
-        ? `bvid::${card.bvid}`
-        : card.url
-          ? `url::${card.url}`
-          : `title::${card.title}::${card.authorMid}`;
-      if (!key || seen.has(key)) {
-        continue;
-      }
-      seen.add(key);
-      result.push(card);
-    }
-    return result.slice(0, 12);
-  };
-  const detectBilibiliAntiCrawlSignals = () => {
-    const source = readDocumentText();
-    if (!source) {
-      return [];
-    }
-    const signals = [];
-    const patterns = [
-      ['rate-limit', /\u8bbf\u95ee\u9891\u7e41/u],
-      ['verify', /\u5b89\u5168\u9a8c\u8bc1/u],
-      ['slide-verify', /\u6ed1\u52a8\u9a8c\u8bc1/u],
-      ['captcha', /captcha/iu],
-      ['risk-control', /\u98ce\u63a7/u],
-      ['retry-later', /\u8bf7\u7a0d\u540e\u518d\u8bd5/u],
-    ];
-    for (const [label, pattern] of patterns) {
-      if (pattern.test(source)) {
-        signals.push(label);
-      }
-    }
-    return signals;
-  };
-  const normalizeBilibiliTitleText = (value, kind = 'generic') => {
-    const normalizedValue = normalizeText(value);
-    if (!normalizedValue) {
-      return null;
-    }
-
-    let cleaned = normalizedValue
-      .replace(/\s*[-_]\s*(?:哔哩哔哩|bilibili).*$/iu, '')
-      .replace(/\s*[|｜]\s*(?:哔哩哔哩|bilibili).*$/iu, '')
-      .replace(/\s*-\s*[^-]*个人主页.*$/iu, '')
-      .trim();
-
-    if (kind === 'author') {
-      const authorMatch = cleaned.match(/^(.+?)的个人空间(?:[-_].*)?$/u);
-      if (authorMatch?.[1]) {
-        cleaned = normalizeText(authorMatch[1]);
-      }
-    }
-
-    return normalizeText(cleaned) || null;
-  };
-  const bilibiliCategoryNameFromPath = (value) => {
-    const normalizedPath = String(value || '').toLowerCase();
-    if (normalizedPath.startsWith('/v/popular/')) {
-      return '热门';
-    }
-    if (normalizedPath.startsWith('/anime/')) {
-      return '番剧';
-    }
-    if (normalizedPath.startsWith('/movie/')) {
-      return '电影';
-    }
-    if (normalizedPath.startsWith('/guochuang/')) {
-      return '国创';
-    }
-    if (normalizedPath.startsWith('/tv/')) {
-      return '电视剧';
-    }
-    if (normalizedPath.startsWith('/variety/')) {
-      return '综艺';
-    }
-    if (normalizedPath.startsWith('/documentary/')) {
-      return '纪录片';
-    }
-    if (normalizedPath.startsWith('/knowledge/')) {
-      return '知识';
-    }
-    if (normalizedPath.startsWith('/music/')) {
-      return '音乐';
-    }
-    if (normalizedPath.startsWith('/game/')) {
-      return '游戏';
-    }
-    if (normalizedPath.startsWith('/food/')) {
-      return '美食';
-    }
-    if (normalizedPath.startsWith('/sports/')) {
-      return '运动';
-    }
-    if (normalizedPath.startsWith('/c/')) {
-      return '分区';
-    }
-    return null;
-  };
-
-  if (pageType === 'search-results-page') {
-    if (isDouyinProfile) {
-      const queryFromPath = normalizeText(parsedUrl?.pathname.match(/^\/search\/([^/?#]+)/u)?.[1] || '');
-      return {
-        queryText: normalizeText(queryInputValue || decodeURIComponent(queryFromPath || '')) || null,
-        searchSection: normalizeText(parsedUrl?.searchParams.get('type') || '') || null,
-      };
-    }
-    const profileResultTitleSelectors = Array.isArray(siteProfile?.search?.resultTitleSelectors)
-      ? siteProfile.search.resultTitleSelectors
-      : ['.layout-co18 .layout-tit', '.layout2 .layout-tit'];
-    const profileResultBookSelectors = Array.isArray(siteProfile?.search?.resultBookSelectors)
-      ? siteProfile.search.resultBookSelectors
-      : ['.txt-list-row5 li .s2 a[href]', '.layout-co18 .txt-list a[href]'];
-    const queryParamNames = Array.isArray(siteProfile?.search?.queryParamNames)
-      ? siteProfile.search.queryParamNames
-      : ['searchkey', 'keyword', 'q'];
-    const resultTitles = readTexts(profileResultBookSelectors, 20);
-    const resultUrls = readHrefs(profileResultBookSelectors, 20);
-    const queryFromTitle = (() => {
-      const headingText = readText(profileResultTitleSelectors) || normalizeText(title);
-      const matched = headingText.match(/^(.*?)\s*[-_]\s*(?:哔哩哔哩|bilibili)/iu)
-        || headingText.match(/(?:搜索|search)\s*[:："“”]*\s*(.+?)(?:\s*[-_]|$)/iu);
-      return normalizeText(matched?.[1] || '');
-    })();
-    const derivedQuery = (() => {
-      if (parsedUrl) {
-        for (const name of queryParamNames) {
-          const value = normalizeText(parsedUrl.searchParams.get(name) || '');
-          if (value) {
-            return value;
-          }
-        }
-        const fromPath = parsedUrl.pathname.match(/\/ss\/(.+?)(?:\.html)?$/i)?.[1] || '';
-        const fromPathText = decodeURIComponent(fromPath).replace(/\.html$/i, '');
-        if (normalizeText(fromPathText)) {
-          return normalizeText(fromPathText);
-        }
-      }
-      return queryFromTitle;
-    })();
-    const facts = {
-      queryText: normalizeText(queryInputValue || derivedQuery) || null,
-      resultCount: Math.max(resultUrls.length, resultTitles.length),
-      resultTitles,
-    };
-    if (isBilibiliProfile) {
-      const resultAuthorUrls = readHrefs([
-        'a[href*="//space.bilibili.com/"]',
-        'a[href*="space.bilibili.com/"]',
-      ], 20);
-      const searchSection = pathname.split('/').filter(Boolean)[0] || 'all';
-      const resultEntries = resultUrls.slice(0, 12).map((value, index) => ({
-        title: resultTitles[index] ?? null,
-        url: value,
-        contentType: bilibiliContentTypeFromUrl(value),
-        bvid: bilibiliBvidFromUrl(value),
-        authorUrl: resultAuthorUrls[index] ?? null,
-        authorMid: bilibiliMidFromUrl(resultAuthorUrls[index] ?? ''),
-      }));
-      facts.resultUrls = resultUrls;
-      facts.searchSection = searchSection;
-      facts.firstResultTitle = resultTitles[0] ?? null;
-      facts.firstResultUrl = resultUrls[0] ?? null;
-      facts.firstResultContentType = bilibiliContentTypeFromUrl(resultUrls[0] ?? '');
-      facts.resultEntries = resultEntries;
-      facts.resultContentTypes = resultUrls
-        .map((value) => bilibiliContentTypeFromUrl(value))
-        .filter(Boolean)
-        .slice(0, 20);
-      facts.resultAuthorUrls = resultAuthorUrls;
-      facts.resultAuthorMids = resultAuthorUrls
-        .map((value) => bilibiliMidFromUrl(value))
-        .filter(Boolean)
-        .slice(0, 20);
-      facts.resultBvids = resultUrls
-        .map((value) => bilibiliBvidFromUrl(value))
-        .filter(Boolean)
-        .slice(0, 10);
-    }
-    return finalizeFacts(facts);
-  }
-
-  if (isContentDetailPageType(pageType)) {
-    if (isDouyinProfile) {
-      const embeddedAuthor = extractDouyinEncodedAuthorInfo();
-      const authorUrl = canonicalizeDouyinAuthorUrl(
-        readHref(['a[href*="/user/"]:not([href*="/user/self"])'])
-        || embeddedAuthor?.authorUrl
-        || ''
-      ) || null;
-      const authorUserId = normalizeText(authorUrl?.match(/\/user\/([^/?#]+)/u)?.[1] || '') || embeddedAuthor?.authorUserId || null;
-      const authorName = readText(['a[href*="/user/"]:not([href*="/user/self"])'])
-        || embeddedAuthor?.authorName
-        || null;
-      return finalizeFacts({
-        contentTitle: readText(['h1']) || normalizeText(title) || null,
-        authorName,
-        authorUrl,
-        authorUserId,
-      });
-    }
-    const chapterLinkSelectors = Array.isArray(siteProfile?.bookDetail?.chapterLinkSelectors)
-      ? siteProfile.bookDetail.chapterLinkSelectors
-      : ['#list a[href]', '.listmain a[href]', 'dd a[href]', '.book_last a[href]'];
-    const chapterUrls = readHrefs(chapterLinkSelectors, 200);
-    const genericBookTitle = metaContent('og:novel:book_name')
-      || readText(
-        Array.isArray(siteProfile?.contentDetail?.titleSelectors)
-          ? siteProfile.contentDetail.titleSelectors
-          : ['h1', '.book h1', '#bookinfo h1', 'h2'],
-      );
-    const genericAuthorName = metaContent('og:novel:author')
-      || readText(
-        Array.isArray(siteProfile?.contentDetail?.authorNameSelectors)
-          ? siteProfile.contentDetail.authorNameSelectors
-          : ['a[href*="/author/"]', '.small span a'],
-      );
-    const genericAuthorUrl = (() => {
-      const value = metaContent('og:novel:author_link')
-        || readHref(
-          Array.isArray(siteProfile?.contentDetail?.authorLinkSelectors)
-            ? siteProfile.contentDetail.authorLinkSelectors
-            : ['a[href*="/author/"]'],
-        );
-      return value ? normalizeUrl(value) : null;
-    })();
-    const facts = {
-      bookTitle: genericBookTitle,
-      authorName: genericAuthorName,
-      authorUrl: genericAuthorUrl,
-      chapterCount: chapterUrls.length,
-      latestChapterTitle: readText(['.book_last a', '#list a']),
-      latestChapterUrl: (() => {
-        const value = metaContent('og:novel:lastest_chapter_url') || chapterUrls[0] || '';
-        return value ? normalizeUrl(value) : null;
-      })(),
-    };
-    if (isBilibiliProfile) {
-      const bilibiliTitle = normalizeBilibiliTitleText(genericBookTitle, 'content')
-        || readText(['h1.video-title', 'h1', '.video-title', '.media-title'])
-        || normalizeBilibiliTitleText(title, 'content');
-      const authorUrl = genericAuthorUrl
-        || readHref(['a.up-name[href*="space.bilibili.com/"]', '.video-owner-card a[href*="space.bilibili.com/"]', 'a[href*="space.bilibili.com/"]']);
-      const bvid = normalizedFinalUrl.match(/\/video\/(BV[0-9A-Za-z]+)/u)?.[1]
-        || readPattern([/"bvid"\s*:\s*"([^"]+)"/u, /"bvid":"([^"]+)"/u]);
-      const aid = readPattern([/"aid"\s*:\s*(\d+)/u, /"aid":"?(\d+)"?/u]);
-      const authorMid = authorUrl?.match(/space\.bilibili\.com\/(\d+)/u)?.[1]
-        || pathname.match(/^\/(?:bangumi\/play\/|video\/)?(\d+)$/u)?.[1]
-        || readPattern([/"mid"\s*:\s*(\d+)/u, /"mid":"?(\d+)"?/u]);
-      const publishedAt = metaContent('og:video:release_date')
-        || metaContent('article:published_time')
-        || readText(['time', '.pubdate-text', '.video-publish time', '[class*="pubdate"]']);
-      const categoryName = readText([
-        '.video-info-detail a',
-        '.video-detail-title a',
-        '.first-channel',
-        'a[href*="/v/"]',
-      ]);
-      const seasonId = readPattern([/"season_id"\s*:\s*(\d+)/u, /"seasonId"\s*:\s*(\d+)/u]);
-      const episodeId = pathname.match(/\/bangumi\/play\/ep(\d+)/u)?.[1]
-        || readPattern([/"ep_id"\s*:\s*(\d+)/u, /"episode_id"\s*:\s*(\d+)/u, /"epId"\s*:\s*(\d+)/u]);
-      const seriesTitle = readText([
-        '.media-title',
-        '.media-info-title',
-        '.media-right .title',
-        '.mediainfo_mediaTitle',
-      ]);
-      const episodeTitle = readText([
-        'h1.video-title',
-        '.video-title',
-        '.ep-info-title',
-        'h1',
-      ]);
-      const tagNames = readTexts([
-        '.tag-link',
-        '.video-tag-link',
-        'a[href*="/v/topic/detail"]',
-        'a[href*="/v/tag/"]',
-      ], 12);
-      facts.bookTitle = bilibiliTitle;
-      facts.contentTitle = bilibiliTitle;
-      facts.contentType = pathname.startsWith('/bangumi/play/') ? 'bangumi' : 'video';
-      facts.bvid = bvid ?? null;
-      facts.aid = aid ?? null;
-      facts.authorName = normalizeBilibiliTitleText(genericAuthorName, 'author')
-        || readText(['a.up-name', '.up-name', '.up-detail-top .up-name', '.video-owner-card .name']);
-      facts.authorUrl = authorUrl ?? null;
-      facts.authorMid = authorMid ?? null;
-      facts.publishedAt = publishedAt ?? null;
-      facts.categoryName = normalizeBilibiliTitleText(categoryName, 'generic') ?? null;
-      facts.seasonId = seasonId ?? null;
-      facts.episodeId = episodeId ?? null;
-      facts.seriesTitle = normalizeBilibiliTitleText(seriesTitle, 'content') ?? null;
-      facts.episodeTitle = (facts.contentType === 'bangumi' ? (episodeTitle || bilibiliTitle) : null) ?? null;
-      facts.tagNames = tagNames;
-    }
-    return finalizeFacts(facts);
-  }
-
-  if (pageType === 'author-page' || pageType === 'author-list-page') {
-    if (isDouyinProfile) {
-      const authorSubpage = normalizeDouyinAuthorSubpage(
-        resolveDouyinAuthorSubpageFromUrl(normalizedFinalUrl, pageType === 'author-list-page' ? 'post' : 'home'),
-        pageType === 'author-list-page' ? 'post' : 'home',
-      );
-      const antiCrawlSignals = detectDouyinAntiCrawlSignals({
-        title,
-        documentText: readDocumentText(),
-      });
-      const facts = {
-        authorSubpage,
-      };
-      if (pageType === 'author-page') {
-        const authorUrl = canonicalizeDouyinAuthorUrl(normalizedFinalUrl) || normalizedFinalUrl || null;
-        const authorUserId = normalizeText(authorUrl?.match(/\/user\/([^/?#]+)/u)?.[1] || '') || null;
-        facts.authorName = readText(['h1']) || null;
-        facts.authorUrl = authorUrl;
-        facts.authorUserId = authorUserId;
-        const featuredContentTitles = readTexts(['a[href*="/video/"]'], 32);
-        const featuredContentUrls = readHrefs(['a[href*="/video/"]'], 32).map((value) => canonicalizeDouyinVideoUrl(value)).filter(Boolean);
-        const featuredContentCards = buildDouyinContentCards(featuredContentUrls, featuredContentTitles, facts);
-        facts.featuredContentCards = featuredContentCards;
-        facts.featuredContentUrls = featuredContentCards.map((card) => card.url).filter(Boolean);
-        facts.featuredContentTitles = featuredContentCards.map((card) => card.title).filter(Boolean);
-        facts.featuredContentVideoIds = featuredContentCards.map((card) => card.videoId).filter(Boolean);
-        facts.featuredContentPublishedDayKeys = featuredContentCards.map((card) => card.publishedDayKey).filter(Boolean);
-        facts.featuredContentCount = featuredContentCards.length;
-        if (featuredContentCards.length > 0) {
-          facts.featuredContentComplete = true;
-        }
-      } else {
-        const featuredAuthorNames = readTexts(['a[href*="/user/"]'], 32);
-        const featuredAuthorUrls = readHrefs(['a[href*="/user/"]'], 32)
-          .map((value) => canonicalizeDouyinAuthorUrl(value))
-          .filter((value) => value && !/\/user\/self(?:[/?#]|$)/u.test(value));
-        const featuredAuthorCards = authorSubpage === 'follow-users'
-          ? buildDouyinAuthorCards(featuredAuthorUrls, featuredAuthorNames)
-          : [];
-        if (featuredAuthorCards.length > 0) {
-          facts.featuredAuthorCards = featuredAuthorCards;
-          facts.featuredAuthorUrls = featuredAuthorCards.map((card) => card.url).filter(Boolean);
-          facts.featuredAuthorNames = featuredAuthorCards.map((card) => card.name).filter(Boolean);
-          facts.featuredAuthorUserIds = featuredAuthorCards.map((card) => card.userId).filter(Boolean);
-          facts.featuredAuthorCount = featuredAuthorCards.length;
-          facts.featuredAuthorComplete = true;
-        }
-      }
-      if (antiCrawlSignals.length > 0) {
-        facts.antiCrawlDetected = true;
-        facts.antiCrawlSignals = antiCrawlSignals;
-        facts.antiCrawlReasonCode = deriveDouyinAntiCrawlReasonCode(antiCrawlSignals);
-      }
-      return finalizeFacts(facts, {
-        antiCrawlReasonCode: facts.antiCrawlReasonCode ?? null,
-      });
-    }
-    const genericAuthorName = metaContent('og:novel:author')
-      || readText(
-        Array.isArray(siteProfile?.author?.titleSelectors)
-          ? siteProfile.author.titleSelectors
-          : ['h1', '.author h1', '.title h1', 'h2'],
-      );
-    const facts = {
-      authorName: genericAuthorName,
-    };
-    if (isBilibiliProfile) {
-      const authorUrls = readHrefs([
-        'a[href*="space.bilibili.com/"]',
-      ], 16).filter((value) => value !== normalizedFinalUrl);
-      const authorNames = readTexts([
-        'a[href*="space.bilibili.com/"] .name',
-        'a[href*="space.bilibili.com/"] .up-name',
-        'a[href*="space.bilibili.com/"]',
-      ], 16).filter((value) => value !== facts.authorName);
-      const workUrls = readHrefs(
-        Array.isArray(siteProfile?.author?.workLinkSelectors)
-          ? siteProfile.author.workLinkSelectors
-          : ['a[href*="/video/BV"]'],
-        12,
-      );
-      const workTitles = readTexts(
-        Array.isArray(siteProfile?.author?.workLinkSelectors)
-          ? siteProfile.author.workLinkSelectors
-          : ['a[href*="/video/BV"]'],
-        12,
-      );
-      facts.authorName = normalizeBilibiliTitleText(genericAuthorName, 'author')
-        || readText(['h1', '.nickname', '.up-name', '.h-name'])
-        || normalizeBilibiliTitleText(title, 'author');
-      facts.authorMid = pathname.match(/^\/(\d+)(?:\/|$)/u)?.[1]
-        || readPattern([/"mid"\s*:\s*(\d+)/u, /"mid":"?(\d+)"?/u]);
-      facts.authorUrl = normalizedFinalUrl || null;
-      facts.authorSubpage = bilibiliAuthorSubpageFromPath(pathname);
-      facts.authorSubpagePath = pathname;
-      const extractedCards = typeof extractStructuredBilibiliAuthorCards === 'function'
-        ? extractStructuredBilibiliAuthorCards({
-          pageType,
-          siteProfile,
-          finalUrl: normalizedFinalUrl,
-          pathname,
-          authorMid: facts.authorMid,
-          authorName: facts.authorName,
-          authorSubpage: facts.authorSubpage,
-        })
-        : null;
-      const featuredAuthorCards = dedupeBilibiliAuthorCards(
-        extractedCards?.authorCards?.length > 0
-          ? extractedCards.authorCards
-          : authorUrls.map((url, index) => ({
-            url,
-            mid: bilibiliMidFromUrl(url),
-            name: authorNames[index] ?? null,
-          })),
-        facts.authorSubpage,
-      );
-      const featuredContentCards = dedupeBilibiliContentCards(
-        extractedCards?.contentCards?.length > 0
-          ? extractedCards.contentCards
-          : workUrls.map((url, index) => ({
-            url,
-            title: workTitles[index] ?? null,
-            bvid: bilibiliBvidFromUrl(url),
-            authorMid: facts.authorMid,
-            contentType: bilibiliContentTypeFromUrl(url),
-            authorUrl: facts.authorUrl,
-            authorName: facts.authorName,
-          })),
-        facts.authorMid,
-      );
-      facts.featuredAuthorCards = featuredAuthorCards;
-      facts.featuredAuthors = featuredAuthorCards.map((card) => ({
-        name: card.name,
-        url: card.url,
-        mid: card.mid,
-      }));
-      facts.featuredAuthorUrls = featuredAuthorCards.map((card) => card.url).filter(Boolean);
-      facts.featuredAuthorNames = featuredAuthorCards.map((card) => card.name).filter(Boolean);
-      facts.featuredAuthorMids = featuredAuthorCards.map((card) => card.mid).filter(Boolean);
-      facts.featuredAuthorCount = featuredAuthorCards.length;
-      facts.featuredContentCards = featuredContentCards;
-      facts.featuredContentUrls = featuredContentCards.map((card) => card.url).filter(Boolean);
-      facts.featuredContentTitles = featuredContentCards.map((card) => card.title).filter(Boolean);
-      facts.featuredContentCount = featuredContentCards.length;
-      facts.featuredContentTypes = featuredContentCards.map((card) => card.contentType).filter(Boolean);
-      facts.featuredContentBvids = featuredContentCards.map((card) => card.bvid).filter(Boolean);
-      facts.featuredContentAuthorMids = featuredContentCards.map((card) => card.authorMid).filter(Boolean);
-      const antiCrawlSignals = detectBilibiliAntiCrawlSignals();
-      if (antiCrawlSignals.length > 0) {
-        facts.antiCrawlDetected = true;
-        facts.antiCrawlSignals = antiCrawlSignals;
-        facts.antiCrawlReasonCode = deriveBilibiliAntiCrawlReasonCode(antiCrawlSignals);
-      }
-    }
-    return finalizeFacts(facts, {
-      antiCrawlReasonCode: facts.antiCrawlReasonCode ?? null,
-    });
-  }
-
-  if (pageType === 'category-page') {
-    const facts = {
-      categoryName: normalizeBilibiliTitleText(readText(['h1', '.channel-title', '.page-title']), 'generic')
-        || bilibiliCategoryNameFromPath(pathname),
-    };
-    if (isBilibiliProfile) {
-      const featuredContentUrls = readHrefs([
-        'a[href*="//www.bilibili.com/video/"]',
-        'a[href*="/video/"]',
-        'a[href*="//www.bilibili.com/bangumi/play/"]',
-        'a[href*="/bangumi/play/"]',
-      ], 16);
-      const featuredContentTitles = readTexts([
-        'a[href*="//www.bilibili.com/video/"]',
-        'a[href*="/video/"]',
-        'a[href*="//www.bilibili.com/bangumi/play/"]',
-        'a[href*="/bangumi/play/"]',
-      ], 16);
-      facts.categoryName = facts.categoryName || bilibiliCategoryNameFromPath(pathname);
-      facts.categoryPath = pathname;
-      facts.featuredContentUrls = featuredContentUrls;
-      facts.featuredContentTitles = featuredContentTitles;
-      facts.featuredContentTypes = featuredContentUrls
-        .map((value) => bilibiliContentTypeFromUrl(value))
-        .filter(Boolean)
-        .slice(0, 16);
-      facts.featuredContentCount = featuredContentUrls.length;
-      facts.featuredContentBvids = featuredContentUrls
-        .map((value) => bilibiliBvidFromUrl(value))
-        .filter(Boolean)
-        .slice(0, 10);
-      facts.rankingLabels = readTexts([
-        '.rank-item .num',
-        '.popular-rank .num',
-        '.rank-wrap .rank-num',
-        '.hot-list .rank',
-      ], 12);
-    }
-    return finalizeFacts(facts);
-  }
-
-  if (pageType === 'chapter-page') {
-    const contentText = normalizeText(readDocumentText());
-    return finalizeFacts({
-      bookTitle: readText(['#info_url', '.crumbs a[href*="/biqu"]', '.bread-crumbs a[href*="/biqu"]']),
-      authorName: metaContent('og:novel:author'),
-      chapterTitle: readText(['.reader-main .title', 'h1.title', '.content_read h1', 'h1']),
-      chapterHref: normalizedFinalUrl,
-      prevChapterUrl: readHref(['#prev_url', 'a#prev_url']),
-      nextChapterUrl: readHref(['#next_url', 'a#next_url']),
-      bodyTextLength: contentText.length,
-      bodyExcerpt: contentText.slice(0, 160) || null,
-    });
-  }
-
-  return null;
-}
+export const derivePageFacts = deriveSharedPageFacts;
 
 function isJableSiteProfile(siteProfile = null, baseUrl = '') {
   const profileHost = String(siteProfile?.host ?? '').toLowerCase();
@@ -922,18 +205,6 @@ function isMoodyzSiteProfile(siteProfile = null, baseUrl = '') {
     }
   })();
   return profileHost === 'moodyz.com' || profileHost === 'www.moodyz.com' || urlHost === 'moodyz.com' || urlHost === 'www.moodyz.com';
-}
-
-function isDouyinSiteProfile(siteProfile = null, baseUrl = '') {
-  const profileHost = String(siteProfile?.host ?? '').toLowerCase();
-  const urlHost = (() => {
-    try {
-      return new URL(String(baseUrl || '')).hostname.toLowerCase();
-    } catch {
-      return '';
-    }
-  })();
-  return profileHost === 'douyin.com' || profileHost === 'www.douyin.com' || urlHost === 'douyin.com' || urlHost === 'www.douyin.com';
 }
 
 function isBilibiliSiteProfile(siteProfile = null, baseUrl = '') {
@@ -988,6 +259,56 @@ function buildBilibiliWaitPolicy(settings, pageType, { directNavigation = false,
   };
 }
 
+function buildXiaohongshuWaitPolicy(settings, pageType, { directNavigation = false, trigger = null } = {}) {
+  if (!['home', 'category-page', 'search-results-page', 'author-page', 'author-list-page'].includes(pageType) && !isContentDetailPageType(pageType)) {
+    return null;
+  }
+
+  const triggerKind = String(trigger?.kind ?? '');
+  const isHome = pageType === 'home';
+  const isCategory = pageType === 'category-page';
+  const isSearch = pageType === 'search-results-page';
+  const isDetail = isContentDetailPageType(pageType);
+  const isAuthor = pageType === 'author-page' || pageType === 'author-list-page';
+  const isAuthorList = pageType === 'author-list-page';
+  const isFeed = isHome || isCategory || isSearch;
+  const useLoadEvent = isSearch;
+
+  return {
+    useLoadEvent,
+    useNetworkIdle: false,
+    documentReadyTimeoutMs: Math.min(
+      settings.timeoutMs,
+      directNavigation
+        ? (isAuthorList ? 7_200 : isAuthor ? 6_600 : isDetail ? 6_000 : isFeed ? 5_800 : 6_200)
+        : (isAuthorList ? 8_000 : isAuthor ? 7_400 : isDetail ? 6_800 : isFeed ? 6_400 : 7_000),
+    ),
+    domQuietTimeoutMs: Math.min(
+      settings.timeoutMs,
+      directNavigation
+        ? (isAuthorList ? 3_200 : isAuthor ? 2_800 : isDetail ? 2_600 : isFeed ? 2_400 : 2_600)
+        : (isAuthorList ? 3_800 : isAuthor ? 3_300 : isDetail ? 3_000 : isFeed ? 2_800 : 3_000),
+    ),
+    domQuietMs:
+      triggerKind === 'search-form'
+        ? 180
+        : triggerKind === 'content-link'
+          ? 140
+          : triggerKind === 'safe-nav-link' && isAuthor
+            ? 150
+            : isSearch
+              ? 200
+              : isDetail
+                ? 210
+                : isAuthorList
+                  ? 230
+                  : isAuthor
+                    ? 220
+                    : 210,
+    idleMs: Math.min(settings.idleMs, directNavigation ? 140 : 180),
+  };
+}
+
 async function waitForSelectorMatches(session, selectors, {
   minCount = 1,
   timeoutMs = 2_000,
@@ -1024,6 +345,206 @@ async function waitForSelectorMatches(session, selectors, {
   return false;
 }
 
+async function dismissXiaohongshuLoginModalIfPresent(session, {
+  timeoutMs = 2_200,
+  pollMs = 120,
+} = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let dismissAttempted = false;
+  while (Date.now() < deadline) {
+    try {
+      const result = await session.callPageFunction(() => {
+        const isVisible = (element) => {
+          if (!element || typeof element !== 'object' || !element.isConnected) {
+            return false;
+          }
+          if (element.hidden) {
+            return false;
+          }
+          const style = globalThis.getComputedStyle?.(element);
+          if (style && (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0')) {
+            return false;
+          }
+          const rect = typeof element.getBoundingClientRect === 'function'
+            ? element.getBoundingClientRect()
+            : { width: 1, height: 1 };
+          return Number(rect?.width ?? 0) > 0 && Number(rect?.height ?? 0) > 0;
+        };
+        const modalCandidates = [
+          ...document.querySelectorAll('.reds-modal.login-modal'),
+          ...document.querySelectorAll('.login-modal'),
+          ...document.querySelectorAll('.login-container'),
+        ];
+        const container = modalCandidates
+          .map((candidate) => {
+            if (!candidate || !isVisible(candidate)) {
+              return null;
+            }
+            if (candidate.matches?.('.login-container')) {
+              return candidate;
+            }
+            return candidate.querySelector?.('.login-container') ?? null;
+          })
+          .find((candidate) => isVisible(candidate))
+          ?? null;
+        if (!container) {
+          return {
+            modalVisible: false,
+            dismissed: false,
+          };
+        }
+        const closeButton = [
+          '.icon-btn-wrapper.close-button',
+          '.close-button',
+          '.close-box',
+          '[aria-label*="关闭"]',
+          '[role="button"][aria-label*="关闭"]',
+        ]
+          .map((selector) => {
+            try {
+              return container.querySelector(selector);
+            } catch {
+              return null;
+            }
+          })
+          .find((candidate) => isVisible(candidate))
+          ?? null;
+        if (!closeButton) {
+          return {
+            modalVisible: true,
+            dismissed: false,
+          };
+        }
+        try {
+          closeButton.dispatchEvent?.(new MouseEvent('click', {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+          }));
+        } catch {
+          // Fall through to click().
+        }
+        closeButton.click?.();
+        return {
+          modalVisible: true,
+          dismissed: true,
+        };
+      });
+      if (!result?.modalVisible) {
+        return dismissAttempted;
+      }
+      dismissAttempted = dismissAttempted || result?.dismissed === true;
+    } catch {
+      // Ignore transient evaluation failures while the modal click is causing a route change.
+    }
+    await sleep(pollMs);
+  }
+  return dismissAttempted;
+}
+
+async function waitForXiaohongshuHydratedContent(session, pageType, {
+  timeoutMs = 3_200,
+  pollMs = 120,
+  settleMs = 180,
+} = {}) {
+  if (!['search-results-page', 'author-page', 'author-list-page'].includes(pageType) && !isContentDetailPageType(pageType)) {
+    return false;
+  }
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const readiness = await session.callPageFunction((innerPageType) => {
+        const isVisible = (element) => {
+          if (!element || typeof element !== 'object' || !element.isConnected) {
+            return false;
+          }
+          if (element.hidden) {
+            return false;
+          }
+          const style = globalThis.getComputedStyle?.(element);
+          if (style && (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0')) {
+            return false;
+          }
+          const rect = typeof element.getBoundingClientRect === 'function'
+            ? element.getBoundingClientRect()
+            : { width: 1, height: 1 };
+          return Number(rect?.width ?? 0) > 0 && Number(rect?.height ?? 0) > 0;
+        };
+        const visibleCount = (selectors) => selectors.reduce((count, selector) => {
+          try {
+            return count + [...document.querySelectorAll(selector)].filter((element) => isVisible(element)).length;
+          } catch {
+            return count;
+          }
+        }, 0);
+        const modalVisible = [
+          '.reds-modal.login-modal .login-container',
+          '.login-modal .login-container',
+          '.login-container',
+        ].some((selector) => {
+          try {
+            return [...document.querySelectorAll(selector)].some((element) => isVisible(element));
+          } catch {
+            return false;
+          }
+        });
+        const initialState = globalThis.window?.__INITIAL_STATE__ ?? null;
+        const searchFeedCount = Array.isArray(initialState?.search?.feeds)
+          ? initialState.search.feeds.filter(Boolean).length
+          : 0;
+        const authorNoteCount = Array.isArray(initialState?.user?.notes)
+          ? initialState.user.notes.flat(2).filter(Boolean).length
+          : 0;
+        const detailNoteCount = initialState?.note?.noteDetailMap && typeof initialState.note.noteDetailMap === 'object'
+          ? Object.values(initialState.note.noteDetailMap)
+            .filter((entry) => entry?.note && Object.keys(entry.note).length > 0)
+            .length
+          : 0;
+        const contentLinkCount = visibleCount([
+          'section.note-item a[href*="/explore/"]',
+          'a.cover[href*="/explore/"]',
+          'a.title[href*="/explore/"]',
+          'a[href*="/explore/"]',
+        ]);
+        const authorLinkCount = visibleCount([
+          '.author-wrapper a[href*="/user/profile/"]',
+          'a[href*="/user/profile/"]',
+        ]);
+        const detailTitleCount = visibleCount([
+          '.note-content .title',
+          '.note-content .desc',
+          '.note-content',
+        ]);
+        const ready = innerPageType === 'search-results-page'
+          ? contentLinkCount > 0 || searchFeedCount > 0
+          : innerPageType === 'author-page' || innerPageType === 'author-list-page'
+            ? contentLinkCount > 0 || authorNoteCount > 0
+            : detailTitleCount > 0 || authorLinkCount > 0 || detailNoteCount > 0;
+        return {
+          modalVisible,
+          ready,
+        };
+      }, pageType);
+      if (readiness?.ready && !readiness?.modalVisible) {
+        if (settleMs > 0) {
+          await sleep(settleMs);
+        }
+        return true;
+      }
+      if (readiness?.modalVisible) {
+        await dismissXiaohongshuLoginModalIfPresent(session, {
+          timeoutMs: Math.min(2_400, Math.max(0, deadline - Date.now())),
+          pollMs,
+        });
+      }
+    } catch {
+      // Ignore transient evaluation failures while the page is still hydrating.
+    }
+    await sleep(pollMs);
+  }
+  return false;
+}
+
 function resolveBilibiliReadySelectors(siteProfile, pageType) {
   const defaultContentSelectors = [
     'a[href*="www.bilibili.com/video/"]',
@@ -1056,6 +577,57 @@ function resolveBilibiliReadyWaitOptions(pageType) {
   return null;
 }
 
+function resolveXiaohongshuReadySelectors(siteProfile, pageType) {
+  const defaultFeedSelectors = [
+    'a.cover[href*="/explore/"]',
+    'a.title[href*="/explore/"]',
+    'section.note-item a[href*="/explore/"]',
+    'a[href*="/explore/"]',
+  ];
+  const defaultAuthorSelectors = [
+    '.user-name',
+    '.username',
+    ...defaultFeedSelectors,
+  ];
+  const defaultDetailSelectors = [
+    '.note-content',
+    '.note-content .title',
+    '.note-content .desc',
+    'a[href*="/user/profile/"]',
+  ];
+
+  if (pageType === 'home' || pageType === 'category-page' || pageType === 'search-results-page') {
+    return mergeStringArrays(siteProfile?.search?.resultBookSelectors, defaultFeedSelectors);
+  }
+  if (pageType === 'author-page' || pageType === 'author-list-page') {
+    return mergeStringArrays(siteProfile?.author?.workLinkSelectors, defaultAuthorSelectors);
+  }
+  if (isContentDetailPageType(pageType)) {
+    return mergeStringArrays(
+      siteProfile?.contentDetail?.titleSelectors,
+      siteProfile?.contentDetail?.authorLinkSelectors,
+      defaultDetailSelectors,
+    );
+  }
+  return [];
+}
+
+function resolveXiaohongshuReadyWaitOptions(pageType) {
+  if (pageType === 'author-list-page') {
+    return { timeoutMs: 6_800, pollMs: 140, settleMs: 240 };
+  }
+  if (pageType === 'author-page') {
+    return { timeoutMs: 5_800, pollMs: 120, settleMs: 220 };
+  }
+  if (pageType === 'home' || pageType === 'category-page' || pageType === 'search-results-page') {
+    return { timeoutMs: 5_200, pollMs: 120, settleMs: 220 };
+  }
+  if (isContentDetailPageType(pageType)) {
+    return { timeoutMs: 4_200, pollMs: 120, settleMs: 180 };
+  }
+  return null;
+}
+
 async function ensureSiteSpecificReadyMarkers(session, siteProfile = null, url = '') {
   const pageType = inferPageTypeFromUrl(url, siteProfile);
 
@@ -1069,6 +641,29 @@ async function ensureSiteSpecificReadyMarkers(session, siteProfile = null, url =
       timeoutMs: 6_000,
       pollMs: 120,
       settleMs: 180,
+    });
+    return;
+  }
+
+  if (isXiaohongshuSiteProfile(siteProfile, url)) {
+    const selectors = resolveXiaohongshuReadySelectors(siteProfile, pageType);
+    const waitOptions = resolveXiaohongshuReadyWaitOptions(pageType);
+    if (!waitOptions || selectors.length === 0) {
+      return;
+    }
+    await dismissXiaohongshuLoginModalIfPresent(session, {
+      timeoutMs: Math.min(waitOptions.timeoutMs, 3_200),
+      pollMs: waitOptions.pollMs,
+    });
+    await waitForSelectorMatches(session, selectors, waitOptions);
+    await dismissXiaohongshuLoginModalIfPresent(session, {
+      timeoutMs: Math.min(waitOptions.timeoutMs, 2_000),
+      pollMs: waitOptions.pollMs,
+    });
+    await waitForXiaohongshuHydratedContent(session, pageType, {
+      timeoutMs: waitOptions.timeoutMs,
+      pollMs: waitOptions.pollMs,
+      settleMs: waitOptions.settleMs,
     });
     return;
   }
@@ -1109,6 +704,14 @@ function resolveNavigationWaitPolicy(settings, siteProfile = null, baseUrl = '')
         domQuietMs: 200,
         idleMs: Math.min(settings.idleMs, 150),
       };
+    }
+  }
+
+  if (isXiaohongshuSiteProfile(siteProfile, baseUrl)) {
+    const pageType = inferPageTypeFromUrl(baseUrl, siteProfile);
+    const policy = buildXiaohongshuWaitPolicy(settings, pageType);
+    if (policy) {
+      return policy;
     }
   }
 
@@ -1276,12 +879,26 @@ function buildPageFactsSyntheticTriggers(pageType, pageFacts = null) {
 
   const urlEntries = [];
   if (pageType === 'search-results-page') {
-    for (const href of pageFacts.resultUrls ?? []) {
+    const resultNavigationUrls = [
+      ...(Array.isArray(pageFacts.resultNavigationUrls) ? pageFacts.resultNavigationUrls : []),
+      ...(Array.isArray(pageFacts.resultEntries)
+        ? pageFacts.resultEntries.map((entry) => entry?.navigationUrl ?? entry?.url).filter(Boolean)
+        : []),
+      ...(Array.isArray(pageFacts.resultUrls) ? pageFacts.resultUrls : []),
+    ];
+    for (const href of resultNavigationUrls) {
       urlEntries.push(buildLinkTrigger('content-link', href, { semanticRole: 'content', ordinal: 9_100 }));
     }
   }
   if (['author-page', 'author-list-page', 'category-page'].includes(pageType)) {
-    for (const href of pageFacts.featuredContentUrls ?? []) {
+    const featuredContentNavigationUrls = [
+      ...(Array.isArray(pageFacts.featuredContentNavigationUrls) ? pageFacts.featuredContentNavigationUrls : []),
+      ...(Array.isArray(pageFacts.featuredContentCards)
+        ? pageFacts.featuredContentCards.map((entry) => entry?.navigationUrl ?? entry?.url).filter(Boolean)
+        : []),
+      ...(Array.isArray(pageFacts.featuredContentUrls) ? pageFacts.featuredContentUrls : []),
+    ];
+    for (const href of featuredContentNavigationUrls) {
       urlEntries.push(buildLinkTrigger('content-link', href, { semanticRole: 'content', ordinal: 9_200 }));
     }
   }
@@ -1290,8 +907,8 @@ function buildPageFactsSyntheticTriggers(pageType, pageFacts = null) {
       urlEntries.push(buildLinkTrigger('safe-nav-link', href, { semanticRole: 'author', ordinal: 9_250 }));
     }
   }
-  if (isContentDetailPageType(pageType) && pageFacts.authorUrl) {
-    urlEntries.push(buildLinkTrigger('safe-nav-link', pageFacts.authorUrl, {
+  if (isContentDetailPageType(pageType) && (pageFacts.authorNavigationUrl || pageFacts.authorUrl)) {
+    urlEntries.push(buildLinkTrigger('safe-nav-link', pageFacts.authorNavigationUrl || pageFacts.authorUrl, {
       semanticRole: 'author',
       label: pageFacts.authorName || 'Author Page',
       ordinal: 9_300,
@@ -1925,7 +1542,7 @@ function summarizeForStdout(manifest) {
   };
 }
 
-function mergeOptions(options = {}) {
+function mergeOptions(inputUrl, options = {}) {
   const merged = {
     ...DEFAULT_OPTIONS,
     ...options,
@@ -1950,6 +1567,9 @@ function mergeOptions(options = {}) {
   }
   if (merged.userDataDir) {
     merged.userDataDir = path.resolve(merged.userDataDir);
+  }
+  if (!Object.prototype.hasOwnProperty.call(options, 'headless')) {
+    merged.headless = resolveExpandHeadlessDefault(inputUrl, DEFAULT_OPTIONS.headless, merged.siteProfile);
   }
   merged.timeoutMs = normalizeNumber(merged.timeoutMs, 'timeoutMs');
   merged.idleMs = normalizeNumber(merged.idleMs, 'idleMs');
@@ -3309,6 +2929,7 @@ function pageExecuteTrigger(trigger, siteProfile = null) {
   function buildSearchNavigationUrl(queryText, search) {
     const form = search.form instanceof HTMLFormElement ? search.form : search.input?.form ?? null;
     const method = normalizeText(form?.getAttribute('method') || 'get').toLowerCase();
+    const isXiaohongshuSearch = profileConfig.profileHost === 'www.xiaohongshu.com' || location.hostname === 'www.xiaohongshu.com';
     if (method && method !== 'get') {
       return null;
     }
@@ -3329,6 +2950,12 @@ function pageExecuteTrigger(trigger, siteProfile = null) {
     }
     if (normalizeUrlLike(action) === normalizeUrlLike(location.href) && (profileConfig.profileHost === 'www.bilibili.com' || location.hostname === 'www.bilibili.com')) {
       action = 'https://search.bilibili.com/all';
+    }
+    if (!normalizeText(action) && isXiaohongshuSearch) {
+      action = 'https://www.xiaohongshu.com/search_result';
+    }
+    if (normalizeUrlLike(action) === normalizeUrlLike(location.href) && isXiaohongshuSearch) {
+      action = 'https://www.xiaohongshu.com/search_result';
     }
     const targetUrl = normalizeUrlLike(action);
     if (!targetUrl) {
@@ -3357,6 +2984,12 @@ function pageExecuteTrigger(trigger, siteProfile = null) {
         }
       }
       url.searchParams.set(inputName, queryText);
+      if (isXiaohongshuSearch) {
+        url.searchParams.set('keyword', queryText);
+        if (!normalizeText(url.searchParams.get('type') || '')) {
+          url.searchParams.set('type', '51');
+        }
+      }
       return url.toString();
     } catch {
       return null;
@@ -3489,1212 +3122,19 @@ function pageExecuteTrigger(trigger, siteProfile = null) {
   }
 }
 
-function pageComputeStateSignature(siteProfile = null) {
-  function normalizeText(value) {
-    return String(value ?? '').replace(/\s+/g, ' ').trim();
-  }
-
-  function isContentDetailPageTypeLocal(pageType) {
-    return pageType === 'book-detail-page' || pageType === 'content-detail-page';
-  }
-
-  function normalizeHostnameLocal(value) {
-    return String(value ?? '').trim().toLowerCase();
-  }
-
-  function classifyJableModelsPathLocal(pathname) {
-    const normalized = String(pathname || '/').trim().toLowerCase() || '/';
-    if (normalized === '/models' || normalized === '/models/') {
-      return 'list';
-    }
-    if (!normalized.startsWith('/models/')) {
-      return null;
-    }
-    const remainder = normalized.slice('/models/'.length).replace(/^\/+|\/+$/g, '');
-    if (!remainder) {
-      return 'list';
-    }
-    const [firstSegment] = remainder.split('/');
-    if (!firstSegment) {
-      return 'list';
-    }
-    if (/^\d+$/u.test(firstSegment)) {
-      return 'list';
-    }
-    return 'detail';
-  }
-
-  function normalizeUrlNoFragmentLocal(value) {
-    try {
-      const parsed = new URL(value, document.baseURI);
-      parsed.hash = '';
-      return parsed.toString();
-    } catch {
-      return String(value ?? '').split('#')[0];
-    }
-  }
-
-  function getLabel(element) {
-    const ariaLabel = normalizeText(element.getAttribute('aria-label'));
-    if (ariaLabel) {
-      return ariaLabel;
-    }
-    const labelledBy = normalizeText(element.getAttribute('aria-labelledby'));
-    if (labelledBy) {
-      const parts = labelledBy
-        .split(/\s+/)
-        .map((id) => document.getElementById(id))
-        .filter(Boolean)
-        .map((node) => normalizeText(node.textContent || node.innerText || ''))
-        .filter(Boolean);
-      if (parts.length > 0) {
-        return normalizeText(parts.join(' '));
-      }
-    }
-    const text = normalizeText(element.innerText || element.textContent || '');
-    if (text) {
-      return text.slice(0, 80);
-    }
-    return normalizeText(element.id || element.getAttribute('name') || element.tagName.toLowerCase());
-  }
-
-  function getRole(element) {
-    const explicit = normalizeText(element.getAttribute('role'));
-    if (explicit) {
-      return explicit.toLowerCase();
-    }
-    const tag = element.tagName.toLowerCase();
-    if (tag === 'button' || tag === 'summary') {
-      return 'button';
-    }
-    if (tag === 'a' && element.hasAttribute('href')) {
-      return 'link';
-    }
-    return '';
-  }
-
-  function isVisible(element) {
-    if (!element || !element.isConnected) {
-      return false;
-    }
-    if (element.hidden || element.closest('[hidden], [inert]')) {
-      return false;
-    }
-    if (element.getAttribute('aria-hidden') === 'true') {
-      return false;
-    }
-    const style = window.getComputedStyle(element);
-    if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') {
-      return false;
-    }
-    const rect = element.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
-  }
-
-  function descriptor(element) {
-    return [
-      element.tagName.toLowerCase(),
-      element.id ? `#${element.id}` : '',
-      getRole(element) ? `[${getRole(element)}]` : '',
-      getLabel(element),
-    ]
-      .filter(Boolean)
-      .join('');
-  }
-
-  function uniqueSorted(values) {
-    return [...new Set(values.filter(Boolean))].sort();
-  }
-
-  function controlledIdsFromElement(element) {
-    return normalizeText(element.getAttribute('aria-controls')).split(/\s+/).filter(Boolean);
-  }
-
-  function textFromSelectors(selectors) {
-    for (const selector of selectors) {
-      const node = document.querySelector(selector);
-      const text = normalizeText(node?.textContent || node?.innerText || '');
-      if (text) {
-        return text;
-      }
-    }
-    return null;
-  }
-
-  function hrefFromSelectors(selectors) {
-    for (const selector of selectors) {
-      const node = document.querySelector(selector);
-      const href = node?.getAttribute?.('href');
-      if (href) {
-        return normalizeUrlNoFragmentLocal(href);
-      }
-    }
-    return null;
-  }
-
-  function textsFromSelectors(selectors) {
-    const values = [];
-    for (const selector of selectors) {
-      try {
-        values.push(
-          ...Array.from(document.querySelectorAll(selector)).map((node) => normalizeText(node?.textContent || node?.innerText || '')),
-        );
-      } catch {
-        // Ignore invalid selectors from site profile.
-      }
-    }
-    return uniqueSorted(values.filter(Boolean));
-  }
-
-  function hrefsFromSelectors(selectors) {
-    const values = [];
-    for (const selector of selectors) {
-      try {
-        values.push(
-          ...Array.from(document.querySelectorAll(selector))
-            .map((node) => normalizeText(node?.getAttribute?.('href') || ''))
-            .filter(Boolean)
-            .map((value) => normalizeUrlNoFragmentLocal(value)),
-        );
-      } catch {
-        // Ignore invalid selectors from site profile.
-      }
-    }
-    return uniqueSorted(values.filter(Boolean));
-  }
-
-  function metaContent(name) {
-    return normalizeText(
-      document.querySelector(`meta[property="${name}"], meta[name="${name}"]`)?.getAttribute('content') || '',
-    ) || null;
-  }
-
-  function uniqueTexts(elements) {
-    return uniqueSorted(elements.map((node) => normalizeText(node?.textContent || node?.innerText || '')).filter(Boolean));
-  }
-
-  const detailsOpen = uniqueSorted(
-    Array.from(document.querySelectorAll('details[open]')).map((element) => descriptor(element)),
-  );
-
-  const expandedTriggers = Array.from(document.querySelectorAll('[aria-expanded="true"]')).filter(isVisible);
-  const expandedTrue = uniqueSorted(expandedTriggers.map((element) => descriptor(element)));
-
-  const activeTabs = Array.from(document.querySelectorAll('[role="tab"][aria-selected="true"]')).filter(isVisible);
-  const activeTabDescriptors = uniqueSorted(activeTabs.map((element) => descriptor(element)));
-
-  const controlledIds = new Set();
-  for (const element of [...expandedTriggers, ...activeTabs]) {
-    for (const id of controlledIdsFromElement(element)) {
-      controlledIds.add(id);
-    }
-  }
-
-  const controlledVisible = uniqueSorted(
-    [...controlledIds]
-      .map((id) => document.getElementById(id))
-      .filter((element) => isVisible(element))
-      .map((element) => descriptor(element)),
-  );
-
-  const openDialogs = uniqueSorted(
-    Array.from(document.querySelectorAll('dialog[open], [role="dialog"][aria-modal="true"]'))
-      .filter(isVisible)
-      .map((element) => descriptor(element)),
-  );
-
-  const openMenus = uniqueSorted(
-    [...controlledIds]
-      .map((id) => document.getElementById(id))
-      .filter((element) => isVisible(element) && (getRole(element) === 'menu' || getRole(element) === 'menubar'))
-      .map((element) => descriptor(element)),
-  );
-
-  const openListboxes = uniqueSorted(
-    [...controlledIds]
-      .map((id) => document.getElementById(id))
-      .filter((element) => isVisible(element) && getRole(element) === 'listbox')
-      .map((element) => descriptor(element)),
-  );
-
-  const openPopovers = uniqueSorted(
-    Array.from(document.querySelectorAll('[popover]'))
-      .filter((element) => {
-        try {
-          return element.matches(':popover-open') && isVisible(element);
-        } catch {
-          return false;
-        }
-      })
-      .map((element) => descriptor(element)),
-  );
-
-  const finalUrl = normalizeUrlNoFragmentLocal(location.href);
-  const title = document.title || '';
-  const parsedFinalUrl = (() => {
-    try {
-      return new URL(finalUrl, document.baseURI);
-    } catch {
-      return null;
-    }
-  })();
-  const pathname = parsedFinalUrl?.pathname || '/';
-  const bilibiliContentTypeFromUrlLocal = (value) => {
-    const normalizedValue = normalizeText(value);
-    if (!normalizedValue) {
-      return null;
-    }
-    if (/\/bangumi\/play\//iu.test(normalizedValue)) {
-      return 'bangumi';
-    }
-    if (/\/video\/BV[0-9A-Za-z]+/iu.test(normalizedValue)) {
-      return 'video';
-    }
-    if (/space\.bilibili\.com\/\d+/iu.test(normalizedValue) || /\/upuser(?:\/|$)/iu.test(normalizedValue)) {
-      return 'author';
-    }
-    return null;
-  };
-  const bilibiliBvidFromUrlLocal = (value) => normalizeText(value?.match(/\/video\/(BV[0-9A-Za-z]+)/u)?.[1] || '') || null;
-  const bilibiliMidFromUrlLocal = (value) => normalizeText(value?.match(/space\.bilibili\.com\/(\d+)/u)?.[1] || '') || null;
-  const douyinVideoIdFromUrlLocal = (value) => normalizeText(value?.match(/\/video\/(\d+)/u)?.[1] || '') || null;
-  const canonicalizeDouyinAuthorUrlLocal = (value) => {
-    const normalized = normalizeUrlNoFragmentLocal(value);
-    return /\/user\/[^/?#]+/iu.test(normalized) && !/\/user\/self(?:[/?#]|$)/iu.test(normalized) ? normalized : null;
-  };
-  const canonicalizeDouyinVideoUrlLocal = (value) => {
-    const normalized = normalizeUrlNoFragmentLocal(value);
-    return /\/video\/\d+/iu.test(normalized) ? normalized : null;
-  };
-  const normalizeDouyinAuthorSubpageLocal = (value, fallback = 'home') => {
-    const normalized = normalizeText(String(value || '').replace(/^\/+|\/+$/gu, '')).toLowerCase();
-    if (!normalized) {
-      return fallback;
-    }
-    if (normalized === 'favorite') {
-      return 'collect';
-    }
-    if (normalized === 'watch_history' || normalized === 'record') {
-      return 'history';
-    }
-    if (normalized === 'feed') {
-      return 'follow-feed';
-    }
-    if (normalized === 'user' || normalized === 'users') {
-      return 'follow-users';
-    }
-    return normalized;
-  };
-  const detectDouyinAntiCrawlSignalsLocal = ({ title = '', documentText = '' } = {}) => {
-    const source = normalizeText([title, documentText].filter(Boolean).join(' ')).toLowerCase();
-    if (!source) {
-      return [];
-    }
-    const signals = [];
-    if (/captcha|verify|challenge/u.test(source) || /\u9a8c\u8bc1\u7801/u.test(source) || /\u4e2d\u95f4\u9875/u.test(source) || /middle_page_loading/u.test(source)) {
-      signals.push('verify');
-    }
-    if (/captcha/u.test(source)) {
-      signals.push('captcha');
-    }
-    if (/challenge/u.test(source) || /\u4e2d\u95f4\u9875/u.test(source)) {
-      signals.push('challenge');
-    }
-    if (/rate[- ]?limit|too[- ]?many/u.test(source) || /\u9891\u7e41/u.test(source) || /\u7a0d\u540e\u518d\u8bd5/u.test(source)) {
-      signals.push('rate-limit');
-    }
-    if (/middle_page_loading/u.test(source)) {
-      signals.push('middle-page-loading');
-    }
-    return [...new Set(signals)];
-  };
-  const deriveDouyinAntiCrawlReasonCodeLocal = (signals = []) => {
-    const normalized = [...new Set(signals.map((value) => normalizeText(value).toLowerCase()).filter(Boolean))];
-    if (normalized.some((value) => /verify|captcha|middle|middle-page-loading/u.test(value))) {
-      return 'anti-crawl-verify';
-    }
-    if (normalized.some((value) => /rate|too[- ]?many|\u9891\u7e41|\u7a0d\u540e\u518d\u8bd5/u.test(value))) {
-      return 'anti-crawl-rate-limit';
-    }
-    return normalized.length > 0 ? 'anti-crawl-challenge' : null;
-  };
-  const deriveBilibiliAntiCrawlReasonCodeLocal = (signals = []) => {
-    const normalized = [...new Set(signals.map((value) => normalizeText(value).toLowerCase()).filter(Boolean))];
-    if (normalized.some((signal) => /verify|challenge|captcha|\u767b\u5f55\u6821\u9a8c|\u5b89\u5168\u9a8c\u8bc1/u.test(signal))) {
-      return 'anti-crawl-verify';
-    }
-    if (normalized.some((signal) => /rate|\u9891\u7e41|\u7a0d\u540e\u518d\u8bd5|too[- ]many|\u98ce\u63a7/u.test(signal))) {
-      return 'anti-crawl-rate-limit';
-    }
-    return normalized.length > 0 ? 'anti-crawl' : null;
-  };
-  const buildDouyinContentCardsLocal = (urls = [], titles = [], currentAuthor = {}) => {
-    const canonicalUrls = [...new Set(urls.map((value) => canonicalizeDouyinVideoUrlLocal(value)).filter(Boolean))].slice(0, 32);
-    return canonicalUrls.map((url, index) => ({
-      title: normalizeText(titles[index] || '') || null,
-      url,
-      videoId: douyinVideoIdFromUrlLocal(url),
-      authorName: currentAuthor?.authorName ?? null,
-      authorUrl: currentAuthor?.authorUrl ?? null,
-      authorUserId: currentAuthor?.authorUserId ?? null,
-      contentType: 'video',
-      publishedAt: null,
-      publishedDayKey: null,
-    }));
-  };
-  const buildDouyinAuthorCardsLocal = (urls = [], names = []) => {
-    const canonicalUrls = [...new Set(urls.map((value) => canonicalizeDouyinAuthorUrlLocal(value)).filter(Boolean))].slice(0, 32);
-    return canonicalUrls.map((url, index) => ({
-      name: normalizeText(names[index] || '') || null,
-      url,
-      userId: normalizeText(url.match(/\/user\/([^/?#]+)/u)?.[1] || '') || null,
-      cardKind: 'author',
-    }));
-  };
-  const bilibiliAuthorSubpageFromPathLocal = (value) => {
-    const matched = String(value || '').match(/^\/\d+(?:\/([^?#]+))?/u);
-    const normalized = normalizeText(String(matched?.[1] || '').replace(/^\/+|\/+$/gu, ''));
-    if (!normalized) {
-      return 'home';
-    }
-    if (normalized === 'fans/follow') {
-      return 'follow';
-    }
-    if (normalized === 'fans/fans') {
-      return 'fans';
-    }
-    return normalized;
-  };
-  const normalizeBilibiliAuthorCardLocal = (card = {}, authorSubpage = null) => {
-    const name = normalizeText(card.name);
-    const url = card.url ? normalizeUrlNoFragmentLocal(card.url) : null;
-    const mid = normalizeText(card.mid) || bilibiliMidFromUrlLocal(url);
-    if (!name && !url && !mid) {
-      return null;
-    }
-    return {
-      name: name || null,
-      url: url || null,
-      mid: mid || null,
-      authorSubpage: normalizeText(card.authorSubpage) || authorSubpage || null,
-      cardKind: normalizeText(card.cardKind) || 'author',
-    };
-  };
-  const normalizeBilibiliContentCardLocal = (card = {}, fallbackAuthorMid = null) => {
-    const url = card.url ? normalizeUrlNoFragmentLocal(card.url) : null;
-    const titleValue = normalizeText(card.title);
-    const bvid = normalizeText(card.bvid) || bilibiliBvidFromUrlLocal(url);
-    const authorMid = normalizeText(card.authorMid) || fallbackAuthorMid || null;
-    const contentType = normalizeText(card.contentType) || bilibiliContentTypeFromUrlLocal(url);
-    const authorUrl = card.authorUrl ? normalizeUrlNoFragmentLocal(card.authorUrl) : null;
-    const authorName = normalizeText(card.authorName);
-    if (!titleValue && !url && !bvid && !authorMid) {
-      return null;
-    }
-    return {
-      title: titleValue || null,
-      url: url || null,
-      bvid: bvid || null,
-      authorMid: authorMid || null,
-      contentType: contentType || null,
-      authorUrl: authorUrl || null,
-      authorName: authorName || null,
-    };
-  };
-  const dedupeBilibiliAuthorCardsLocal = (cards = [], authorSubpage = null) => {
-    const seen = new Set();
-    const result = [];
-    for (const rawCard of cards) {
-      const card = normalizeBilibiliAuthorCardLocal(rawCard, authorSubpage);
-      if (!card) {
-        continue;
-      }
-      const key = card.mid
-        ? `mid::${card.mid}`
-        : card.url
-          ? `url::${card.url}`
-          : `name::${card.name}`;
-      if (!key || seen.has(key)) {
-        continue;
-      }
-      seen.add(key);
-      result.push(card);
-    }
-    return result.slice(0, 16);
-  };
-  const dedupeBilibiliContentCardsLocal = (cards = [], fallbackAuthorMid = null) => {
-    const seen = new Set();
-    const result = [];
-    for (const rawCard of cards) {
-      const card = normalizeBilibiliContentCardLocal(rawCard, fallbackAuthorMid);
-      if (!card) {
-        continue;
-      }
-      const key = card.bvid
-        ? `bvid::${card.bvid}`
-        : card.url
-          ? `url::${card.url}`
-          : `title::${card.title}::${card.authorMid}`;
-      if (!key || seen.has(key)) {
-        continue;
-      }
-      seen.add(key);
-      result.push(card);
-    }
-    return result.slice(0, 12);
-  };
-  const extractBilibiliAuthorSurfaceCardsLocal = ({ currentAuthorMid = null, currentAuthorName = null, authorSubpage = null } = {}) => {
-    const containerSelectors = [
-      '.bili-dyn-list__item',
-      '.bili-dyn-item',
-      '.bili-space-video',
-      '.video-page-card',
-      '.video-page-card-small',
-      '.small-item',
-      '.bili-video-card',
-      '.list-item',
-      '.card',
-      'article',
-      'li',
-    ];
-    const contentSelector = 'a[href*="/video/"], a[href*="/bangumi/play/"]';
-    const authorSelector = 'a[href*="space.bilibili.com/"]';
-    const titleSelectors = [
-      '[title]',
-      '.title',
-      '.bili-video-card__info--tit',
-      '.bili-video-card__info--title',
-      '.video-name',
-      '.name',
-    ];
-    const nameSelectors = ['.name', '.up-name', '.nickname', '[data-user-name]'];
-    const isHeaderLike = (node) => Boolean(node?.closest?.('header, nav, [class*="header"], [class*="nav"]'));
-    const findContainer = (node) => {
-      for (const selector of containerSelectors) {
-        const match = node?.closest?.(selector);
-        if (match instanceof Element && !isHeaderLike(match) && isVisible(match)) {
-          return match;
-        }
-      }
-      const parent = node?.parentElement;
-      return parent instanceof Element && !isHeaderLike(parent) ? parent : null;
-    };
-    const readAuthorNameFromContainer = (container, authorLink) => {
-      for (const selector of nameSelectors) {
-        const node = container.querySelector(selector);
-        const value = normalizeText(node?.textContent || node?.getAttribute?.('title') || '');
-        if (value) {
-          return value;
-        }
-      }
-      return normalizeText(authorLink?.textContent || authorLink?.getAttribute?.('title') || '');
-    };
-    const readContentTitleFromContainer = (container, contentLink) => {
-      for (const selector of titleSelectors) {
-        const node = container.querySelector(selector);
-        const value = normalizeText(node?.getAttribute?.('title') || node?.textContent || '');
-        if (value) {
-          return value;
-        }
-      }
-      return normalizeText(contentLink?.getAttribute?.('title') || contentLink?.textContent || '');
-    };
-    const registerContainer = (collection, node) => {
-      const container = findContainer(node);
-      if (container instanceof Element && !collection.includes(container)) {
-        collection.push(container);
-      }
-    };
-
-    const containers = [];
-    for (const node of Array.from(document.querySelectorAll(contentSelector))) {
-      registerContainer(containers, node);
-    }
-    for (const node of Array.from(document.querySelectorAll(authorSelector))) {
-      registerContainer(containers, node);
-    }
-
-    const authorCards = [];
-    const contentCards = [];
-    for (const container of containers) {
-      const contentLink = Array.from(container.querySelectorAll(contentSelector))
-        .find((node) => isVisible(node) && normalizeUrlNoFragmentLocal(node.getAttribute?.('href') || ''));
-      const contentUrl = normalizeUrlNoFragmentLocal(contentLink?.getAttribute?.('href') || '');
-      const authorLink = Array.from(container.querySelectorAll(authorSelector))
-        .find((node) => {
-          if (!isVisible(node)) {
-            return false;
-          }
-          const href = normalizeUrlNoFragmentLocal(node.getAttribute?.('href') || '');
-          const mid = bilibiliMidFromUrlLocal(href);
-          if (!href || mid === currentAuthorMid) {
-            return false;
-          }
-          return true;
-        });
-      const authorUrl = normalizeUrlNoFragmentLocal(authorLink?.getAttribute?.('href') || '');
-      const authorMid = bilibiliMidFromUrlLocal(authorUrl);
-      const authorName = readAuthorNameFromContainer(container, authorLink) || currentAuthorName || null;
-      if (authorUrl || authorName || authorMid) {
-        authorCards.push({
-          name: authorName,
-          url: authorUrl || null,
-          mid: authorMid || null,
-          authorSubpage,
-        });
-      }
-      if (contentUrl) {
-        contentCards.push({
-          title: readContentTitleFromContainer(container, contentLink),
-          url: contentUrl,
-          bvid: bilibiliBvidFromUrlLocal(contentUrl),
-          authorMid: authorMid || currentAuthorMid || null,
-          authorUrl: authorUrl || null,
-          authorName,
-          contentType: bilibiliContentTypeFromUrlLocal(contentUrl),
-        });
-      }
-    }
-    return {
-      authorCards: dedupeBilibiliAuthorCardsLocal(authorCards, authorSubpage),
-      contentCards: dedupeBilibiliContentCardsLocal(contentCards, currentAuthorMid),
-    };
-  };
-  const detectBilibiliAntiCrawlSignalsLocal = () => {
-    const source = normalizeText(document.body?.innerText || document.documentElement?.innerText || '');
-    if (!source) {
-      return [];
-    }
-    const signals = [];
-    const patterns = [
-      ['rate-limit', /\u8bbf\u95ee\u9891\u7e41/u],
-      ['verify', /\u5b89\u5168\u9a8c\u8bc1/u],
-      ['slide-verify', /\u6ed1\u52a8\u9a8c\u8bc1/u],
-      ['captcha', /captcha/iu],
-      ['risk-control', /\u98ce\u63a7/u],
-      ['retry-later', /\u8bf7\u7a0d\u540e\u518d\u8bd5/u],
-    ];
-    for (const [label, pattern] of patterns) {
-      if (pattern.test(source)) {
-        signals.push(label);
-      }
-    }
-    return signals;
-  };
-  const bilibiliCategoryNameFromPathLocal = (value) => {
-    const normalizedPath = String(value || '').toLowerCase();
-    if (normalizedPath.startsWith('/v/popular/')) {
-      return '热门';
-    }
-    if (normalizedPath.startsWith('/anime/')) {
-      return '番剧';
-    }
-    if (normalizedPath.startsWith('/movie/')) {
-      return '电影';
-    }
-    if (normalizedPath.startsWith('/guochuang/')) {
-      return '国创';
-    }
-    if (normalizedPath.startsWith('/tv/')) {
-      return '电视剧';
-    }
-    if (normalizedPath.startsWith('/variety/')) {
-      return '综艺';
-    }
-    if (normalizedPath.startsWith('/documentary/')) {
-      return '纪录片';
-    }
-    if (normalizedPath.startsWith('/knowledge/')) {
-      return '知识';
-    }
-    if (normalizedPath.startsWith('/music/')) {
-      return '音乐';
-    }
-    if (normalizedPath.startsWith('/game/')) {
-      return '游戏';
-    }
-    if (normalizedPath.startsWith('/food/')) {
-      return '美食';
-    }
-    if (normalizedPath.startsWith('/sports/')) {
-      return '运动';
-    }
-    if (normalizedPath.startsWith('/c/')) {
-      return '分区';
-    }
-    return null;
-  };
-  const pageType = (() => {
-    try {
-      const profilePageTypes = siteProfile?.pageTypes ?? {};
-      const normalizedLocationHost = normalizeHostnameLocal(location.hostname);
-      const isBilibiliProfile = ['www.bilibili.com', 'search.bilibili.com', 'space.bilibili.com'].includes(normalizeHostnameLocal(siteProfile?.host ?? ''));
-      const matchesProfilePrefix = (values) => Array.isArray(values) && values.some((value) => {
-        const normalizedValue = String(value || '').toLowerCase();
-        const normalizedPath = String(pathname || '/').toLowerCase();
-        return normalizedValue && (normalizedPath === normalizedValue || normalizedPath.startsWith(normalizedValue));
-      });
-      const matchesProfileExact = (values) => Array.isArray(values)
-        && values.some((value) => String(value || '').toLowerCase() === String(pathname || '/').toLowerCase());
-      if (matchesProfileExact(profilePageTypes.homeExact) || matchesProfilePrefix(profilePageTypes.homePrefixes)) {
-        return 'home';
-      }
-      if (String(siteProfile?.host ?? '').toLowerCase() === 'jable.tv') {
-        const modelsPathKind = classifyJableModelsPathLocal(pathname);
-        if (modelsPathKind === 'list') {
-          return 'author-list-page';
-        }
-        if (modelsPathKind === 'detail') {
-          return 'author-page';
-        }
-      }
-      if (
-        (!isBilibiliProfile || normalizedLocationHost === 'search.bilibili.com')
-        && matchesProfilePrefix(profilePageTypes.searchResultsPrefixes)
-      ) {
-        return 'search-results-page';
-      }
-      if (matchesProfilePrefix(profilePageTypes.contentDetailPrefixes)) {
-        return 'book-detail-page';
-      }
-      if (
-        isBilibiliProfile
-        && normalizedLocationHost === 'space.bilibili.com'
-        && /^\/\d+\/(?:(?:upload\/)?video|dynamic|fans\/follow|fans\/fans)(?:\/|$)?/i.test(pathname)
-      ) {
-        return 'author-list-page';
-      }
-      if (matchesProfilePrefix(profilePageTypes.authorPrefixes)) {
-        return 'author-page';
-      }
-      if (matchesProfilePrefix(profilePageTypes.chapterPrefixes)) {
-        return 'chapter-page';
-      }
-      if (matchesProfilePrefix(profilePageTypes.historyPrefixes)) {
-        return 'history-page';
-      }
-      if (matchesProfilePrefix(profilePageTypes.authPrefixes)) {
-        return 'auth-page';
-      }
-      if (matchesProfilePrefix(profilePageTypes.categoryPrefixes)) {
-        return 'category-page';
-      }
-      if (pathname === '/' || pathname === '') {
-        return 'home';
-      }
-      if (normalizedLocationHost === 'search.bilibili.com' && /^\/(?:all|video|bangumi|upuser)(?:\/|$)/i.test(pathname)) {
-        return 'search-results-page';
-      }
-  if (normalizedLocationHost === 'space.bilibili.com' && /^\/\d+\/(?:(?:upload\/)?video|dynamic|fans\/follow|fans\/fans)(?:\/|$)?/i.test(pathname)) {
-    return 'author-list-page';
-  }
-      if (normalizedLocationHost === 'space.bilibili.com' && /^\/\d+(?:\/|$)?/i.test(pathname)) {
-        return 'author-page';
-      }
-      if (/\/ss(?:\/|$)/i.test(pathname)) {
-        return 'search-results-page';
-      }
-      if (/\/fenlei\//i.test(pathname)) {
-        return 'category-page';
-      }
-      if (/\/biqu\d+\/?$/i.test(pathname)) {
-        return 'book-detail-page';
-      }
-      if (/\/author\//i.test(pathname)) {
-        return 'author-page';
-      }
-      if (/\/biqu\d+\/\d+(?:_\d+)?\.html$/i.test(pathname)) {
-        return 'chapter-page';
-      }
-      if (/history/i.test(pathname)) {
-        return 'history-page';
-      }
-      if (/login|register|sign-?in|sign-?up/i.test(pathname)) {
-        return 'auth-page';
-      }
-      return 'unknown-page';
-    } catch {
-      return 'unknown-page';
-    }
-  })();
-
-  const pageFacts = (() => {
-    if (pageType === 'search-results-page') {
-      const profileResultTitleSelectors = Array.isArray(siteProfile?.search?.resultTitleSelectors)
-        ? siteProfile.search.resultTitleSelectors
-        : ['.layout-co18 .layout-tit', '.layout2 .layout-tit'];
-      const profileResultBookSelectors = Array.isArray(siteProfile?.search?.resultBookSelectors)
-        ? siteProfile.search.resultBookSelectors
-        : ['.txt-list-row5 li .s2 a[href]', '.layout-co18 .txt-list a[href]'];
-      const queryParamNames = Array.isArray(siteProfile?.search?.queryParamNames)
-        ? siteProfile.search.queryParamNames
-        : ['searchkey', 'keyword', 'q'];
-      const resultAnchors = [];
-      for (const selector of profileResultBookSelectors) {
-        try {
-          resultAnchors.push(...document.querySelectorAll(selector));
-        } catch {
-          // Ignore invalid selectors from site profile.
-        }
-      }
-      const queryFromTitle = (() => {
-        const headingText = textFromSelectors(profileResultTitleSelectors) || '';
-        const matched = headingText.match(/搜索\s*["“]?(.+?)["”]?\s*共有/i);
-        return normalizeText(matched?.[1] || '');
-      })();
-      const derivedQuery = (() => {
-        try {
-          const parsed = new URL(finalUrl, document.baseURI);
-          for (const name of queryParamNames) {
-            const value = normalizeText(parsed.searchParams.get(name) || '');
-            if (value) {
-              return value;
-            }
-          }
-          const fromPath = parsed.pathname.match(/\/ss\/(.+?)(?:\.html)?$/i)?.[1] || '';
-          const fromPathText = decodeURIComponent(fromPath).replace(/\.html$/i, '');
-          if (normalizeText(fromPathText)) {
-            return fromPathText;
-          }
-        } catch {
-          // Ignore URL parse failures.
-        }
-        return queryFromTitle;
-      })();
-      const queryText = normalizeText(
-        document.querySelector('#searchkey, input[name="searchkey"], input[name="keyword"], #s')?.value || derivedQuery,
-      );
-      const resultTitles = uniqueTexts(resultAnchors).slice(0, 20);
-      const resultUrls = uniqueSorted(
-        resultAnchors
-          .map((anchor) => normalizeText(anchor?.getAttribute?.('href') || ''))
-          .filter(Boolean)
-          .map((href) => normalizeUrlNoFragmentLocal(href)),
-      ).slice(0, 20);
-      const facts = {
-        queryText,
-        resultCount: Math.max(
-          resultUrls.length,
-          [...new Set(resultAnchors.map((anchor) => normalizeText(anchor.textContent || '')).filter(Boolean))].length,
-        ),
-        resultTitles,
-      };
-      if (normalizeHostnameLocal(siteProfile?.host ?? '') === 'www.douyin.com') {
-        const douyinVideoUrls = hrefsFromSelectors(['a[href*="/video/"]']).map((value) => canonicalizeDouyinVideoUrlLocal(value)).filter(Boolean).slice(0, 20);
-        facts.resultUrls = douyinVideoUrls;
-        facts.firstResultUrl = douyinVideoUrls[0] ?? null;
-        facts.queryText = queryText || (() => {
-          try {
-            const decoded = decodeURIComponent(pathname);
-            const matched = decoded.match(/\/search\/(.+?)(?:\/|$)/u);
-            return normalizeText(matched?.[1] || '');
-          } catch {
-            return queryText;
-          }
-        })();
-      }
-      if (['www.bilibili.com', 'search.bilibili.com', 'space.bilibili.com'].includes(normalizeHostnameLocal(siteProfile?.host ?? ''))) {
-        const resultAuthorUrls = uniqueSorted(
-          Array.from(document.querySelectorAll('a[href*="space.bilibili.com/"]'))
-            .map((anchor) => normalizeText(anchor?.getAttribute?.('href') || ''))
-            .filter(Boolean)
-            .map((href) => normalizeUrlNoFragmentLocal(href)),
-        ).slice(0, 20);
-        const resultEntries = resultUrls.slice(0, 12).map((value, index) => ({
-          title: resultTitles[index] ?? null,
-          url: value,
-          contentType: bilibiliContentTypeFromUrlLocal(value),
-          bvid: bilibiliBvidFromUrlLocal(value),
-          authorUrl: resultAuthorUrls[index] ?? null,
-          authorMid: bilibiliMidFromUrlLocal(resultAuthorUrls[index] ?? ''),
-        }));
-        facts.resultUrls = resultUrls;
-        facts.searchSection = pathname.split('/').filter(Boolean)[0] || 'all';
-        facts.firstResultTitle = resultTitles[0] ?? null;
-        facts.firstResultUrl = resultUrls[0] ?? null;
-        facts.firstResultContentType = bilibiliContentTypeFromUrlLocal(resultUrls[0] ?? '');
-        facts.resultEntries = resultEntries;
-        facts.resultContentTypes = resultUrls
-          .map((value) => bilibiliContentTypeFromUrlLocal(value))
-          .filter(Boolean)
-          .slice(0, 20);
-        facts.resultAuthorUrls = resultAuthorUrls;
-        facts.resultAuthorMids = resultAuthorUrls
-          .map((value) => bilibiliMidFromUrlLocal(value))
-          .filter(Boolean)
-          .slice(0, 20);
-        facts.resultBvids = resultUrls
-          .map((value) => bilibiliBvidFromUrlLocal(value))
-          .filter(Boolean)
-          .slice(0, 10);
-      }
-      return facts;
-    }
-    if (isContentDetailPageTypeLocal(pageType)) {
-      if (normalizeHostnameLocal(siteProfile?.host ?? '') === 'www.douyin.com') {
-        const authorUrl = canonicalizeDouyinAuthorUrlLocal(
-          hrefFromSelectors(['a[href*="/user/"]:not([href*="/user/self"])']) || '',
-        ) || null;
-        const authorUserId = normalizeText(authorUrl?.match(/\/user\/([^/?#]+)/u)?.[1] || '') || null;
-        return {
-          contentTitle: textFromSelectors(['h1']) || normalizeText(title) || null,
-          authorName: textFromSelectors(['a[href*="/user/"]:not([href*="/user/self"])']) || null,
-          authorUrl,
-          authorUserId,
-        };
-      }
-      const chapterLinkSelectors = Array.isArray(siteProfile?.bookDetail?.chapterLinkSelectors)
-        ? siteProfile.bookDetail.chapterLinkSelectors
-        : ['#list a[href]', '.listmain a[href]', 'dd a[href]', '.book_last a[href]'];
-      const chapterAnchors = [];
-      for (const selector of chapterLinkSelectors) {
-        try {
-          chapterAnchors.push(...document.querySelectorAll(selector));
-        } catch {
-          // Ignore invalid selectors from site profile.
-        }
-      }
-      const latestChapterLink = chapterAnchors[0] ?? null;
-      const facts = {
-        bookTitle: metaContent('og:novel:book_name')
-          || textFromSelectors(
-            Array.isArray(siteProfile?.contentDetail?.titleSelectors)
-              ? siteProfile.contentDetail.titleSelectors
-              : ['h1', '.book h1', '#bookinfo h1', 'h2'],
-          ),
-        authorName: metaContent('og:novel:author')
-          || textFromSelectors(
-            Array.isArray(siteProfile?.contentDetail?.authorNameSelectors)
-              ? siteProfile.contentDetail.authorNameSelectors
-              : ['a[href*="/author/"]', '.small span a'],
-          ),
-        authorUrl: (() => {
-          const value = metaContent('og:novel:author_link')
-            || hrefFromSelectors(
-              Array.isArray(siteProfile?.contentDetail?.authorLinkSelectors)
-                ? siteProfile.contentDetail.authorLinkSelectors
-                : ['a[href*="/author/"]'],
-            );
-          return value ? normalizeUrlNoFragmentLocal(value) : null;
-        })(),
-        chapterCount: chapterAnchors.length,
-        latestChapterTitle: normalizeText(latestChapterLink?.textContent || '') || textFromSelectors(['.book_last a', '#list a']),
-        latestChapterUrl: (() => {
-          const value = metaContent('og:novel:lastest_chapter_url') || latestChapterLink?.getAttribute('href') || '';
-          return value ? normalizeUrlNoFragmentLocal(value) : null;
-        })(),
-      };
-      if (['www.bilibili.com', 'search.bilibili.com', 'space.bilibili.com'].includes(normalizeHostnameLocal(siteProfile?.host ?? ''))) {
-        const bilibiliAuthorUrl = facts.authorUrl
-          || hrefFromSelectors([
-            'a.up-name[href*="space.bilibili.com/"]',
-            '.video-owner-card a[href*="space.bilibili.com/"]',
-            'a[href*="space.bilibili.com/"]',
-          ]);
-        const tagTexts = textsFromSelectors([
-          '.tag-link',
-          '.video-tag-link',
-          'a[href*="/v/topic/detail"]',
-          'a[href*="/v/tag/"]',
-        ]).slice(0, 12);
-        const scriptText = [
-          document.documentElement?.innerText || '',
-          ...Array.from(document.scripts || []).map((node) => node.textContent || ''),
-        ].join('\n');
-        const scriptMatch = (pattern) => normalizeText(scriptText.match(pattern)?.[1] || '') || null;
-        const bilibiliTitle = facts.bookTitle
-          || textFromSelectors(['h1.video-title', 'h1', '.video-title', '.media-title'])
-          || normalizeText(String(title || '').replace(/\s*[-_].*$/, ''));
-        const seasonId = scriptMatch(/"season_id"\s*:\s*(\d+)/u) || scriptMatch(/"seasonId"\s*:\s*(\d+)/u);
-        const episodeId = pathname.match(/\/bangumi\/play\/ep(\d+)/u)?.[1]
-          || scriptMatch(/"ep_id"\s*:\s*(\d+)/u)
-          || scriptMatch(/"episode_id"\s*:\s*(\d+)/u)
-          || scriptMatch(/"epId"\s*:\s*(\d+)/u);
-        const seriesTitle = textFromSelectors([
-          '.media-title',
-          '.media-info-title',
-          '.media-right .title',
-          '.mediainfo_mediaTitle',
-        ]);
-        const episodeTitle = textFromSelectors([
-          'h1.video-title',
-          '.video-title',
-          '.ep-info-title',
-          'h1',
-        ]);
-        facts.bookTitle = bilibiliTitle;
-        facts.contentTitle = bilibiliTitle;
-        facts.contentType = pathname.startsWith('/bangumi/play/') ? 'bangumi' : 'video';
-        facts.bvid = finalUrl.match(/\/video\/(BV[0-9A-Za-z]+)/u)?.[1] || scriptMatch(/"bvid"\s*:\s*"([^"]+)"/u);
-        facts.aid = scriptMatch(/"aid"\s*:\s*(\d+)/u) || scriptMatch(/"aid":"?(\d+)"?/u);
-        facts.authorName = facts.authorName
-          || textFromSelectors(['a.up-name', '.up-name', '.up-detail-top .up-name', '.video-owner-card .name']);
-        facts.authorUrl = bilibiliAuthorUrl ?? null;
-        facts.authorMid = bilibiliAuthorUrl?.match(/space\.bilibili\.com\/(\d+)/u)?.[1]
-          || scriptMatch(/"mid"\s*:\s*(\d+)/u)
-          || scriptMatch(/"mid":"?(\d+)"?/u);
-        facts.publishedAt = metaContent('og:video:release_date')
-          || metaContent('article:published_time')
-          || textFromSelectors(['time', '.pubdate-text', '.video-publish time', '[class*="pubdate"]'])
-          || null;
-        facts.categoryName = textFromSelectors([
-          '.video-info-detail a',
-          '.video-detail-title a',
-          '.first-channel',
-          'a[href*="/v/"]',
-        ]);
-        facts.seasonId = seasonId ?? null;
-        facts.episodeId = episodeId ?? null;
-        facts.seriesTitle = seriesTitle ?? null;
-        facts.episodeTitle = (facts.contentType === 'bangumi' ? (episodeTitle || bilibiliTitle) : null) ?? null;
-        facts.tagNames = tagTexts;
-      }
-      return facts;
-    }
-    if (pageType === 'author-page' || pageType === 'author-list-page') {
-      if (normalizeHostnameLocal(siteProfile?.host ?? '') === 'www.douyin.com') {
-        const authorSubpage = normalizeDouyinAuthorSubpageLocal(
-          pathname.includes('/follow') ? (pathname.includes('tab=user') ? 'follow-users' : 'follow-feed') : pathname.split('/').filter(Boolean).at(-1),
-          pageType === 'author-list-page' ? 'post' : 'home',
-        );
-        const antiCrawlSignals = detectDouyinAntiCrawlSignalsLocal({
-          title,
-          documentText: normalizeText(document.body?.innerText || document.documentElement?.innerText || ''),
-        });
-        const facts = {
-          authorSubpage,
-        };
-        if (pageType === 'author-page') {
-          const authorUrl = canonicalizeDouyinAuthorUrlLocal(finalUrl) || null;
-          const authorUserId = normalizeText(authorUrl?.match(/\/user\/([^/?#]+)/u)?.[1] || '') || null;
-          facts.authorName = textFromSelectors(['h1']) || null;
-          facts.authorUrl = authorUrl;
-          facts.authorUserId = authorUserId;
-          const featuredContentTitles = textsFromSelectors(['a[href*="/video/"]']).slice(0, 32);
-          const featuredContentUrls = hrefsFromSelectors(['a[href*="/video/"]']).slice(0, 32);
-          const featuredContentCards = buildDouyinContentCardsLocal(featuredContentUrls, featuredContentTitles, facts);
-          facts.featuredContentCards = featuredContentCards;
-          facts.featuredContentUrls = featuredContentCards.map((card) => card.url).filter(Boolean);
-          facts.featuredContentTitles = featuredContentCards.map((card) => card.title).filter(Boolean);
-          facts.featuredContentVideoIds = featuredContentCards.map((card) => card.videoId).filter(Boolean);
-          facts.featuredContentCount = featuredContentCards.length;
-          if (featuredContentCards.length > 0) {
-            facts.featuredContentComplete = true;
-          }
-        } else {
-          const featuredAuthorNames = textsFromSelectors(['a[href*="/user/"]']).slice(0, 32);
-          const featuredAuthorUrls = hrefsFromSelectors(['a[href*="/user/"]']).slice(0, 32);
-          const featuredAuthorCards = authorSubpage === 'follow-users'
-            ? buildDouyinAuthorCardsLocal(featuredAuthorUrls, featuredAuthorNames)
-            : [];
-          if (featuredAuthorCards.length > 0) {
-            facts.featuredAuthorCards = featuredAuthorCards;
-            facts.featuredAuthorUrls = featuredAuthorCards.map((card) => card.url).filter(Boolean);
-            facts.featuredAuthorNames = featuredAuthorCards.map((card) => card.name).filter(Boolean);
-            facts.featuredAuthorUserIds = featuredAuthorCards.map((card) => card.userId).filter(Boolean);
-            facts.featuredAuthorCount = featuredAuthorCards.length;
-            facts.featuredAuthorComplete = true;
-          }
-        }
-        if (antiCrawlSignals.length > 0) {
-          facts.antiCrawlDetected = true;
-          facts.antiCrawlSignals = antiCrawlSignals;
-          facts.antiCrawlReasonCode = deriveDouyinAntiCrawlReasonCodeLocal(antiCrawlSignals);
-        }
-        return facts;
-      }
-      const facts = {
-        authorName: metaContent('og:novel:author')
-          || textFromSelectors(
-            Array.isArray(siteProfile?.author?.titleSelectors)
-              ? siteProfile.author.titleSelectors
-              : ['h1', '.author h1', '.title h1', 'h2'],
-          ),
-      };
-      if (['www.bilibili.com', 'search.bilibili.com', 'space.bilibili.com'].includes(normalizeHostnameLocal(siteProfile?.host ?? ''))) {
-        const featuredAuthorUrls = hrefsFromSelectors(['a[href*="space.bilibili.com/"]'])
-          .filter((value) => value !== finalUrl)
-          .slice(0, 16);
-        const featuredAuthorNames = textsFromSelectors([
-          'a[href*="space.bilibili.com/"] .name',
-          'a[href*="space.bilibili.com/"] .up-name',
-          'a[href*="space.bilibili.com/"]',
-        ])
-          .filter((value) => value !== facts.authorName)
-          .slice(0, 16);
-        const featuredContentUrls = hrefsFromSelectors(
-          Array.isArray(siteProfile?.author?.workLinkSelectors)
-            ? siteProfile.author.workLinkSelectors
-            : ['a[href*="/video/BV"]'],
-        ).slice(0, 12);
-        const featuredContentTitles = textsFromSelectors(
-          Array.isArray(siteProfile?.author?.workLinkSelectors)
-            ? siteProfile.author.workLinkSelectors
-            : ['a[href*="/video/BV"]'],
-        ).slice(0, 12);
-        facts.authorName = facts.authorName
-          || textFromSelectors(['h1', '.nickname', '.up-name', '.h-name'])
-          || normalizeText(String(title || '').replace(/\s*[-_].*$/, ''));
-        facts.authorMid = pathname.match(/^\/(\d+)(?:\/|$)/u)?.[1] || null;
-        facts.authorUrl = finalUrl;
-        facts.authorSubpage = bilibiliAuthorSubpageFromPathLocal(pathname);
-        facts.authorSubpagePath = pathname;
-        const extractedCards = extractBilibiliAuthorSurfaceCardsLocal({
-          currentAuthorMid: facts.authorMid,
-          currentAuthorName: facts.authorName,
-          authorSubpage: facts.authorSubpage,
-        });
-        const authorCards = dedupeBilibiliAuthorCardsLocal(
-          extractedCards.authorCards.length > 0
-            ? extractedCards.authorCards
-            : featuredAuthorUrls.map((value, index) => ({
-              url: value,
-              mid: bilibiliMidFromUrlLocal(value),
-              name: featuredAuthorNames[index] || null,
-              authorSubpage: facts.authorSubpage,
-            })),
-          facts.authorSubpage,
-        );
-        const contentCards = dedupeBilibiliContentCardsLocal(
-          extractedCards.contentCards.length > 0
-            ? extractedCards.contentCards
-            : featuredContentUrls.map((value, index) => ({
-              url: value,
-              title: featuredContentTitles[index] || null,
-              bvid: bilibiliBvidFromUrlLocal(value),
-              authorMid: facts.authorMid,
-              authorUrl: facts.authorUrl,
-              authorName: facts.authorName,
-              contentType: bilibiliContentTypeFromUrlLocal(value),
-            })),
-          facts.authorMid,
-        );
-        facts.featuredAuthorCards = authorCards;
-        facts.featuredAuthors = authorCards.map((card) => ({
-          name: card.name,
-          url: card.url,
-          mid: card.mid,
-        }));
-        facts.featuredAuthorUrls = authorCards.map((card) => card.url).filter(Boolean);
-        facts.featuredAuthorNames = authorCards.map((card) => card.name).filter(Boolean);
-        facts.featuredAuthorMids = authorCards.map((card) => card.mid).filter(Boolean);
-        facts.featuredAuthorCount = authorCards.length;
-        facts.featuredContentCards = contentCards;
-        facts.featuredContentUrls = contentCards.map((card) => card.url).filter(Boolean);
-        facts.featuredContentTitles = contentCards.map((card) => card.title).filter(Boolean);
-        facts.featuredContentCount = contentCards.length;
-        facts.featuredContentTypes = contentCards.map((card) => card.contentType).filter(Boolean);
-        facts.featuredContentBvids = contentCards.map((card) => card.bvid).filter(Boolean);
-        facts.featuredContentAuthorMids = contentCards.map((card) => card.authorMid).filter(Boolean);
-        const antiCrawlSignals = detectBilibiliAntiCrawlSignalsLocal();
-        if (antiCrawlSignals.length > 0) {
-          facts.antiCrawlDetected = true;
-          facts.antiCrawlSignals = antiCrawlSignals;
-          facts.antiCrawlReasonCode = deriveBilibiliAntiCrawlReasonCodeLocal(antiCrawlSignals);
-        }
-      }
-      return facts;
-    }
-    if (pageType === 'category-page') {
-      const facts = {
-        categoryName: textFromSelectors(['h1', '.channel-title', '.page-title']) || bilibiliCategoryNameFromPathLocal(pathname),
-      };
-      if (normalizeHostnameLocal(siteProfile?.host ?? '') === 'www.douyin.com') {
-        const featuredContentTitles = textsFromSelectors(['a[href*="/video/"]']).slice(0, 32);
-        const featuredContentUrls = hrefsFromSelectors(['a[href*="/video/"]']).slice(0, 32);
-        const featuredContentCards = buildDouyinContentCardsLocal(featuredContentUrls, featuredContentTitles, {});
-        facts.categoryPath = pathname;
-        facts.featuredContentCards = featuredContentCards;
-        facts.featuredContentUrls = featuredContentCards.map((card) => card.url).filter(Boolean);
-        facts.featuredContentTitles = featuredContentCards.map((card) => card.title).filter(Boolean);
-        facts.featuredContentVideoIds = featuredContentCards.map((card) => card.videoId).filter(Boolean);
-        facts.featuredContentCount = featuredContentCards.length;
-        if (featuredContentCards.length > 0) {
-          facts.featuredContentComplete = true;
-        }
-        return facts;
-      }
-      if (['www.bilibili.com', 'search.bilibili.com', 'space.bilibili.com'].includes(normalizeHostnameLocal(siteProfile?.host ?? ''))) {
-        const featuredContentUrls = uniqueSorted(
-          Array.from(document.querySelectorAll('a[href*="/video/"], a[href*="/bangumi/play/"]'))
-            .map((anchor) => normalizeText(anchor?.getAttribute?.('href') || ''))
-            .filter(Boolean)
-            .map((href) => normalizeUrlNoFragmentLocal(href)),
-        ).slice(0, 16);
-        const featuredContentTitles = textsFromSelectors([
-          'a[href*="/video/"]',
-          'a[href*="/bangumi/play/"]',
-        ]).slice(0, 16);
-        facts.categoryName = facts.categoryName || bilibiliCategoryNameFromPathLocal(pathname);
-        facts.categoryPath = pathname;
-        facts.featuredContentUrls = featuredContentUrls;
-        facts.featuredContentTitles = featuredContentTitles;
-        facts.featuredContentTypes = featuredContentUrls
-          .map((value) => bilibiliContentTypeFromUrlLocal(value))
-          .filter(Boolean)
-          .slice(0, 16);
-        facts.featuredContentCount = featuredContentUrls.length;
-        facts.featuredContentBvids = featuredContentUrls
-          .map((value) => bilibiliBvidFromUrlLocal(value))
-          .filter(Boolean)
-          .slice(0, 10);
-        facts.rankingLabels = textsFromSelectors([
-          '.rank-item .num',
-          '.popular-rank .num',
-          '.rank-wrap .rank-num',
-          '.hot-list .rank',
-        ]).slice(0, 12);
-      }
-      return facts;
-    }
-    if (pageType === 'chapter-page') {
-      const contentText = normalizeText(
-        document.querySelector('#content, .content, .reader-main .content')?.textContent || '',
-      );
-      return {
-        bookTitle: textFromSelectors(['#info_url', '.crumbs a[href*="/biqu"]', '.bread-crumbs a[href*="/biqu"]']),
-        authorName: metaContent('og:novel:author'),
-        chapterTitle: textFromSelectors(['.reader-main .title', 'h1.title', '.content_read h1', 'h1']),
-        chapterHref: finalUrl,
-        prevChapterUrl: hrefFromSelectors(['#prev_url', 'a#prev_url']),
-        nextChapterUrl: hrefFromSelectors(['#next_url', 'a#next_url']),
-        bodyTextLength: contentText.length,
-        bodyExcerpt: contentText.slice(0, 160) || null,
-      };
-    }
-    return null;
-  })();
-
-  return {
-    finalUrl,
-    title,
-    viewportWidth: window.innerWidth,
-    viewportHeight: window.innerHeight,
-    pageType,
-    pageFacts,
-    fingerprint: {
-      finalUrl,
-      title,
-      pageType,
-      pageFacts,
-      detailsOpen,
-      expandedTrue,
-      activeTabs: activeTabDescriptors,
-      controlledVisible,
-      openDialogs,
-      openMenus,
-      openListboxes,
-      openPopovers,
-    },
-  };
-}
+const pageComputeStateSignature = createPageStateHelperFallbackFunction(EXPAND_HELPER_NAMESPACE);
 
 function createExpandHelperBundleSource(namespace = EXPAND_HELPER_NAMESPACE) {
+  const pageStateNamespace = `${namespace}::page-state`;
+  const pageStateBundleSource = createSharedPageStateHelperBundleSource(pageStateNamespace);
   return `(() => {
     const root = globalThis;
     const MAX_FALLBACK_BOOKS = ${JSON.stringify(MAX_FALLBACK_BOOKS)};
+    const pageStateNamespace = ${JSON.stringify(pageStateNamespace)};
+    ${pageStateBundleSource};
     const existing = root[${JSON.stringify(namespace)}];
-    if (existing && existing.__version === 1) {
+    const pageStateApi = root[pageStateNamespace];
+    if (existing && existing.__version === 1 && typeof pageStateApi?.pageComputeStateSignature === 'function') {
       return existing;
     }
     const api = {
@@ -4702,7 +3142,7 @@ function createExpandHelperBundleSource(namespace = EXPAND_HELPER_NAMESPACE) {
       pageWaitForDomQuiet: ${pageWaitForDomQuiet.toString()},
       pageDiscoverTriggers: ${pageDiscoverTriggers.toString()},
       pageExecuteTrigger: ${pageExecuteTrigger.toString()},
-      pageComputeStateSignature: ${pageComputeStateSignature.toString()},
+      pageComputeStateSignature: (...args) => root[pageStateNamespace].pageComputeStateSignature(...args),
       pageExtractChapterPayload: ${pageExtractChapterPayload.toString()},
     };
     root[${JSON.stringify(namespace)}] = api;
@@ -4834,7 +3274,7 @@ async function navigateAndWaitReady(session, url, settings, siteProfile = null) 
   try {
     await session.navigateAndWait(url, resolveNavigationWaitPolicy(settings, siteProfile, url));
   } catch (error) {
-    if (!isDouyinSiteProfile(siteProfile, url) || !isDocumentReadyTimeout(error)) {
+    if (!isDocumentReadyTimeout(error) || (!isDouyinSiteProfile(siteProfile, url) && !isXiaohongshuSiteProfile(siteProfile, url))) {
       throw error;
     }
     await ensureSiteSpecificReadyMarkers(session, siteProfile, url);
@@ -4913,6 +3353,12 @@ function resolveDirectNavigationWaitPolicy(settings, siteProfile, url, trigger =
       idleMs: Math.min(settings.idleMs, 120),
     };
   }
+  if (isXiaohongshuSiteProfile(siteProfile, url)) {
+    const policy = buildXiaohongshuWaitPolicy(settings, pageType, { directNavigation: true, trigger });
+    if (policy) {
+      return policy;
+    }
+  }
   if (isBilibiliSiteProfile(siteProfile, url)) {
     const policy = buildBilibiliWaitPolicy(settings, pageType, { directNavigation: true, trigger });
     if (policy) {
@@ -4922,7 +3368,49 @@ function resolveDirectNavigationWaitPolicy(settings, siteProfile, url, trigger =
   return resolveNavigationWaitPolicy(settings, siteProfile, url);
 }
 
+function buildXiaohongshuDirectSearchUrl(trigger = null) {
+  const queryText = String(trigger?.queryText ?? trigger?.locator?.textSnippet ?? '').trim();
+  if (!queryText) {
+    return null;
+  }
+  const url = new URL('https://www.xiaohongshu.com/search_result');
+  url.searchParams.set('keyword', queryText);
+  url.searchParams.set('type', '51');
+  return url.toString();
+}
+
+function isXiaohongshuTouristSearchUrl(url = '') {
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname === 'www.xiaohongshu.com'
+      && parsed.pathname.replace(/\/+$/u, '') === '/explore'
+      && parsed.searchParams.get('source') === 'tourist_search';
+  } catch {
+    return false;
+  }
+}
+
 async function executeTrigger(session, trigger, siteProfile, settings) {
+  const searchFormScopeUrl = trigger?.href || (siteProfile?.host ? `https://${siteProfile.host}/` : '');
+  if (trigger?.kind === 'search-form' && isXiaohongshuSiteProfile(siteProfile, searchFormScopeUrl)) {
+    const directSearchUrl = buildXiaohongshuDirectSearchUrl(trigger);
+    if (directSearchUrl) {
+      await session.navigateAndWait(
+        directSearchUrl,
+        resolveDirectNavigationWaitPolicy(settings, siteProfile, directSearchUrl, trigger),
+      );
+      return {
+        clicked: true,
+        label: trigger.queryText || trigger.label || directSearchUrl,
+        tagName: 'form',
+        role: 'search',
+        submitted: true,
+        directNavigation: true,
+        alreadySettled: true,
+        navigationUrl: directSearchUrl,
+      };
+    }
+  }
   if (prefersDirectNavigation(trigger)) {
     if (!(await tryWarmBilibiliAuthorListNavigation(session, trigger.href, settings, siteProfile, trigger))) {
       await session.navigateAndWait(trigger.href, resolveDirectNavigationWaitPolicy(settings, siteProfile, trigger.href, trigger));
@@ -4950,6 +3438,12 @@ function resolvePostTriggerWaitPolicy(trigger, executeResult, settings, siteProf
   }
   if (trigger?.kind === 'search-form' && isBilibiliSiteProfile(siteProfile, executeResult?.navigationUrl || currentUrl)) {
     return buildBilibiliWaitPolicy(settings, 'search-results-page', {
+      directNavigation: Boolean(executeResult?.directNavigation),
+      trigger,
+    });
+  }
+  if (trigger?.kind === 'search-form' && isXiaohongshuSiteProfile(siteProfile, executeResult?.navigationUrl || currentUrl)) {
+    return buildXiaohongshuWaitPolicy(settings, 'search-results-page', {
       directNavigation: Boolean(executeResult?.directNavigation),
       trigger,
     });
@@ -5015,7 +3509,26 @@ function selectTriggersForPage(pageType, triggers, settings, siteProfile = null,
   const isJableSite = String(siteProfile?.host ?? '').toLowerCase() === 'jable.tv';
   const isBilibiliSite = isBilibiliSiteProfile(siteProfile);
   const isDouyinSite = isDouyinSiteProfile(siteProfile);
+  const isXiaohongshuSite = isXiaohongshuSiteProfile(siteProfile);
   const pageSelectionLimit = (() => {
+    if (isXiaohongshuSite) {
+      if (isContentDetailPageType(pageType)) {
+        return 1;
+      }
+      if (pageType === 'author-page') {
+        return 1;
+      }
+      if (pageType === 'author-list-page') {
+        return 2;
+      }
+      if (pageType === 'search-results-page') {
+        return 1;
+      }
+      if (pageType === 'home' && includeSearchQueries) {
+        return 3;
+      }
+      return 4;
+    }
     if (!isJableSite) {
       return Number.POSITIVE_INFINITY;
     }
@@ -5038,7 +3551,7 @@ function selectTriggersForPage(pageType, triggers, settings, siteProfile = null,
   })();
 
   const orderedTriggers = (() => {
-    if (!isJableSite && !isDouyinSite) {
+    if (!isJableSite && !isDouyinSite && !isXiaohongshuSite) {
       return triggers;
     }
     const priorityFor = (trigger) => {
@@ -5087,6 +3600,59 @@ function selectTriggersForPage(pageType, triggers, settings, siteProfile = null,
             return 3;
           }
           if (trigger.kind === 'safe-nav-link' && ['category', 'utility', 'home'].includes(trigger.semanticRole)) {
+            return 8;
+          }
+          return 5;
+        }
+      }
+      if (isXiaohongshuSite) {
+        if (isContentDetailPageType(pageType)) {
+          if (trigger.kind === 'safe-nav-link' && trigger.semanticRole === 'author' && trigger.locator?.primary === 'page-facts') {
+            return 0;
+          }
+          if (trigger.kind === 'safe-nav-link' && trigger.semanticRole === 'author') {
+            return 1;
+          }
+          return 9;
+        }
+        if (pageType === 'search-results-page') {
+          if (trigger.kind === 'content-link' && trigger.locator?.primary === 'page-facts') {
+            return 0;
+          }
+          if (trigger.kind === 'content-link') {
+            return 1;
+          }
+          if (trigger.kind === 'safe-nav-link' && trigger.semanticRole === 'author') {
+            return 2;
+          }
+          if (trigger.kind === 'safe-nav-link' && ['category', 'utility', 'home', 'auth'].includes(trigger.semanticRole)) {
+            return 8;
+          }
+          return 5;
+        }
+        if (pageType === 'author-page') {
+          if (trigger.kind === 'content-link' && trigger.locator?.primary === 'page-facts') {
+            return 0;
+          }
+          if (trigger.kind === 'content-link') {
+            return 1;
+          }
+          return 9;
+        }
+        if (['home', 'category-page', 'history-page', 'unknown-page'].includes(pageType)) {
+          if (trigger.kind === 'search-form') {
+            return 0;
+          }
+          if (trigger.kind === 'content-link' && trigger.locator?.primary === 'page-facts') {
+            return 1;
+          }
+          if (trigger.kind === 'content-link' && trigger.locator?.primary === 'known-query') {
+            return 2;
+          }
+          if (trigger.kind === 'content-link') {
+            return 3;
+          }
+          if (trigger.kind === 'safe-nav-link' && ['category', 'utility', 'home', 'auth'].includes(trigger.semanticRole)) {
             return 8;
           }
           return 5;
@@ -5176,7 +3742,7 @@ function selectTriggersForPage(pageType, triggers, settings, siteProfile = null,
 
     if (pageType === 'search-results-page') {
       if (trigger.kind === 'content-link') {
-        const searchLimit = isBilibiliSite ? 1 : sampling.searchResultContentLimit;
+        const searchLimit = isBilibiliSite || isXiaohongshuSite ? 1 : sampling.searchResultContentLimit;
         if (searchResultBookCount >= searchLimit) {
           continue;
         }
@@ -5193,9 +3759,11 @@ function selectTriggersForPage(pageType, triggers, settings, siteProfile = null,
       if (trigger.kind === 'content-link') {
         const authorLimit = isBilibiliSite
           ? 1
+          : isXiaohongshuSite
+            ? 1
           : isJableSite
-          ? Math.min(sampling.authorContentLimit, 2)
-          : sampling.authorContentLimit;
+            ? Math.min(sampling.authorContentLimit, 2)
+            : sampling.authorContentLimit;
         if (bookCount >= authorLimit) {
           continue;
         }
@@ -5247,54 +3815,69 @@ function selectTriggersForPage(pageType, triggers, settings, siteProfile = null,
         }
         continue;
       }
-        if (trigger.kind === 'content-link') {
-          if (
-            pageType === 'home'
-            && isBilibiliSiteProfile(siteProfile)
-            && trigger.locator?.primary === 'known-query'
-          ) {
-            continue;
-          }
-          const bookLimit = settings.searchQueries.length > 0
+      if (trigger.kind === 'content-link') {
+        if (
+          pageType === 'home'
+          && isBilibiliSiteProfile(siteProfile)
+          && trigger.locator?.primary === 'known-query'
+        ) {
+          continue;
+        }
+        const bookLimit = (
+          isXiaohongshuSite
+          && pageType === 'home'
+          && includeSearchQueries
+        )
+          ? 1
+          : settings.searchQueries.length > 0
             ? (isJableSite ? Math.min(sampling.fallbackContentLimitWithSearch, 2) : sampling.fallbackContentLimitWithSearch)
             : (isJableSite ? Math.min(sampling.categoryContentLimit, 2) : sampling.categoryContentLimit);
-          if (bookCount >= bookLimit) {
-            continue;
-          }
-          bookCount += 1;
-          selected.push(trigger);
+        if (bookCount >= bookLimit) {
           continue;
         }
-        if (trigger.kind === 'safe-nav-link') {
-          if (pageType === 'home' && isBilibiliSiteProfile(siteProfile) && settings.searchQueries.length > 0) {
-            continue;
-          }
-          if (
-            settings.searchQueries.length > 0
-            && (searchFormCount > 0 || bookCount > 0)
-            && (
-              ['category', 'home'].includes(trigger.semanticRole)
-              || (isDouyinSite && trigger.semanticRole === 'utility')
-            )
-          ) {
-            continue;
-          }
-          if (isJableSite) {
-            if (!['category', 'home', 'utility'].includes(trigger.semanticRole)) {
-              continue;
-            }
-            if (safeNavCount >= 2) {
-              continue;
-            }
-            safeNavCount += 1;
-          }
-          selected.push(trigger);
-          continue;
-        }
-        if (trigger.kind === 'auth-link') {
-          selected.push(trigger);
-        }
+        bookCount += 1;
+        selected.push(trigger);
+        continue;
       }
+      if (trigger.kind === 'safe-nav-link') {
+        if (
+          pageType === 'home'
+          && (
+            (isBilibiliSiteProfile(siteProfile) && settings.searchQueries.length > 0)
+            || (isXiaohongshuSite && includeSearchQueries && trigger.semanticRole !== 'author')
+          )
+        ) {
+          continue;
+        }
+        if (
+          settings.searchQueries.length > 0
+          && (searchFormCount > 0 || bookCount > 0)
+          && (
+            ['category', 'home'].includes(trigger.semanticRole)
+            || (isDouyinSite && trigger.semanticRole === 'utility')
+          )
+        ) {
+          continue;
+        }
+        if (isJableSite) {
+          if (!['category', 'home', 'utility'].includes(trigger.semanticRole)) {
+            continue;
+          }
+          if (safeNavCount >= 2) {
+            continue;
+          }
+          safeNavCount += 1;
+        }
+        selected.push(trigger);
+        continue;
+      }
+      if (trigger.kind === 'auth-link') {
+        if (isXiaohongshuSite && includeSearchQueries) {
+          continue;
+        }
+        selected.push(trigger);
+      }
+    }
   }
 
   return selected;
@@ -5312,16 +3895,16 @@ async function createExpandSession(settings, inputUrl) {
     profilePath: settings.profilePath,
     siteProfile: settings.siteProfile,
   });
+  const usePersistentProfile = shouldUsePersistentProfileForNavigation(inputUrl, settings, authContext);
   const session = await openBrowserSession({
     ...settings,
-    userDataDir: authContext.userDataDir,
-    cleanupUserDataDirOnShutdown: authContext.cleanupUserDataDirOnShutdown,
+    userDataDir: usePersistentProfile ? authContext.userDataDir : null,
+    cleanupUserDataDirOnShutdown: usePersistentProfile ? authContext.cleanupUserDataDirOnShutdown : true,
     startupUrl: inputUrl,
   }, {
     userDataDirPrefix: 'expand-states-browser-',
   });
-  const shouldEnsureAuth = Boolean(authContext.authConfig)
-    && (authContext.reuseLoginState || settings.autoLogin === true || authContext.authConfig.autoLoginByDefault);
+  const shouldEnsureAuth = shouldEnsureAuthenticatedNavigationSession(inputUrl, settings, authContext);
   if (shouldEnsureAuth) {
     session.siteAuth = await ensureAuthenticatedSession(session, inputUrl, settings, {
       authContext,
@@ -5343,7 +3926,17 @@ async function loadSourceContext({
   const sourceFingerprintJson = JSON.stringify(sourceSignature.fingerprint);
   const discoveryLimit = isContentDetailPageType(sourceSignature.pageType)
     ? 1_000
-    : Math.max(settings.maxTriggers, settings.maxTriggers + effectiveSearchQueries.length);
+    : (() => {
+      const baseLimit = Math.max(settings.maxTriggers, settings.maxTriggers + effectiveSearchQueries.length);
+      if (
+        isXiaohongshuSiteProfile(siteProfile, sourceSignature.finalUrl || context.sourceUrl)
+        && sourceSignature.pageType === 'home'
+        && effectiveSearchQueries.length > 0
+      ) {
+        return Math.max(baseLimit, 16);
+      }
+      return baseLimit;
+    })();
   const discoveredTriggers = await discoverPageTriggers(
     session,
     discoveryLimit,
@@ -5373,7 +3966,7 @@ async function loadSourceContext({
 }
 
 export async function expandStates(inputUrl, options = {}) {
-  const settings = mergeOptions(options);
+  const settings = mergeOptions(inputUrl, options);
   const { manifest: initialManifest, missingFiles: initialMissingFiles } = await resolveInitialManifest(settings);
   const baseUrl = initialManifest.finalUrl || inputUrl;
   const layout = await createExpandOutputLayout(baseUrl, inputUrl, settings.outDir);
@@ -5513,7 +4106,25 @@ export async function expandStates(inputUrl, options = {}) {
           await waitForPostTriggerSettled(session, settings, trigger, executeResult, siteProfile, context.sourceUrl);
           await ensureSiteSpecificReadyMarkers(session, siteProfile, executeResult?.navigationUrl || context.sourceUrl);
 
-          const postSignature = await collectStateSignature(session, siteProfile);
+          let postSignature = await collectStateSignature(session, siteProfile);
+          if (
+            trigger?.kind === 'search-form'
+            && isXiaohongshuSiteProfile(siteProfile, postSignature?.finalUrl || executeResult?.navigationUrl || context.sourceUrl)
+          ) {
+            const directSearchUrl = buildXiaohongshuDirectSearchUrl(trigger);
+            if (
+              directSearchUrl
+              && isXiaohongshuTouristSearchUrl(postSignature?.finalUrl)
+              && normalizeUrlNoFragment(postSignature?.finalUrl) !== normalizeUrlNoFragment(directSearchUrl)
+            ) {
+              await session.navigateAndWait(
+                directSearchUrl,
+                resolveDirectNavigationWaitPolicy(settings, siteProfile, directSearchUrl, trigger),
+              );
+              await ensureSiteSpecificReadyMarkers(session, siteProfile, directSearchUrl);
+              postSignature = await collectStateSignature(session, siteProfile);
+            }
+          }
           const dedupKey = hashFingerprint(postSignature.fingerprint);
           const postFingerprintJson = JSON.stringify(postSignature.fingerprint);
           const changedFromSource = postFingerprintJson !== sourceContext.sourceFingerprintJson;
@@ -5844,7 +4455,7 @@ Options:
   --no-reuse-login-state    Disable persistent login-state reuse
   --auto-login              Best-effort credential login when credentials exist
   --no-auto-login           Disable credential auto-login
-  --headless                Run browser headless (default)
+  --headless                Run browser headless (default except visible-by-default Douyin and Xiaohongshu flows)
   --no-headless             Run browser with a visible window
   --help                    Show this help
 `;

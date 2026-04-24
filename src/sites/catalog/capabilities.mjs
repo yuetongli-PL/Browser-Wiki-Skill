@@ -62,6 +62,33 @@ function mergeSiteDocuments(stableDocument, runtimeDocument) {
   };
 }
 
+function splitCapabilitiesPatch(patch = {}) {
+  const stableKeys = new Set([
+    'baseUrl',
+    'siteKey',
+    'adapterId',
+    'primaryArchetype',
+    'pageTypes',
+    'capabilityFamilies',
+    'supportedIntents',
+    'safeActionKinds',
+    'approvalActionKinds',
+    'rankingSupported',
+    'rankingModes',
+    'categoryTaxonomySupported',
+  ]);
+  const stablePatch = {};
+  const runtimePatch = {};
+  for (const [key, value] of Object.entries(patch ?? {})) {
+    if (stableKeys.has(key)) {
+      stablePatch[key] = value;
+    } else {
+      runtimePatch[key] = value;
+    }
+  }
+  return { stablePatch, runtimePatch };
+}
+
 export function buildSiteCapabilitiesPath(workspaceRoot = process.cwd(), pathOptions = {}) {
   return siteCapabilitiesStore.buildPath(workspaceRoot, normalizeCapabilitiesPathOptions(pathOptions));
 }
@@ -79,16 +106,22 @@ export async function readSiteCapabilities(workspaceRoot = process.cwd(), pathOp
 }
 
 export async function upsertSiteCapabilities(workspaceRoot, host, patch, pathOptions = {}) {
-  const stableResult = await siteCapabilitiesStore.upsert(
-    workspaceRoot,
-    host,
-    patch,
-    normalizeCapabilitiesPathOptions(pathOptions),
-  );
+  const { stablePatch, runtimePatch } = splitCapabilitiesPatch(patch);
+  const stableResult = Object.keys(stablePatch).length > 0
+    ? await siteCapabilitiesStore.upsert(
+      workspaceRoot,
+      host,
+      stablePatch,
+      normalizeCapabilitiesPathOptions(pathOptions),
+    )
+    : {
+      capabilitiesPath: buildSiteCapabilitiesPath(workspaceRoot, pathOptions),
+      record: null,
+    };
   const runtimeResult = await siteRuntimeCapabilitiesStore.upsert(
     workspaceRoot,
     host,
-    {},
+    runtimePatch,
     normalizeRuntimeCapabilitiesPathOptions(pathOptions),
   );
   return {

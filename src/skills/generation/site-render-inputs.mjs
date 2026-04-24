@@ -22,6 +22,7 @@ import {
   collectDouyinSamples,
   collectJableSamples,
   collectMoodyzSamples,
+  collectXiaohongshuSamples,
   getIntentTypes,
 } from './site-samples.mjs';
 
@@ -144,6 +145,7 @@ function buildKnownSiteRenderInput(context, outputs, docsByIntent = new Map()) {
       collectJableSamples,
       collectBilibiliSamples,
       collectDouyinSamples,
+      collectXiaohongshuSamples,
       collect22biquKnownBooks,
       collect22biquKnownAuthors,
       collect22biquCategoryLabels,
