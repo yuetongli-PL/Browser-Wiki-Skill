@@ -20,12 +20,21 @@ Use `node src/entrypoints/sites/x-action.mjs <action> [target]` for authenticate
 
 - `followed-users`: infer the logged-in account when possible, or pass `--account <handle>`.
 - `profile-content <handle> --content-type posts|replies|media|highlights`.
-- `profile-content <handle> --content-type posts|replies|media|highlights --full-archive --max-api-pages <n>` for deep archive mode. The runner captures X GraphQL/search responses, follows bottom cursors when available, and falls back to deep DOM scroll.
+- `profile-content <handle> --content-type posts|replies|media|highlights --full-archive --max-api-pages <n>` for deep archive mode. The runner captures target X GraphQL/search seed responses, follows API cursors when available, and falls back to DOM scroll when capture is unavailable. If no target API seed is captured, expect `archive.reason` such as `no-api-seed-captured`, `no-parseable-api-seed`, or `api-cursor-disabled-or-unavailable`; if a cursor replay fails after seed items were collected, `soft-cursor-exhausted` is reported as `degraded`, not complete.
 - `profile-following <handle>`.
 - `followed-posts-by-date --date YYYY-MM-DD [--query <keyword>] [--max-api-pages <n>]`.
 - `search --query <keyword>`.
-- Add `--download-media` to save visible image/video URLs with browser cookie passthrough.
+- Add `--download-media` to download media from the current result set with browser cookie passthrough. For X `profile-content`, `search`, and `followed-posts-by-date`, media download also enables API seed capture even when cursor paging is disabled; API media is preferred over DOM posters, and video entries use the best available `video/mp4` variant before falling back to DOM/performance-visible URLs. If API capture is unavailable and only an X video poster image is visible, reports mark it as `poster-only-video-fallback` with `expectedType: "video"`.
+- Media downloads write `downloads.jsonl`, `media-queue.json`, and `media-manifest.json`; inspect `media-manifest.json` for SHA-256 hashes, small-file anomalies, content-type mismatches, and ffprobe video checks.
 - If the default Browser-Wiki-Skill profile is not logged in, set `BWS_X_USER_DATA_DIR` or pass `--user-data-dir <Chrome user data dir>` to reuse an existing authenticated Chrome profile.
+
+## Live Operations
+
+- Resume a paused or bounded full archive with `node scripts/social-live-resume.mjs --state <manifest-or-state.json> --site x --auto-execute --cooldown-minutes 30 --max-attempts 3`.
+- `--auto-execute` waits through cooldown, runs ready resume commands, rereads the latest state/manifest, and stops when the archive is complete, no candidates remain, max attempts is reached, or `--max-cycles` is exhausted.
+- Build a local run dashboard with `node scripts/social-live-dashboard.mjs --site x`; open `runs/social-live-dashboard/social-live-dashboard.html` to review recent health, rate-limit, download quality, and drift signals.
+- Preview a scheduled health watcher with `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\install-social-health-watch-task.ps1 -Site x`; add `-Execute` only after reviewing the generated `schtasks.exe` command.
+- Action manifests can include `recoveryRunbook.commands`; prefer those exact next commands after login wall, challenge, rate-limit, API drift, or media-download failures.
 
 ## Natural Language Shortcuts
 
@@ -39,6 +48,13 @@ Map these user requests directly to the existing action or verification command.
 | `检查 X 登录健康` / `X health check` | `health-check` | `node scripts/social-auth-recover.mjs --execute --site x --verify` |
 | `生成 X live 验收报告` / `X live acceptance report` | `live-acceptance-report` | `node scripts/social-live-verify.mjs --execute --site x --x-account <handle>` |
 | `刷新 X KB` / `X scenario KB refresh` | `kb-refresh` | `node scripts/social-kb-refresh.mjs --execute --site x --x-account <handle>` |
+
+Additional shortcuts:
+
+| User wording | Intent | Command mapping |
+| --- | --- | --- |
+| `X live dashboard` / `X dashboard` | `live-dashboard` | `node scripts/social-live-dashboard.mjs --site x` |
+| `X 自动续跑` / `auto resume X full archive` | `auto-resume-full-archive` | `node scripts/social-live-resume.mjs --state <manifest-or-state.json> --site x --auto-execute --cooldown-minutes 30 --max-attempts 3` |
 
 ## Reading order
 

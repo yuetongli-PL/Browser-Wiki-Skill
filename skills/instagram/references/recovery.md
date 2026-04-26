@@ -1,5 +1,15 @@
 # Recovery
 
+## Live artifact recovery
+
+- If an action manifest contains `recoveryRunbook.commands`, run the listed command that matches the current blocker before inventing a new recovery path.
+- For `rate-limited` or `api-rate-limited`, prefer `node scripts/social-live-resume.mjs --state <manifest-or-state.json> --site instagram --auto-execute --cooldown-minutes 30 --max-attempts 3`.
+- For login wall, challenge, or expired session, run the manifest's `recover-auth-session` command first, then rerun the listed resume command with `--resume`.
+- For media failures, inspect `media-manifest.json` and `media-queue.json`; retry with the manifest's `resume-media-downloads` command so completed files are reused.
+- For media retry recovery, keep the original run directory and retry only failed or unverified queue entries. Re-run automatic validation before reporting success.
+- For API drift, inspect `api-capture-debug.json` and `api-drift-samples.json`; Instagram profile-content/full-archive parsing should first expect `api/v1/feed/user/<userId>/` pagination, then GraphQL, generic `/api/v1/feed/user/`, and clips/reels wrapper shapes before falling back to DOM.
+- For interrupted full archives, resume from the manifest/run state, continue any saved `api/v1/feed/user/<userId>/` cursor, and regenerate CSV/HTML indexes after the final validation pass.
+
 ## Recovery
 
 ### already-satisfied

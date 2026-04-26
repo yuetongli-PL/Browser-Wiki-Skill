@@ -1,5 +1,13 @@
 # Recovery
 
+## Live artifact recovery
+
+- If an action manifest contains `recoveryRunbook.commands`, run the listed command that matches the current blocker before inventing a new recovery path.
+- For `rate-limited` or `api-rate-limited`, prefer `node scripts/social-live-resume.mjs --state <manifest-or-state.json> --site x --auto-execute --cooldown-minutes 30 --max-attempts 3`.
+- For login wall, challenge, or expired session, run the manifest's `recover-auth-session` command first, then rerun the listed resume command with `--resume`.
+- For media failures, inspect `media-manifest.json` and `media-queue.json`; retry with the manifest's `resume-media-downloads` command so completed files are reused.
+- For API drift, inspect `api-capture-debug.json` and `api-drift-samples.json` before changing parser behavior.
+
 ## Recovery
 
 ### already-satisfied

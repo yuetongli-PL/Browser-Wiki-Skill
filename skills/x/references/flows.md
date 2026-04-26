@@ -103,3 +103,24 @@
 - Example: `刷新 X KB` / `X scenario KB refresh`
 - Command: `node scripts/social-kb-refresh.mjs --execute --site x --x-account <handle>`
 - Action: `query-social`
+
+## auto-resume-full-archive: X Full Archive Auto Runner
+
+- Intent Type: `auto-resume-full-archive`
+- Command: `node scripts/social-live-resume.mjs --state <manifest-or-state.json> --site x --auto-execute --cooldown-minutes 30 --max-attempts 3`
+- Action: `query-social`
+- Notes: waits through cooldown, executes ready resume commands, rereads state/manifest after each run, and stops at archive completion, no candidates, max attempts, or `--max-cycles`.
+
+## live-dashboard: X Local Run Dashboard
+
+- Intent Type: `live-dashboard`
+- Command: `node scripts/social-live-dashboard.mjs --site x`
+- Action: `query-social`
+- Notes: writes `runs/social-live-dashboard/social-live-dashboard.html` with recent health, rate-limit, download quality, and drift classification.
+
+## install-health-watch: X Scheduled Health Watch
+
+- Intent Type: `install-health-watch`
+- Command: `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\install-social-health-watch-task.ps1 -Site x`
+- Action: `query-social`
+- Notes: dry-run by default. Add `-Execute` only after reviewing the generated `schtasks.exe` command.

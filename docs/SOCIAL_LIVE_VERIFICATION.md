@@ -41,6 +41,9 @@ node .\scripts\social-live-report.mjs
 # Preview account health keepalive/auth-doctor commands.
 node .\scripts\social-health-watch.mjs --site all
 
+# Preview the Windows scheduled task that would run account health checks.
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\install-social-health-watch-task.ps1 -Site all -IntervalMinutes 60
+
 # Print production/resume/cooldown command templates.
 node .\scripts\social-command-templates.mjs --site all
 
@@ -72,10 +75,10 @@ Each matrix row has three separate classifications:
 | Case | Coverage | Command | Primary artifact | Artifact/status classification |
 | --- | --- | --- | --- | --- |
 | `x-full-archive` | X full archive | `node src/entrypoints/sites/x-action.mjs full-archive <x-account> --max-items <n> --timeout <ms> --run-dir <run>` | `<run>/manifest.json` | `passed` when archive is complete or bounded; `failed` when archive is incomplete; `blocked` for rate limits, login wall, challenge, session invalidation, fingerprint risk, or timeout; `skipped` when reusable login credentials are unavailable. |
-| `instagram-full-archive` | IG full archive | `node src/entrypoints/sites/instagram-action.mjs full-archive <ig-account> --max-items <n> --timeout <ms> --run-dir <run>` | `<run>/manifest.json` | Same archive rules as X. Missing Instagram login is `skipped`; Instagram login wall, challenge, expired session, or recovery-needed state is `blocked`, not a generic failure. |
+| `instagram-full-archive` | IG full archive | `node src/entrypoints/sites/instagram-action.mjs full-archive <ig-account> --max-items <n> --timeout <ms> --run-dir <run>` | `<run>/manifest.json` plus archive JSON/JSONL, CSV, and HTML indexes | Same archive rules as X. The formal IG profile-content/full-archive path should prefer authenticated `api/v1/feed/user/<userId>/` pagination, fall back through compatible captured API payloads, and use DOM only as the final fallback. Missing Instagram login is `skipped`; Instagram login wall, challenge, expired session, or recovery-needed state is `blocked`, not a generic failure. |
 | `instagram-followed-date` | IG followed-date | `node src/entrypoints/sites/instagram-action.mjs followed-posts-by-date --date <YYYY-MM-DD> --max-users <n> --max-items <n> --timeout <ms> --run-dir <run>` | `<run>/manifest.json` | `passed` when the bounded followed-date scan completes; `blocked` for auth/risk/runtime blocks; `skipped` when no reusable logged-in Instagram session is available. |
 | `x-media-download` | X media download | `node src/entrypoints/sites/x-action.mjs profile-content <x-account> --content-type media --download-media --max-items <n> --max-media-downloads <n> --timeout <ms> --run-dir <run>` | `<run>/manifest.json`, optional `<run>/downloads.jsonl` | `passed` when expected media downloads are present; `failed` when expected media exists but not all downloads complete; `blocked` for auth/risk/runtime blocks; `skipped` when download session/login state is unavailable before media work can start. |
-| `instagram-media-download` | IG media download | `node src/entrypoints/sites/instagram-action.mjs profile-content <ig-account> --content-type media --download-media --max-items <n> --max-media-downloads <n> --timeout <ms> --run-dir <run>` | `<run>/manifest.json`, optional `<run>/downloads.jsonl` | Same media rules as X. Missing Instagram login/download session is `skipped`; login wall, challenge, expired session, or platform throttle is `blocked`. |
+| `instagram-media-download` | IG media download | `node src/entrypoints/sites/instagram-action.mjs profile-content <ig-account> --content-type media --download-media --max-items <n> --max-media-downloads <n> --timeout <ms> --run-dir <run>` | `<run>/manifest.json`, optional `<run>/downloads.jsonl`, `media-queue.json`, and `media-manifest.json` | Same media rules as X. Downloads should be resumable, retry failed media entries without redownloading completed files, and pass hash/type/size/video validation before acceptance. Missing Instagram login/download session is `skipped`; login wall, challenge, expired session, or platform throttle is `blocked`. |
 | `x-auth-doctor` | X auth recovery/site-doctor | `node src/entrypoints/sites/site-doctor.mjs https://x.com/home --profile-path profiles/x.com.json --knowledge-base-dir knowledge-base/x.com --reuse-login-state --no-headless` | latest `<out-dir>/*/doctor-report.json` | `passed` when scenarios pass or are intentionally skipped; `failed` for scenario fail/error; `blocked` for `not-logged-in`, anti-crawl, rate-limit, fingerprint, or platform-boundary reason codes. |
 | `instagram-auth-doctor` | IG auth recovery/site-doctor | `node src/entrypoints/sites/site-doctor.mjs https://www.instagram.com/ --profile-path profiles/www.instagram.com.json --knowledge-base-dir knowledge-base/www.instagram.com --reuse-login-state --no-headless` | latest `<out-dir>/*/doctor-report.json` | Same doctor rules as X. Auth-only Instagram scenarios skipped with `not-logged-in` are classified as `blocked` for acceptance. |
 | `x-kb-refresh` | X scenario KB state refresh | `node scripts/social-kb-refresh.mjs --site x --run-root <run>` | latest `<run>/manifest.json` | `passed` when selected scenario cases pass; `failed` for child failures; `blocked` for timeouts and blocked scenario reason codes. |
@@ -174,6 +177,39 @@ Use `social-health-watch` before long live runs to check account health. Dry-run
 node .\scripts\social-health-watch.mjs --site all
 node .\scripts\social-health-watch.mjs --execute --site x --interval-minutes 60
 ```
+
+On Windows, `tools/install-social-health-watch-task.ps1` creates a Task Scheduler entry that runs `scripts/social-health-watch.mjs --execute` on a fixed minute interval. The installer and uninstaller are dry-run by default and also support PowerShell `-WhatIf`; they only call `schtasks.exe` when `-Execute` is present.
+
+```powershell
+# Preview the default scheduled task. This does not install anything.
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\install-social-health-watch-task.ps1
+
+# Preview a user-scoped Instagram health task every two hours.
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\install-social-health-watch-task.ps1 `
+  -UserScope `
+  -Site instagram `
+  -IntervalMinutes 120 `
+  -TaskName SocialHealthInstagram `
+  -NodePath "C:\Program Files\nodejs\node.exe"
+
+# Create or update the task after reviewing the dry-run command.
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\install-social-health-watch-task.ps1 `
+  -Execute `
+  -Site all `
+  -IntervalMinutes 60 `
+  -RepoRoot C:\Users\lyt-p\Desktop\Browser-Wiki-Skill
+
+# Preview deletion. This does not delete anything.
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\uninstall-social-health-watch-task.ps1
+
+# Delete the matching user-scoped task.
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\uninstall-social-health-watch-task.ps1 `
+  -Execute `
+  -UserScope `
+  -TaskName SocialHealthInstagram
+```
+
+Task names that do not start with `\` are placed under `\Browser-Wiki-Skill\`. With `-UserScope`, they are placed under `\Browser-Wiki-Skill\<windows-user>\` so multiple local users can keep separate tasks.
 
 Use `social-command-templates` when you need consistent production, resume, cooldown, health, and KB refresh command shapes:
 
@@ -280,6 +316,8 @@ Get-Content .\runs\social-kb-refresh\<timestamp>\manifest.json
 Use `status`, per-command `exitCode`, and the command-specific run directories referenced by `--run-dir` or site-doctor `--out-dir` to decide whether the live acceptance pass is complete, blocked by auth, or bounded by platform limits. For KB state refresh, also inspect `results[].artifacts.scenarioStatuses[]` for `not-logged-in`, `anti-crawl-*`, `empty-shell`, `platform-boundary`, or `matching-state-missing`.
 
 For social action cases, inspect `results[].artifactSummary` first. It classifies each case as `passed`, `failed`, `blocked`, or `unknown`, and links the action `manifest.json`. Full action manifests include `outcome`, `runtimeRisk`, `authHealth`, `completeness`, `downloads`, `api-capture-debug.json`, optional `api-drift-samples.json`, and optional `downloads.jsonl`.
+
+For Instagram full archive acceptance, confirm the archive strategy records `api/v1/feed/user/<userId>/` pagination when available, or a specific fallback reason when it is not. Also confirm that resumable state, failed-media retry state, automatic validation results, and CSV/HTML indexes are present before calling a full archive complete.
 
 Useful risk controls:
 

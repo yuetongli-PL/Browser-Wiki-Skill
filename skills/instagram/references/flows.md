@@ -23,13 +23,15 @@
 - Intent Type: `profile-content`
 - Command: `node src/entrypoints/sites/instagram-action.mjs profile-content <handle> --content-type posts|reels|media|highlights`
 - Action: `query-social`
+- Notes: for profile timeline extraction, prefer authenticated Instagram `api/v1/feed/user/<userId>/` pagination when the user id is known or discoverable; use captured compatible API payloads next, and DOM extraction only as the last fallback.
 
 ## full-archive: Instagram Account Deep History Export
 
 - Intent Type: `profile-content`
 - Command: `node src/entrypoints/sites/instagram-action.mjs profile-content <handle> --content-type posts|reels|media|highlights --full-archive`
 - Action: `query-social`
-- Notes: captures available API/cursor responses, keeps DOM fallback, and reports archive strategy/completeness metadata.
+- Notes: formally prioritizes Instagram `api/v1/feed/user/<userId>/` pagination for profile-content/full-archive. Compatible GraphQL, generic `/api/v1/feed/user/`, and clips/reels payloads are fallbacks; DOM scroll is the final fallback.
+- Artifact contract: preserve resumable state in the run directory, reuse completed downloads, retry failed media queue entries, run automatic manifest/media verification, and write CSV plus HTML indexes alongside JSON/JSONL artifacts.
 
 ## list-author-following: Instagram Profile Following List
 
@@ -55,6 +57,7 @@
 - Intent Type: `download-book`
 - Command: `node src/entrypoints/sites/instagram-action.mjs profile-content <handle> --content-type media --download-media`
 - Action: `download-media`
+- Notes: downloads must be restartable from `media-queue.json`/`media-manifest.json`; failed media entries should be retried without redownloading completed files, then validated for hashes, size anomalies, content type, and video probe metadata where available.
 
 ## resume-full-archive: Instagram Full Archive Continuation
 
@@ -62,6 +65,7 @@
 - Example: `IG 全量续跑 <handle>` / `resume Instagram full archive for <handle>`
 - Command: `node src/entrypoints/sites/instagram-action.mjs profile-content <handle> --content-type posts --full-archive --run-dir <previous-or-new-run>`
 - Action: `query-social`
+- Notes: resume from the previous manifest/run directory, continue `api/v1/feed/user/<userId>/` pagination when a cursor remains, retry incomplete media work, and refresh CSV/HTML indexes after validation.
 
 ## resume-after-cooldown: Instagram Rate-Limit Cooldown Continuation
 
@@ -97,3 +101,24 @@
 - Example: `刷新 Instagram KB` / `IG scenario KB refresh`
 - Command: `node scripts/social-kb-refresh.mjs --execute --site instagram --ig-account <handle>`
 - Action: `query-social`
+
+## auto-resume-full-archive: Instagram Full Archive Auto Runner
+
+- Intent Type: `auto-resume-full-archive`
+- Command: `node scripts/social-live-resume.mjs --state <manifest-or-state.json> --site instagram --auto-execute --cooldown-minutes 30 --max-attempts 3`
+- Action: `query-social`
+- Notes: waits through cooldown, executes ready resume commands, rereads state/manifest after each run, and stops at archive completion, no candidates, max attempts, or `--max-cycles`.
+
+## live-dashboard: Instagram Local Run Dashboard
+
+- Intent Type: `live-dashboard`
+- Command: `node scripts/social-live-dashboard.mjs --site instagram`
+- Action: `query-social`
+- Notes: writes `runs/social-live-dashboard/social-live-dashboard.html` with recent health, rate-limit, download quality, and drift classification.
+
+## install-health-watch: Instagram Scheduled Health Watch
+
+- Intent Type: `install-health-watch`
+- Command: `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\install-social-health-watch-task.ps1 -Site instagram`
+- Action: `query-social`
+- Notes: dry-run by default. Add `-Execute` only after reviewing the generated `schtasks.exe` command.

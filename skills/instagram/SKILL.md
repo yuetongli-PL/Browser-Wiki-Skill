@@ -19,12 +19,24 @@ description: Instruction-only Skill for the observed https://www.instagram.com/ 
 Use `node src/entrypoints/sites/instagram-action.mjs <action> [target]` for authenticated read-only extraction. Common actions:
 
 - `followed-users`: infer the logged-in account when possible, or pass `--account <handle>`.
-- `profile-content <handle> --content-type posts|reels|media|highlights --full-archive` for deep profile archive mode. The runner captures available API/cursor responses and falls back to deep DOM scroll.
+- `profile-content <handle> --content-type posts|reels|media|highlights --full-archive` for deep profile archive mode. The runner should prefer Instagram `api/v1/feed/user/<userId>/` pagination, fall back to any captured compatible API/cursor responses, then fall back to deep DOM scroll when live payloads are unavailable.
 - `profile-following <handle>`.
 - `followed-posts-by-date --date YYYY-MM-DD --max-users <n> --per-user-max-items <n>` expands the authenticated following dialog, scans followed profiles, opens candidate post/reel details, and filters by detail timestamps.
 - `search --query <keyword>`.
 - Add `--download-media` to save visible image/video URLs with browser cookie passthrough.
+- Media downloads write `downloads.jsonl`, `media-queue.json`, and `media-manifest.json`; inspect `media-manifest.json` for SHA-256 hashes, small-file anomalies, content-type mismatches, and ffprobe video checks.
+- Full archive and media download runs are resumable from the run directory/manifest. Reuse completed files, retry failed media queue entries, and verify the manifest before declaring the archive complete.
+- Full archive output should include machine-readable JSON/JSONL artifacts plus CSV and HTML indexes for local review.
+- API parsing treats `api/v1/feed/user/<userId>/` as the formal Instagram profile-content/full-archive pagination path. GraphQL, generic `/api/v1/feed/user/`, and clips/reels-shaped payloads are compatibility fallbacks; DOM remains the final fallback when live payloads are unavailable.
 - If the default Browser-Wiki-Skill profile is not logged in, set `BWS_INSTAGRAM_USER_DATA_DIR` or pass `--user-data-dir <Chrome user data dir>` to reuse an existing authenticated browser profile.
+
+## Live Operations
+
+- Resume a paused or bounded full archive with `node scripts/social-live-resume.mjs --state <manifest-or-state.json> --site instagram --auto-execute --cooldown-minutes 30 --max-attempts 3`.
+- `--auto-execute` waits through cooldown, runs ready resume commands, rereads the latest state/manifest, and stops when the archive is complete, no candidates remain, max attempts is reached, or `--max-cycles` is exhausted.
+- Build a local run dashboard with `node scripts/social-live-dashboard.mjs --site instagram`; open `runs/social-live-dashboard/social-live-dashboard.html` to review recent health, rate-limit, download quality, and drift signals.
+- Preview a scheduled health watcher with `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\install-social-health-watch-task.ps1 -Site instagram`; add `-Execute` only after reviewing the generated `schtasks.exe` command.
+- Action manifests can include `recoveryRunbook.commands`; prefer those exact next commands after login wall, challenge, rate-limit, API drift, or media-download failures.
 
 ## Natural Language Shortcuts
 
@@ -38,6 +50,13 @@ Map these user requests directly to the existing action or verification command.
 | `检查 Instagram 登录健康` / `IG health check` | `health-check` | `node scripts/social-auth-recover.mjs --execute --site instagram --verify` |
 | `生成 Instagram live 验收报告` / `IG live acceptance report` | `live-acceptance-report` | `node scripts/social-live-verify.mjs --execute --site instagram --ig-account <handle>` |
 | `刷新 Instagram KB` / `IG scenario KB refresh` | `kb-refresh` | `node scripts/social-kb-refresh.mjs --execute --site instagram --ig-account <handle>` |
+
+Additional shortcuts:
+
+| User wording | Intent | Command mapping |
+| --- | --- | --- |
+| `Instagram live dashboard` / `IG dashboard` | `live-dashboard` | `node scripts/social-live-dashboard.mjs --site instagram` |
+| `IG 自动续跑` / `auto resume Instagram full archive` | `auto-resume-full-archive` | `node scripts/social-live-resume.mjs --state <manifest-or-state.json> --site instagram --auto-execute --cooldown-minutes 30 --max-attempts 3` |
 
 ## Reading order
 
