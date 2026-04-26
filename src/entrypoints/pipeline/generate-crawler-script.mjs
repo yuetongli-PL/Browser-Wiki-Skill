@@ -138,6 +138,9 @@ function deriveCrawlerCapabilities(profile) {
   if (profile?.downloader) {
     capabilities.push('download-content');
   }
+  if (profile?.social) {
+    capabilities.push('query-account-profile', 'query-social-content', 'query-social-relations');
+  }
   capabilities.push('switch-in-page-state');
   return [...new Set(capabilities)];
 }
@@ -158,6 +161,10 @@ function deriveSupportedIntents(profile, host) {
     intents.push('search-video', 'open-video', 'open-author');
   } else if (normalizedHost === 'www.douyin.com') {
     intents.push('search-video', 'open-video', 'open-author');
+  } else if (normalizedHost === 'x.com' || normalizedHost === 'www.x.com') {
+    intents.push('search-posts', 'open-post', 'open-author');
+  } else if (normalizedHost === 'www.instagram.com' || normalizedHost === 'instagram.com') {
+    intents.push('search-content', 'open-post', 'open-reel', 'open-author');
   } else if (normalizedHost === 'jable.tv') {
     intents.push('search-video', 'open-video', 'open-model');
   } else if (normalizedHost === 'moodyz.com') {
@@ -174,6 +181,17 @@ function deriveSupportedIntents(profile, host) {
   }
   if (profile?.downloader) {
     intents.push('download-book');
+  }
+  if (profile?.social) {
+    intents.push(
+      'account-info',
+      'profile-content',
+      'full-archive',
+      'list-profile-content',
+      'list-author-following',
+      'list-followed-users',
+      'list-followed-updates',
+    );
   }
   return [...new Set(intents)];
 }

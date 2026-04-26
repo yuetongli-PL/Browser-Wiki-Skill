@@ -192,6 +192,107 @@
       "host": "www.xiaohongshu.com",
       "siteKey": "xiaohongshu",
       "adapterId": "xiaohongshu"
+    },
+    "x.com": {
+      "baseUrl": "https://x.com/",
+      "primaryArchetype": "catalog-detail",
+      "pageTypes": [
+        "auth-page",
+        "author-list-page",
+        "author-page",
+        "book-detail-page",
+        "category-page",
+        "content-detail-page",
+        "home",
+        "search-results-page"
+      ],
+      "capabilityFamilies": [
+        "download-content",
+        "navigate-to-author",
+        "navigate-to-category",
+        "navigate-to-content",
+        "navigate-to-utility-page",
+        "query-account-profile",
+        "query-social-content",
+        "query-social-relations",
+        "search-content",
+        "switch-in-page-state"
+      ],
+      "supportedIntents": [
+        "account-info",
+        "download-book",
+        "full-archive",
+        "list-author-following",
+        "list-followed-updates",
+        "list-followed-users",
+        "list-profile-content",
+        "open-author",
+        "open-category",
+        "open-post",
+        "open-utility-page",
+        "profile-content",
+        "search-posts"
+      ],
+      "safeActionKinds": [
+        "navigate"
+      ],
+      "approvalActionKinds": [
+        "search-submit"
+      ],
+      "host": "x.com",
+      "siteKey": "x",
+      "adapterId": "x"
+    },
+    "www.instagram.com": {
+      "baseUrl": "https://www.instagram.com/",
+      "primaryArchetype": "catalog-detail",
+      "pageTypes": [
+        "auth-page",
+        "author-list-page",
+        "author-page",
+        "book-detail-page",
+        "category-page",
+        "content-detail-page",
+        "home",
+        "search-results-page"
+      ],
+      "capabilityFamilies": [
+        "download-content",
+        "navigate-to-author",
+        "navigate-to-category",
+        "navigate-to-content",
+        "navigate-to-utility-page",
+        "query-account-profile",
+        "query-social-content",
+        "query-social-relations",
+        "search-content",
+        "switch-in-page-state"
+      ],
+      "supportedIntents": [
+        "account-info",
+        "download-book",
+        "full-archive",
+        "list-author-following",
+        "list-followed-updates",
+        "list-followed-users",
+        "list-profile-content",
+        "open-author",
+        "open-category",
+        "open-post",
+        "open-reel",
+        "open-utility-page",
+        "profile-content",
+        "search-content"
+      ],
+      "safeActionKinds": [
+        "navigate"
+      ],
+      "approvalActionKinds": [
+        "search-submit"
+      ],
+      "host": "www.instagram.com",
+      "siteKey": "instagram",
+      "adapterId": "instagram"
     }
   }
 }

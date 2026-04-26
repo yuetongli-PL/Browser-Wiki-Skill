@@ -2775,6 +2775,327 @@ test('site-doctor markdown reports reusable bilibili auth session details', asyn
   }
 });
 
+test('site-doctor probes reusable auth for X and skips authenticated X scenarios when unavailable', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-doctor-x-auth-'));
+  const profilePath = path.resolve('profiles/x.com.json');
+  const profile = await readJsonFile(profilePath);
+
+  try {
+    const report = await siteDoctor('https://x.com/home', {
+      profilePath,
+      outDir: path.join(workspace, 'doctor'),
+    }, {
+      resolveSite: async () => ({ adapter: { id: 'x' }, host: 'x.com' }),
+      resolveSiteAuthProfile: async () => ({
+        profile,
+        warnings: [],
+        filePath: profilePath,
+      }),
+      resolveSiteBrowserSessionOptions: async () => ({
+        reuseLoginState: true,
+        userDataDir: path.join(workspace, 'profiles', 'x.com'),
+        cleanupUserDataDirOnShutdown: false,
+        authConfig: {
+          loginUrl: 'https://x.com/i/flow/login',
+          postLoginUrl: 'https://x.com/home',
+          verificationUrl: 'https://x.com/home',
+        },
+      }),
+      runAuthenticatedKeepalivePreflight: async () => ({
+        attempted: true,
+        ran: false,
+        reason: 'not-due',
+        thresholdMinutes: null,
+        sessionHealthSummary: null,
+        sessionHealthSummaryAfter: null,
+        keepaliveReport: null,
+      }),
+      openBrowserSession: async () => ({
+        async navigateAndWait() {},
+        async close() {},
+      }),
+      inspectLoginState: async () => ({
+        loggedIn: false,
+        loginStateDetected: false,
+        identityConfirmed: false,
+        identitySource: null,
+        currentUrl: 'https://x.com/i/flow/login',
+        title: 'X',
+      }),
+      ensureCrawlerScript: async () => ({
+        status: 'generated',
+        scriptPath: path.join(workspace, 'crawler.py'),
+        metaPath: path.join(workspace, 'crawler.meta.json'),
+      }),
+      capture: async () => ({
+        status: 'success',
+        finalUrl: 'https://x.com/home',
+        files: {
+          manifest: path.join(workspace, 'capture', 'manifest.json'),
+        },
+        error: null,
+      }),
+      expandStates: async () => ({
+        outDir: path.join(workspace, 'expand'),
+        summary: { capturedStates: 0 },
+        warnings: [],
+        states: [],
+      }),
+    });
+
+    assert.equal(report.authSession?.loginStateDetected, false);
+    assert.equal(report.authSession?.identityConfirmed, false);
+    assert.equal(report.sessionReuseWorked, false);
+    assert.equal(report.scenarios.find((entry) => entry.id === 'search-latest')?.status, 'skipped');
+    assert.equal(report.scenarios.find((entry) => entry.id === 'search-latest')?.reasonCode, 'not-logged-in');
+    assert.match(report.warnings.join('\n'), /No reusable logged-in x session was detected/u);
+    assert.match(report.nextActions.join('\n'), /site-login/u);
+    assert.match(report.nextActions.join('\n'), /BWS_X_USER_DATA_DIR/u);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('site-doctor reports the X scenario matrix from profile samples', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-doctor-x-scenarios-'));
+  const profilePath = path.resolve('profiles/x.com.json');
+  const profile = await readJsonFile(profilePath);
+  const expandedInputs = [];
+  const stateForXUrl = (url, index = 0) => {
+    const parsed = new URL(url);
+    const pathname = parsed.pathname.toLowerCase().replace(/\/+$/u, '') || '/';
+    let pageType = 'author-page';
+    if (pathname === '/search') {
+      pageType = 'search-results-page';
+    } else if (pathname === '/home') {
+      pageType = 'home';
+    } else if (pathname === '/explore') {
+      pageType = 'category-page';
+    } else if (pathname.includes('/status/')) {
+      pageType = 'book-detail-page';
+    } else if (pathname === '/notifications' || pathname === '/i/bookmarks' || pathname.endsWith('/following') || pathname.endsWith('/followers')) {
+      pageType = 'author-list-page';
+    }
+    return {
+      state_id: `x-state-${index}`,
+      status: 'captured',
+      finalUrl: url,
+      pageType,
+      files: {},
+      pageFacts: {
+        featuredContentCount: pageType === 'book-detail-page' || pageType === 'search-results-page' || pageType === 'author-page' ? 1 : 0,
+        featuredAuthorCount: pageType === 'author-list-page' || pageType === 'author-page' ? 1 : 0,
+        antiCrawlSignals: [],
+      },
+    };
+  };
+
+  try {
+    const report = await siteDoctor('https://x.com/home', {
+      profilePath,
+      outDir: path.join(workspace, 'doctor'),
+    }, {
+      resolveSite: async () => ({ adapter: { id: 'x' }, host: 'x.com' }),
+      resolveSiteAuthProfile: async () => ({
+        profile,
+        warnings: [],
+        filePath: profilePath,
+      }),
+      resolveSiteBrowserSessionOptions: async () => ({
+        reuseLoginState: true,
+        userDataDir: path.join(workspace, 'profiles', 'x.com'),
+        cleanupUserDataDirOnShutdown: false,
+        authConfig: {
+          loginUrl: profile.authSession.loginUrl,
+          postLoginUrl: profile.authSession.postLoginUrl,
+          verificationUrl: profile.authSession.verificationUrl,
+        },
+      }),
+      runAuthenticatedKeepalivePreflight: async () => ({
+        attempted: true,
+        ran: false,
+        reason: 'not-due',
+        thresholdMinutes: null,
+        sessionHealthSummary: null,
+        sessionHealthSummaryAfter: null,
+        keepaliveReport: null,
+      }),
+      openBrowserSession: async () => ({
+        async navigateAndWait() {},
+        async close() {},
+      }),
+      inspectLoginState: async () => ({
+        loggedIn: true,
+        loginStateDetected: true,
+        identityConfirmed: true,
+        identitySource: 'selector',
+        currentUrl: 'https://x.com/home',
+        title: 'X',
+      }),
+      ensureCrawlerScript: async () => ({
+        status: 'generated',
+        scriptPath: path.join(workspace, 'crawler.py'),
+        metaPath: path.join(workspace, 'crawler.meta.json'),
+      }),
+      capture: async () => ({
+        status: 'success',
+        finalUrl: 'https://x.com/home',
+        files: {
+          manifest: path.join(workspace, 'capture', 'manifest.json'),
+        },
+        error: null,
+      }),
+      expandStates: async (inputUrl) => {
+        expandedInputs.push(inputUrl);
+        const states = inputUrl === 'https://x.com/home'
+          ? [
+              stateForXUrl('https://x.com/home', 0),
+              stateForXUrl(profile.authValidationSamples.searchLatestUrl, 1),
+              stateForXUrl(profile.validationSamples.videoDetailUrl, 2),
+              stateForXUrl(profile.validationSamples.authorUrl, 3),
+            ]
+          : [stateForXUrl(inputUrl, expandedInputs.length + 10)];
+        return {
+          outDir: path.join(workspace, 'expand'),
+          summary: { capturedStates: states.length },
+          warnings: [],
+          states,
+        };
+      },
+    });
+
+    assert.equal(report.scenarios.find((entry) => entry.id === 'home-search-post-detail-author')?.status, 'pass');
+    assert.equal(report.scenarios.find((entry) => entry.id === 'public-post-detail')?.status, 'pass');
+    assert.equal(report.scenarios.find((entry) => entry.id === 'public-author-posts')?.status, 'pass');
+    assert.equal(report.scenarios.find((entry) => entry.id === 'category-explore')?.status, 'pass');
+    assert.equal(report.scenarios.find((entry) => entry.id === 'home-auth')?.status, 'pass');
+    assert.equal(report.scenarios.find((entry) => entry.id === 'search-latest')?.status, 'pass');
+    assert.equal(report.scenarios.find((entry) => entry.id === 'notifications')?.authRequired, true);
+    assert.equal(report.scenarios.find((entry) => entry.id === 'bookmarks')?.status, 'pass');
+    assert.equal(expandedInputs.includes(profile.authValidationSamples.authorFollowingUrl), true);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('site-doctor reports the Instagram scenario matrix from profile samples', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-doctor-instagram-scenarios-'));
+  const profilePath = path.resolve('profiles/www.instagram.com.json');
+  const profile = await readJsonFile(profilePath);
+  const expandedInputs = [];
+  const stateForInstagramUrl = (url, index = 0) => {
+    const parsed = new URL(url);
+    const pathname = parsed.pathname.toLowerCase().replace(/\/+$/u, '') || '/';
+    let pageType = 'author-page';
+    if (pathname.startsWith('/explore/search')) {
+      pageType = 'search-results-page';
+    } else if (pathname === '/explore') {
+      pageType = 'category-page';
+    } else if (pathname.startsWith('/p/') || pathname.startsWith('/reel/') || pathname.startsWith('/tv/')) {
+      pageType = 'book-detail-page';
+    } else if (pathname.startsWith('/direct') || pathname.endsWith('/following') || pathname.endsWith('/followers')) {
+      pageType = 'author-list-page';
+    }
+    return {
+      state_id: `ig-state-${index}`,
+      status: 'captured',
+      finalUrl: url,
+      pageType,
+      files: {},
+      pageFacts: {
+        featuredContentCount: pageType === 'book-detail-page' || pageType === 'search-results-page' || pageType === 'author-page' ? 1 : 0,
+        featuredAuthorCount: pageType === 'author-list-page' || pageType === 'author-page' ? 1 : 0,
+        antiCrawlSignals: [],
+      },
+    };
+  };
+
+  try {
+    const report = await siteDoctor('https://www.instagram.com/', {
+      profilePath,
+      outDir: path.join(workspace, 'doctor'),
+    }, {
+      resolveSite: async () => ({ adapter: { id: 'instagram' }, host: 'www.instagram.com' }),
+      resolveSiteAuthProfile: async () => ({
+        profile,
+        warnings: [],
+        filePath: profilePath,
+      }),
+      resolveSiteBrowserSessionOptions: async () => ({
+        reuseLoginState: true,
+        userDataDir: path.join(workspace, 'profiles', 'www.instagram.com'),
+        cleanupUserDataDirOnShutdown: false,
+        authConfig: {
+          loginUrl: profile.authSession.loginUrl,
+          postLoginUrl: profile.authSession.postLoginUrl,
+          verificationUrl: profile.authSession.verificationUrl,
+        },
+      }),
+      runAuthenticatedKeepalivePreflight: async () => ({
+        attempted: true,
+        ran: false,
+        reason: 'not-due',
+        thresholdMinutes: null,
+        sessionHealthSummary: null,
+        sessionHealthSummaryAfter: null,
+        keepaliveReport: null,
+      }),
+      openBrowserSession: async () => ({
+        async navigateAndWait() {},
+        async close() {},
+      }),
+      inspectLoginState: async () => ({
+        loggedIn: true,
+        loginStateDetected: true,
+        identityConfirmed: true,
+        identitySource: 'selector',
+        currentUrl: 'https://www.instagram.com/',
+        title: 'Instagram',
+      }),
+      ensureCrawlerScript: async () => ({
+        status: 'generated',
+        scriptPath: path.join(workspace, 'crawler.py'),
+        metaPath: path.join(workspace, 'crawler.meta.json'),
+      }),
+      capture: async () => ({
+        status: 'success',
+        finalUrl: 'https://www.instagram.com/',
+        files: {
+          manifest: path.join(workspace, 'capture', 'manifest.json'),
+        },
+        error: null,
+      }),
+      expandStates: async (inputUrl) => {
+        expandedInputs.push(inputUrl);
+        const states = inputUrl === 'https://www.instagram.com/'
+          ? [
+              stateForInstagramUrl(profile.authValidationSamples.searchUrl, 1),
+              stateForInstagramUrl(profile.validationSamples.videoDetailUrl, 2),
+              stateForInstagramUrl(profile.validationSamples.authorUrl, 3),
+            ]
+          : [stateForInstagramUrl(inputUrl, expandedInputs.length + 10)];
+        return {
+          outDir: path.join(workspace, 'expand'),
+          summary: { capturedStates: states.length },
+          warnings: [],
+          states,
+        };
+      },
+    });
+
+    assert.equal(report.scenarios.find((entry) => entry.id === 'home-search-post-detail-profile')?.status, 'pass');
+    assert.equal(report.scenarios.find((entry) => entry.id === 'public-post-detail')?.status, 'pass');
+    assert.equal(report.scenarios.find((entry) => entry.id === 'public-profile-posts')?.status, 'pass');
+    assert.equal(report.scenarios.find((entry) => entry.id === 'profile-reels')?.status, 'pass');
+    assert.equal(report.scenarios.find((entry) => entry.id === 'category-explore')?.status, 'pass');
+    assert.equal(report.scenarios.find((entry) => entry.id === 'search')?.authRequired, true);
+    assert.equal(report.scenarios.find((entry) => entry.id === 'direct-inbox')?.status, 'pass');
+    assert.equal(expandedInputs.includes(profile.authValidationSamples.authorFollowersUrl), true);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test('site-doctor includes keepalive preflight and session health details in auth session reporting', async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-doctor-keepalive-preflight-'));
   const profilePath = path.resolve('profiles/www.bilibili.com.json');

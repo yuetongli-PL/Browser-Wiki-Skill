@@ -110,6 +110,7 @@ test('openBrowserSession attaches to the existing startup page target before cre
   } finally {
     await session.close();
   }
+
 });
 
 test('openBrowserSession falls back to createTarget when no initial page target becomes available', async () => {
@@ -152,6 +153,7 @@ test('openBrowserSession falls back to createTarget when no initial page target 
   } finally {
     await session.close();
   }
+
 });
 
 test('openBrowserSession reuses an existing browser instance for the same persistent profile when DevToolsActivePort is available', async () => {
@@ -198,6 +200,9 @@ test('openBrowserSession reuses an existing browser instance for the same persis
   } finally {
     await session.close();
   }
+
+  assert.equal(clientInstance.calls.some((call) => call.method === 'Target.closeTarget'), false);
+  assert.equal(clientInstance.closed, true);
 });
 
 test('openBrowserSession falls back to launching a fresh browser when DevToolsActivePort is stale', async () => {

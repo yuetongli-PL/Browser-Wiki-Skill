@@ -148,3 +148,49 @@ test('resolveSite preserves stored site identity metadata from site context', as
     await rm(workspace, { recursive: true, force: true });
   }
 });
+
+test('resolveSite uses configured X and Instagram adapter identities', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-context-social-sites-'));
+  try {
+    await upsertSiteRegistryRecord(workspace, 'x.com', {
+      canonicalBaseUrl: 'https://x.com/home',
+      siteKey: 'x',
+      adapterId: 'x',
+    });
+    await upsertSiteCapabilities(workspace, 'x.com', {
+      baseUrl: 'https://x.com/home',
+      siteKey: 'x',
+      adapterId: 'x',
+      primaryArchetype: 'catalog-detail',
+    });
+    await upsertSiteRegistryRecord(workspace, 'www.instagram.com', {
+      canonicalBaseUrl: 'https://www.instagram.com/',
+      siteKey: 'instagram',
+      adapterId: 'instagram',
+    });
+    await upsertSiteCapabilities(workspace, 'www.instagram.com', {
+      baseUrl: 'https://www.instagram.com/',
+      siteKey: 'instagram',
+      adapterId: 'instagram',
+      primaryArchetype: 'catalog-detail',
+    });
+
+    const xResolved = await resolveSite({
+      workspaceRoot: workspace,
+      inputUrl: 'https://x.com/home',
+      profile: { host: 'x.com' },
+    });
+    const instagramResolved = await resolveSite({
+      workspaceRoot: workspace,
+      inputUrl: 'https://www.instagram.com/',
+      profile: { host: 'www.instagram.com' },
+    });
+
+    assert.equal(xResolved.adapterId, 'x');
+    assert.equal(xResolved.siteKey, 'x');
+    assert.equal(instagramResolved.adapterId, 'instagram');
+    assert.equal(instagramResolved.siteKey, 'instagram');
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});

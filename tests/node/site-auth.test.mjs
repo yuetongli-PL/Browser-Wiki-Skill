@@ -25,6 +25,7 @@ import {
   inspectReusableSiteSession,
   isReusableLoginStateAvailable,
   resolveSiteBrowserSessionOptions,
+  waitForAuthenticatedSession,
 } from '../../src/infra/auth/site-auth.mjs';
 
 test('derivePersistentProfileKey groups bilibili subdomains under the same persistent profile key', () => {
@@ -37,6 +38,81 @@ test('derivePersistentProfileKey keeps Douyin URLs on the shared douyin.com prof
   assert.equal(derivePersistentProfileKey('https://www.douyin.com/?recommend=1'), 'douyin.com');
   assert.equal(derivePersistentProfileKey('https://www.douyin.com/user/self?showTab=like'), 'douyin.com');
   assert.equal(derivePersistentProfileKey('https://www.douyin.com/follow?tab=user'), 'douyin.com');
+});
+
+test('waitForAuthenticatedSession keeps polling through transient page inspection errors', async () => {
+  let calls = 0;
+  const session = {
+    async callPageFunction() {
+      calls += 1;
+      if (calls === 1) {
+        throw new Error('CDP socket closed: transient navigation');
+      }
+      return {
+        currentUrl: 'https://x.com/home',
+        title: 'Home / X',
+        loggedIn: true,
+        loginStateDetected: true,
+        identityConfirmed: true,
+        identitySource: 'selector:a[data-testid="AppTabBar_Home_Link"]',
+      };
+    },
+  };
+
+  const result = await waitForAuthenticatedSession(session, {
+    host: 'x.com',
+    loginUrl: 'https://x.com/i/flow/login',
+    loginIndicatorSelectors: ['a[data-testid="AppTabBar_Home_Link"]'],
+    loggedOutIndicatorSelectors: ['a[href*="/i/flow/login"]'],
+    usernameSelectors: [],
+    passwordSelectors: [],
+    challengeSelectors: [],
+  }, {
+    timeoutMs: 100,
+    pollMs: 1,
+  });
+
+  assert.equal(result.status, 'authenticated');
+  assert.equal(calls, 2);
+});
+
+test('waitForAuthenticatedSession can assist a manual multi-step login before polling state', async () => {
+  const calls = [];
+  let inspections = 0;
+  const session = {
+    async callPageFunction(fn) {
+      calls.push(fn.name);
+      if (fn.name === 'pageAssistManualLoginStep') {
+        return { status: 'next-clicked' };
+      }
+      inspections += 1;
+      return {
+        identityConfirmed: inspections >= 2,
+      };
+    },
+  };
+
+  const result = await waitForAuthenticatedSession(session, {
+    host: 'x.com',
+    loginUrl: 'https://x.com/i/flow/login',
+    loginIndicatorSelectors: ['a[data-testid="AppTabBar_Home_Link"]'],
+    loggedOutIndicatorSelectors: ['input[autocomplete="username"]'],
+    usernameSelectors: ['input[autocomplete="username"]'],
+    passwordSelectors: ['input[name="password"]'],
+    challengeSelectors: [],
+  }, {
+    assistManualLogin: true,
+    timeoutMs: 100,
+    pollMs: 1,
+  });
+
+  assert.equal(result.status, 'authenticated');
+  assert.deepEqual(calls, [
+    'pageAssistManualLoginStep',
+    'pageInspectLoginState',
+    'pageAssistManualLoginStep',
+    'pageInspectLoginState',
+  ]);
 });
 
 test('derivePersistentProfileKey keeps Xiaohongshu URLs on the shared xiaohongshu.com profile key', () => {
@@ -105,6 +181,21 @@ test('resolveSiteBrowserSessionOptions honors Douyin auth session defaults', asy
     'loginStateLikelyAvailable',
     'presentWithoutMissingPaths',
   ]);
+});
+
+test('resolveSiteBrowserSessionOptions exposes X split-login form selectors', async () => {
+  const siteProfile = await readJsonFile(path.resolve('profiles/x.com.json'));
+  const sessionOptions = await resolveSiteBrowserSessionOptions('https://x.com/home', {}, {
+    siteProfile,
+    profilePath: path.resolve('profiles/x.com.json'),
+  });
+
+  assert.ok(sessionOptions.authConfig.usernameSelectors.includes('input[autocomplete="username"]'));
+  assert.ok(sessionOptions.authConfig.usernameSelectors.includes('input[name="text"]'));
+  assert.ok(sessionOptions.authConfig.passwordSelectors.includes('input[name="password"]'));
+  assert.ok(sessionOptions.authConfig.submitSelectors.includes('[data-testid="LoginForm_Login_Button"]'));
+  assert.ok(sessionOptions.authConfig.loginIndicatorSelectors.includes('a[data-testid="AppTabBar_Home_Link"]'));
+  assert.ok(sessionOptions.authConfig.loginIndicatorSelectors.includes('a[data-testid="SideNav_NewTweet_Button"]'));
 });
 
 test('isAuthRequiredNavigationTarget distinguishes Xiaohongshu public and authenticated paths', async () => {

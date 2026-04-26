@@ -7,8 +7,10 @@ import { chapterContentAdapter } from './chapter-content.mjs';
 import { bilibiliAdapter } from './bilibili.mjs';
 import { douyinAdapter } from './douyin.mjs';
 import { genericNavigationAdapter } from './generic-navigation.mjs';
+import { instagramAdapter } from './instagram.mjs';
 import { jableAdapter } from './jable.mjs';
 import { moodyzAdapter } from './moodyz.mjs';
+import { xAdapter } from './x.mjs';
 import { xiaohongshuAdapter } from './xiaohongshu.mjs';
 
 const ADAPTERS = Object.freeze([
@@ -17,6 +19,8 @@ const ADAPTERS = Object.freeze([
   bilibiliAdapter,
   douyinAdapter,
   xiaohongshuAdapter,
+  xAdapter,
+  instagramAdapter,
   chapterContentAdapter,
   genericNavigationAdapter,
 ]);

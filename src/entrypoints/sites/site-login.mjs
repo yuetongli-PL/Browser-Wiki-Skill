@@ -360,7 +360,7 @@ async function verifyPersistentLoginReuse(inputUrl, settings, authContext, runti
   let closeSummary = null;
   try {
     const warmupSummary = await performRuntimeWarmup(reopenSession, navigationPlan, settings);
-    if (settings.runtimePurpose !== 'keepalive' && verificationUrl) {
+    if (verificationUrl) {
       await reopenSession.navigateAndWait(verificationUrl, createWaitPolicy(settings.timeoutMs));
     }
     const shouldEnsureAuth = Boolean(authContext.authConfig)
@@ -368,7 +368,15 @@ async function verifyPersistentLoginReuse(inputUrl, settings, authContext, runti
     const ensuredAuth = shouldEnsureAuth
       ? await runtime.ensureAuthenticatedSession(reopenSession, inputUrl, settings, { authContext })
       : null;
-    const loginState = ensuredAuth?.loginState ?? await runtime.inspectLoginState(reopenSession, authContext.authConfig);
+    const retryLoginState = ensuredAuth?.loginState
+      ? null
+      : await inspectConfirmedLoginStateWithRetry(runtime, reopenSession, authContext.authConfig, {
+        timeoutMs: Math.min(20_000, settings.timeoutMs),
+        pollMs: 800,
+      });
+    const loginState = ensuredAuth?.loginState
+      ?? retryLoginState
+      ?? await runtime.inspectLoginState(reopenSession, authContext.authConfig);
     closeSummary = await reopenSession.close();
     return {
       attempted: true,
@@ -383,6 +391,34 @@ async function verifyPersistentLoginReuse(inputUrl, settings, authContext, runti
       await reopenSession.close();
     }
   }
+}
+
+async function inspectConfirmedLoginStateWithRetry(runtime, session, authConfig, {
+  timeoutMs = 20_000,
+  pollMs = 800,
+} = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let lastState = null;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      lastState = await runtime.inspectLoginState(session, authConfig);
+      lastError = null;
+      if (lastState?.identityConfirmed === true) {
+        return lastState;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+  if (lastState) {
+    return lastState;
+  }
+  if (lastError) {
+    throw lastError;
+  }
+  return await runtime.inspectLoginState(session, authConfig);
 }
 
 function parseCliArgs(argv) {
@@ -496,11 +532,17 @@ function deriveReportedAuthStatus(authResult, finalLoginState, reopenVerificatio
   if (authResult.status === 'already-authenticated' && reopenVerification?.passed === true) {
     return 'session-reused';
   }
-  if (authResult.status === 'credentials-unavailable') {
-    return 'credentials-unavailable';
-  }
   if (authResult.waitedForManualLogin && hasConfirmedIdentity) {
     return 'manual-login-complete';
+  }
+  if (authResult.waitedForManualLogin && authResult.waitStatus === 'timeout') {
+    return 'manual-login-timeout';
+  }
+  if (authResult.waitedForManualLogin && authResult.waitStatus === 'session-unavailable') {
+    return 'manual-login-unavailable';
+  }
+  if (authResult.status === 'credentials-unavailable') {
+    return 'credentials-unavailable';
   }
   if (hasConfirmedIdentity) {
     return 'authenticated';
@@ -681,6 +723,7 @@ export async function siteLogin(inputUrl, options = {}, deps = {}) {
         // Keep the current page if the site already redirected.
       }
       const manualWait = await runtime.waitForAuthenticatedSession(session, authConfig, {
+        assistManualLogin: true,
         timeoutMs: settings.manualLoginTimeoutMs,
       });
       if (manualWait.status === 'authenticated') {
@@ -761,6 +804,7 @@ export async function siteLogin(inputUrl, options = {}, deps = {}) {
         status: reportedStatus,
         autoLogin: settings.autoLogin,
         waitedForManualLogin: authResult.waitedForManualLogin === true,
+        waitStatus: authResult.waitStatus ?? null,
         credentialsSource: authResult.credentials?.source ?? null,
         loginStateDetected: finalLoginState?.loginStateDetected === true || finalLoginState?.loggedIn === true,
         identityConfirmed: finalLoginState?.identityConfirmed === true,
