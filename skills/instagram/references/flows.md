@@ -55,3 +55,45 @@
 - Intent Type: `download-book`
 - Command: `node src/entrypoints/sites/instagram-action.mjs profile-content <handle> --content-type media --download-media`
 - Action: `download-media`
+
+## resume-full-archive: Instagram Full Archive Continuation
+
+- Intent Type: `resume-full-archive`
+- Example: `IG 全量续跑 <handle>` / `resume Instagram full archive for <handle>`
+- Command: `node src/entrypoints/sites/instagram-action.mjs profile-content <handle> --content-type posts --full-archive --run-dir <previous-or-new-run>`
+- Action: `query-social`
+
+## resume-after-cooldown: Instagram Rate-Limit Cooldown Continuation
+
+- Intent Type: `resume-after-cooldown`
+- Example: `Instagram 限流冷却后继续` / `continue IG after rate limit cooldown`
+- Command: `node src/entrypoints/sites/instagram-action.mjs profile-content <handle> --content-type posts --full-archive --risk-backoff-ms <ms> --risk-retries <n>`
+- Action: `query-social`
+
+## media-fast-download: Instagram High-Speed Media Download
+
+- Intent Type: `media-fast-download`
+- Example: `高速下载 IG 媒体 <handle>` / `fast Instagram media download`
+- Command: `node src/entrypoints/sites/instagram-action.mjs profile-content <handle> --content-type media --download-media --max-media-downloads <n>`
+- Action: `download-media`
+
+## health-check: Instagram Session Health Check
+
+- Intent Type: `health-check`
+- Example: `检查 Instagram 登录健康` / `IG health check`
+- Command: `node scripts/social-auth-recover.mjs --execute --site instagram --verify`
+- Action: `query-social`
+
+## live-acceptance-report: Instagram Live Acceptance Report
+
+- Intent Type: `live-acceptance-report`
+- Example: `生成 Instagram live 验收报告` / `IG live acceptance report`
+- Command: `node scripts/social-live-verify.mjs --execute --site instagram --ig-account <handle>`
+- Action: `query-social`
+
+## kb-refresh: Instagram Scenario Knowledge Base Refresh
+
+- Intent Type: `kb-refresh`
+- Example: `刷新 Instagram KB` / `IG scenario KB refresh`
+- Command: `node scripts/social-kb-refresh.mjs --execute --site instagram --ig-account <handle>`
+- Action: `query-social`

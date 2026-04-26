@@ -185,8 +185,138 @@
       "followed-users",
       "followed-posts-by-date",
       "search",
-      "full-archive"
+      "full-archive",
+      "resume-full-archive",
+      "resume-after-cooldown",
+      "media-fast-download",
+      "health-check",
+      "live-acceptance-report",
+      "kb-refresh"
     ],
+    "naturalLanguage": {
+      "siteAliases": [
+        "x",
+        "twitter",
+        "x.com",
+        "X/Twitter"
+      ],
+      "intentAliases": {
+        "full-archive": [
+          "full archive",
+          "deep archive",
+          "export all posts",
+          "全量归档",
+          "全量抓取",
+          "完整导出"
+        ],
+        "resume-full-archive": [
+          "resume full archive",
+          "continue full archive",
+          "continue from cursor",
+          "全量续跑",
+          "继续全量归档",
+          "从上次位置继续"
+        ],
+        "resume-after-cooldown": [
+          "resume after cooldown",
+          "continue after rate limit",
+          "retry after cooldown",
+          "限流冷却后继续",
+          "冷却结束继续",
+          "等限流恢复后续跑"
+        ],
+        "media-fast-download": [
+          "fast media download",
+          "high speed media download",
+          "download media fast",
+          "媒体高速下载",
+          "高速下载图片视频",
+          "快速下载媒体"
+        ],
+        "health-check": [
+          "health check",
+          "session health",
+          "auth health check",
+          "健康检查",
+          "登录健康检查",
+          "检查会话状态"
+        ],
+        "live-acceptance-report": [
+          "live acceptance report",
+          "live verification report",
+          "acceptance report",
+          "live 验收报告",
+          "验收报告",
+          "现场验证报告"
+        ],
+        "kb-refresh": [
+          "kb refresh",
+          "knowledge base refresh",
+          "refresh scenario kb",
+          "KB 刷新",
+          "知识库刷新",
+          "刷新场景知识库"
+        ]
+      },
+      "phraseMappings": [
+        {
+          "phrases": [
+            "把 X 账号 <handle> 全量续跑",
+            "继续跑 x.com <handle> 的全量归档",
+            "resume X full archive for <handle>"
+          ],
+          "intent": "resume-full-archive"
+        },
+        {
+          "phrases": [
+            "X 限流冷却后继续",
+            "rate limit cooled down, continue X",
+            "等 X 冷却后续跑"
+          ],
+          "intent": "resume-after-cooldown"
+        },
+        {
+          "phrases": [
+            "高速下载 <handle> 的 X 媒体",
+            "X media fast download for <handle>",
+            "快速下载 X 图片视频"
+          ],
+          "intent": "media-fast-download"
+        },
+        {
+          "phrases": [
+            "检查 X 登录健康",
+            "X health check",
+            "检查 x.com 会话状态"
+          ],
+          "intent": "health-check"
+        },
+        {
+          "phrases": [
+            "生成 X live 验收报告",
+            "run X live acceptance report",
+            "X 现场验证报告"
+          ],
+          "intent": "live-acceptance-report"
+        },
+        {
+          "phrases": [
+            "刷新 X KB",
+            "X scenario KB refresh",
+            "刷新 x.com 场景知识库"
+          ],
+          "intent": "kb-refresh"
+        }
+      ],
+      "commandMappings": {
+        "resume-full-archive": "node src/entrypoints/sites/x-action.mjs profile-content <handle> --content-type posts --full-archive --max-api-pages <n> --run-dir <previous-or-new-run>",
+        "resume-after-cooldown": "node src/entrypoints/sites/x-action.mjs profile-content <handle> --content-type posts --full-archive --risk-backoff-ms <ms> --risk-retries <n>",
+        "media-fast-download": "node src/entrypoints/sites/x-action.mjs profile-content <handle> --content-type media --download-media --max-media-downloads <n>",
+        "health-check": "node scripts/social-auth-recover.mjs --execute --site x --verify",
+        "live-acceptance-report": "node scripts/social-live-verify.mjs --execute --site x --x-account <handle>",
+        "kb-refresh": "node scripts/social-kb-refresh.mjs --execute --site x --x-account <handle>"
+      }
+    },
     "contentTypes": [
       "posts",
       "replies",

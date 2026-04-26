@@ -1,5 +1,16 @@
 # NL Intents
 
+## Operational Natural Language Shortcuts
+
+| Request | Intent | Command shape |
+| --- | --- | --- |
+| X 全量续跑 `<handle>` / resume X full archive | `resume-full-archive` | `node src/entrypoints/sites/x-action.mjs profile-content <handle> --content-type posts --full-archive --max-api-pages <n> --run-dir <previous-or-new-run>` |
+| X 限流冷却后继续 / continue X after cooldown | `resume-after-cooldown` | `node src/entrypoints/sites/x-action.mjs profile-content <handle> --content-type posts --full-archive --risk-backoff-ms <ms> --risk-retries <n>` |
+| 高速下载 X 媒体 / fast X media download | `media-fast-download` | `node src/entrypoints/sites/x-action.mjs profile-content <handle> --content-type media --download-media --max-media-downloads <n>` |
+| 检查 X 登录健康 / X health check | `health-check` | `node scripts/social-auth-recover.mjs --execute --site x --verify` |
+| 生成 X live 验收报告 / X live acceptance report | `live-acceptance-report` | `node scripts/social-live-verify.mjs --execute --site x --x-account <handle>` |
+| 刷新 X KB / X scenario KB refresh | `kb-refresh` | `node scripts/social-kb-refresh.mjs --execute --site x --x-account <handle>` |
+
 ## Social Extraction Intents
 
 | Request | Intent | Command shape |

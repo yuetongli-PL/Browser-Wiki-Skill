@@ -26,6 +26,19 @@ Use `node src/entrypoints/sites/instagram-action.mjs <action> [target]` for auth
 - Add `--download-media` to save visible image/video URLs with browser cookie passthrough.
 - If the default Browser-Wiki-Skill profile is not logged in, set `BWS_INSTAGRAM_USER_DATA_DIR` or pass `--user-data-dir <Chrome user data dir>` to reuse an existing authenticated browser profile.
 
+## Natural Language Shortcuts
+
+Map these user requests directly to the existing action or verification command. Keep live traffic plan-first unless the user explicitly asks to execute.
+
+| User wording | Intent | Command mapping |
+| --- | --- | --- |
+| `IG 全量续跑 <handle>` / `resume Instagram full archive for <handle>` | `resume-full-archive` | `node src/entrypoints/sites/instagram-action.mjs profile-content <handle> --content-type posts --full-archive --run-dir <previous-or-new-run>` |
+| `Instagram 限流冷却后继续` / `continue IG after rate limit cooldown` | `resume-after-cooldown` | `node src/entrypoints/sites/instagram-action.mjs profile-content <handle> --content-type posts --full-archive --risk-backoff-ms <ms> --risk-retries <n>` |
+| `高速下载 IG 媒体 <handle>` / `fast Instagram media download` | `media-fast-download` | `node src/entrypoints/sites/instagram-action.mjs profile-content <handle> --content-type media --download-media --max-media-downloads <n>` |
+| `检查 Instagram 登录健康` / `IG health check` | `health-check` | `node scripts/social-auth-recover.mjs --execute --site instagram --verify` |
+| `生成 Instagram live 验收报告` / `IG live acceptance report` | `live-acceptance-report` | `node scripts/social-live-verify.mjs --execute --site instagram --ig-account <handle>` |
+| `刷新 Instagram KB` / `IG scenario KB refresh` | `kb-refresh` | `node scripts/social-kb-refresh.mjs --execute --site instagram --ig-account <handle>` |
+
 ## Reading order
 
 1. [references/index.md](references/index.md)
