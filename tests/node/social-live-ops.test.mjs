@@ -76,6 +76,32 @@ test('social-live-report aggregates latest X and Instagram manifests and writes 
   assert.match(markdown, /x-full-archive/u);
 });
 
+test('social-live-report surfaces state-only started runs as stale when no process owns them', async (t) => {
+  const rootDir = await mkdtemp(path.join(os.tmpdir(), 'bwk-social-report-stale-'));
+  t.after(() => rm(rootDir, { recursive: true, force: true }));
+
+  const runDir = path.join(rootDir, 'instagram-stale-run');
+  await mkdir(runDir, { recursive: true });
+  await writeFile(path.join(runDir, 'state.json'), `${JSON.stringify({
+    status: 'started',
+    startedAt: '2026-04-26T00:00:00.000Z',
+    updatedAt: '2026-04-26T00:00:00.000Z',
+    siteKey: 'instagram',
+    plan: { siteKey: 'instagram', action: 'followed-users', account: 'me' },
+    artifacts: { runDir },
+  }, null, 2)}\n`, 'utf8');
+
+  const options = parseReportArgs(['--runs-root', rootDir, '--no-write']);
+  options.activeProcessCommandLines = [];
+  const report = await buildReport(options);
+
+  assert.equal(report.totalRows, 1);
+  assert.equal(report.rows[0].site, 'instagram');
+  assert.equal(report.rows[0].status, 'stale');
+  assert.equal(report.rows[0].reason, 'process-missing');
+  assert.equal(report.summary.instagram.statuses.stale, 1);
+});
+
 test('social-live-resume honors cooldown and max-attempts from manifests', async (t) => {
   const rootDir = await mkdtemp(path.join(os.tmpdir(), 'bwk-social-resume-'));
   t.after(() => rm(rootDir, { recursive: true, force: true }));

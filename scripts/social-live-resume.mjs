@@ -1,6 +1,7 @@
 // @ts-check
 
 import { readdir, readFile, stat, writeFile, mkdir } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -20,6 +21,8 @@ Options:
   --cooldown-minutes <n>            Minimum minutes since last attempt before resume. Default: 30.
   --max-attempts <n>                Maximum attempts per case/archive. Default: 3.
   --execute                         Write an execute-mode resume manifest; does not run live archive commands.
+  --auto-execute                    Wait cooldowns and run ready resume commands until stopped.
+  --max-cycles <n>                  Maximum automatic execution planning cycles. Default: 10.
   --run-root <dir>                  Output root. Default: runs/social-live-resume.
   --format <text|json>              Output format. Default: text.
   -h, --help                        Show this help.
@@ -37,6 +40,8 @@ export function parseArgs(argv) {
     cooldownMinutes: '30',
     maxAttempts: '3',
     execute: false,
+    autoExecute: false,
+    maxCycles: '10',
     runRoot: DEFAULT_RUN_ROOT,
     format: 'text',
     help: false,
@@ -51,13 +56,19 @@ export function parseArgs(argv) {
       case '--execute':
         options.execute = true;
         break;
+      case '--auto-execute':
+        options.execute = true;
+        options.autoExecute = true;
+        break;
       case '--dry-run':
         options.execute = false;
+        options.autoExecute = false;
         break;
       case '--state':
       case '--site':
       case '--cooldown-minutes':
       case '--max-attempts':
+      case '--max-cycles':
       case '--run-root':
       case '--format': {
         const { value, nextIndex } = readValue(argv, index, token);
@@ -72,7 +83,7 @@ export function parseArgs(argv) {
   }
   if (!['x', 'instagram', 'all'].includes(String(options.site))) throw new Error(`Invalid --site: ${options.site}`);
   if (!['text', 'json'].includes(String(options.format))) throw new Error(`Invalid --format: ${options.format}`);
-  for (const [flag, value] of [['cooldown-minutes', options.cooldownMinutes], ['max-attempts', options.maxAttempts]]) {
+  for (const [flag, value] of [['cooldown-minutes', options.cooldownMinutes], ['max-attempts', options.maxAttempts], ['max-cycles', options.maxCycles]]) {
     const parsed = Number(value);
     if (!Number.isFinite(parsed) || parsed < 0) throw new Error(`Invalid --${flag}: ${value}`);
   }
@@ -180,6 +191,23 @@ function shouldResume(record) {
     || record.archive?.complete === false;
 }
 
+function candidateKey(record) {
+  return `${record.site ?? ''}:${record.account ?? ''}:${record.id ?? ''}`;
+}
+
+function isCompletedRecord(record) {
+  if (record.archive?.complete === true) return true;
+  const status = String(record.status ?? '').toLowerCase();
+  return status === 'passed' && !shouldResume(record);
+}
+
+export function getNextCooldownMs(candidates) {
+  const waits = candidates
+    .map((candidate) => Number(candidate.cooldownRemainingMs))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  return waits.length ? Math.min(...waits) : 0;
+}
+
 export async function buildResumePlan(options, now = new Date()) {
   if (!options.state) throw new Error('Missing --state');
   const files = await findJsonFiles(options.state);
@@ -196,7 +224,7 @@ export async function buildResumePlan(options, now = new Date()) {
   const maxAttempts = Number(options.maxAttempts);
   const attemptsByKey = new Map();
   for (const record of siteFiltered) {
-    const key = `${record.site}:${record.account ?? ''}:${record.id}`;
+    const key = candidateKey(record);
     attemptsByKey.set(key, (attemptsByKey.get(key) ?? 0) + 1);
   }
   const candidates = siteFiltered
@@ -205,7 +233,7 @@ export async function buildResumePlan(options, now = new Date()) {
     .map((record) => {
       const lastTime = Date.parse(record.finishedAt ?? record.startedAt ?? '');
       const cooldownRemainingMs = Number.isFinite(lastTime) ? Math.max(0, cooldownMs - (now.getTime() - lastTime)) : 0;
-      const key = `${record.site}:${record.account ?? ''}:${record.id}`;
+      const key = candidateKey(record);
       const attempts = attemptsByKey.get(key) ?? 1;
       const blockedByAttempts = attempts >= maxAttempts;
       return {
@@ -218,6 +246,7 @@ export async function buildResumePlan(options, now = new Date()) {
         resumeCommand: commandForRecord(record),
       };
     });
+  const completed = siteFiltered.filter(isCompletedRecord);
   return {
     mode: options.execute ? 'execute' : 'dry-run',
     generatedAt: now.toISOString(),
@@ -226,6 +255,7 @@ export async function buildResumePlan(options, now = new Date()) {
     maxAttempts,
     candidates,
     ready: candidates.filter((candidate) => candidate.ready),
+    completed,
   };
 }
 
@@ -249,10 +279,148 @@ function printText(plan, manifestPath) {
   }
 }
 
+function defaultSleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function runShellCommand(command, context = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, {
+      cwd: context.cwd ?? REPO_ROOT,
+      shell: true,
+      stdio: 'inherit',
+    });
+    child.on('error', reject);
+    child.on('close', (exitCode, signal) => {
+      if (exitCode === 0) {
+        resolve({ exitCode, signal });
+        return;
+      }
+      const suffix = signal ? `signal ${signal}` : `exit code ${exitCode}`;
+      reject(new Error(`Resume command failed with ${suffix}: ${command}`));
+    });
+  });
+}
+
+function applySessionAttemptBlocks(ready, sessionAttemptsByKey) {
+  return ready.filter((candidate) => {
+    const sessionAttempts = sessionAttemptsByKey.get(candidateKey(candidate)) ?? 0;
+    return candidate.attempts + sessionAttempts < candidate.maxAttempts;
+  });
+}
+
+function hasOnlyMaxAttemptBlocks(candidates, sessionAttemptsByKey) {
+  return candidates.length > 0 && candidates.every((candidate) => {
+    const sessionAttempts = sessionAttemptsByKey.get(candidateKey(candidate)) ?? 0;
+    return candidate.blockedReason === 'max-attempts' || candidate.attempts + sessionAttempts >= candidate.maxAttempts;
+  });
+}
+
+export async function runResumeLoop(options, deps = {}) {
+  if (!options.state) throw new Error('Missing --state');
+  const commandRunner = deps.commandRunner ?? runShellCommand;
+  const sleep = deps.sleep ?? defaultSleep;
+  const now = deps.now ?? (() => new Date());
+  const maxCycles = Number(options.maxCycles ?? 10);
+  let state = path.resolve(options.state);
+  let stopReason = 'max-cycles';
+  let attempts = 0;
+  const history = [];
+  const sessionAttemptsByKey = new Map();
+
+  for (let cycle = 1; cycle <= maxCycles; cycle += 1) {
+    const cycleOptions = { ...options, state, execute: true };
+    const plan = await buildResumePlan(cycleOptions, now());
+    const manifestPath = await writePlan(cycleOptions, plan);
+    const ready = applySessionAttemptBlocks(plan.ready, sessionAttemptsByKey);
+    const historyEntry = {
+      cycle,
+      generatedAt: plan.generatedAt,
+      manifestPath,
+      candidateCount: plan.candidates.length,
+      readyCount: ready.length,
+      commands: [],
+    };
+    history.push(historyEntry);
+
+    if (plan.candidates.length === 0) {
+      stopReason = plan.completed.length > 0 ? 'complete' : 'no-candidates';
+      break;
+    }
+
+    if (ready.length === 0) {
+      const cooldownMs = getNextCooldownMs(plan.candidates);
+      if (cooldownMs > 0 && !hasOnlyMaxAttemptBlocks(plan.candidates, sessionAttemptsByKey)) {
+        historyEntry.cooldownMs = cooldownMs;
+        await sleep(cooldownMs);
+        continue;
+      }
+      stopReason = hasOnlyMaxAttemptBlocks(plan.candidates, sessionAttemptsByKey) ? 'max-attempts' : 'no-candidates';
+      break;
+    }
+
+    for (const candidate of ready) {
+      const key = candidateKey(candidate);
+      const result = await commandRunner(candidate.resumeCommand, {
+        candidate,
+        cycle,
+        plan,
+        options: cycleOptions,
+      });
+      sessionAttemptsByKey.set(key, (sessionAttemptsByKey.get(key) ?? 0) + 1);
+      attempts += 1;
+      historyEntry.commands.push({
+        id: candidate.id,
+        site: candidate.site,
+        command: candidate.resumeCommand,
+        result,
+      });
+      const nextState = firstString(result?.statePath, result?.manifestPath);
+      if (nextState) state = path.resolve(nextState);
+    }
+  }
+
+  return {
+    mode: 'execute-loop',
+    stopReason,
+    cycles: history.length,
+    attempts,
+    finalState: state,
+    history,
+  };
+}
+
+function printLoopText(result) {
+  process.stdout.write('social-live-resume execute loop\n');
+  process.stdout.write(`Stop reason: ${result.stopReason}\n`);
+  process.stdout.write(`Cycles: ${result.cycles}\n`);
+  process.stdout.write(`Attempts: ${result.attempts}\n`);
+  process.stdout.write(`Final state: ${result.finalState}\n`);
+  for (const cycle of result.history) {
+    process.stdout.write(`- cycle ${cycle.cycle}: ready ${cycle.readyCount}/${cycle.candidateCount}\n`);
+    if (cycle.cooldownMs) process.stdout.write(`  waited: ${cycle.cooldownMs}ms\n`);
+    for (const command of cycle.commands) {
+      process.stdout.write(`  ran: ${command.id} [${command.site ?? 'unknown'}]\n`);
+      process.stdout.write(`  command: ${command.command}\n`);
+    }
+  }
+}
+
 export async function main(argv) {
   const options = parseArgs(argv);
   if (options.help) {
     process.stdout.write(`${HELP}\n`);
+    return;
+  }
+  if (options.autoExecute) {
+    const result = await runResumeLoop(options);
+    if (options.format === 'json') {
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    } else {
+      printLoopText(result);
+    }
     return;
   }
   const plan = await buildResumePlan(options);
