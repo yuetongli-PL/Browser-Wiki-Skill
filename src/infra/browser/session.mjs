@@ -522,7 +522,7 @@ export class BrowserSession {
           },
         });
       } else {
-        if (this.client && this.targetId) {
+        if (this.client && this.targetId && this.reusedBrowserInstance !== true) {
           try {
             await this.client.send('Target.closeTarget', { targetId: this.targetId });
           } catch {

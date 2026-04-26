@@ -413,6 +413,14 @@ function isConfirmedLoginState(loginState) {
   return loginState?.identityConfirmed === true;
 }
 
+async function assistManualLoginStep(session, authConfig) {
+  return await session.callPageFunction(pageAssistManualLoginStep, {
+    usernameSelectors: authConfig.usernameSelectors,
+    passwordSelectors: authConfig.passwordSelectors,
+    challengeSelectors: authConfig.challengeSelectors,
+  });
+}
+
 function dedupeSortedStrings(values) {
   return [...new Set((values ?? []).map((value) => String(value ?? '').trim()).filter(Boolean))].sort((left, right) => left.localeCompare(right, 'en'));
 }
@@ -776,6 +784,123 @@ async function pageAttemptCredentialLogin(config, credentials) {
   };
 }
 
+async function pageAssistManualLoginStep(config) {
+  const selectors = (value) => Array.isArray(value) ? value.filter(Boolean) : [];
+  const normalize = (value) => String(value ?? '').replace(/\s+/gu, ' ').trim();
+  const isVisible = (node) => {
+    if (!(node instanceof Element)) {
+      return false;
+    }
+    const style = window.getComputedStyle(node);
+    if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || '1') === 0) {
+      return false;
+    }
+    const rect = node.getBoundingClientRect();
+    return rect.width >= 4 && rect.height >= 4;
+  };
+  const firstVisible = (selectorList) => {
+    for (const selector of selectors(selectorList)) {
+      try {
+        const node = document.querySelector(selector);
+        if (isVisible(node)) {
+          return { node, selector };
+        }
+      } catch {
+        // Ignore invalid selectors.
+      }
+    }
+    return null;
+  };
+  const clickNode = (node) => {
+    if (!(node instanceof HTMLElement)) {
+      return false;
+    }
+    node.focus?.();
+    for (const eventName of ['mouseover', 'mousedown', 'mouseup', 'click']) {
+      node.dispatchEvent(new MouseEvent(eventName, { bubbles: true, cancelable: true }));
+    }
+    node.click?.();
+    return true;
+  };
+  const submitWithEnter = (input) => {
+    if (!(input instanceof HTMLElement)) {
+      return false;
+    }
+    input.focus?.();
+    for (const eventName of ['keydown', 'keypress', 'keyup']) {
+      input.dispatchEvent(new KeyboardEvent(eventName, {
+        key: 'Enter',
+        code: 'Enter',
+        keyCode: 13,
+        which: 13,
+        bubbles: true,
+        cancelable: true,
+      }));
+    }
+    return true;
+  };
+
+  const passwordInput = firstVisible(config.passwordSelectors)?.node ?? null;
+  if (passwordInput instanceof HTMLInputElement) {
+    return { status: 'password-visible' };
+  }
+
+  const challengeNode = firstVisible(config.challengeSelectors)?.node ?? null;
+  if (challengeNode) {
+    return {
+      status: 'challenge-visible',
+      challengeText: normalize(challengeNode.textContent || challengeNode.getAttribute?.('placeholder') || ''),
+    };
+  }
+
+  const usernameMatch = firstVisible(config.usernameSelectors);
+  const usernameInput = usernameMatch?.node ?? null;
+  if (!(usernameInput instanceof HTMLInputElement)) {
+    return { status: 'username-not-visible' };
+  }
+  if (!normalize(usernameInput.value)) {
+    return { status: 'username-empty', selector: usernameMatch.selector };
+  }
+
+  const buttonCandidates = Array.from(document.querySelectorAll('button, div[role="button"], [data-testid]'))
+    .filter(isVisible)
+    .filter((node) => {
+      const text = normalize(node.textContent || node.getAttribute?.('aria-label') || node.getAttribute?.('data-testid') || '');
+      if (!text) {
+        return false;
+      }
+      return /^(next|continue)$/iu.test(text)
+        || /next/iu.test(text)
+        || /continue/iu.test(text)
+        || /LoginForm_Login_Button/u.test(text);
+    });
+
+  for (const node of buttonCandidates) {
+    const disabled = node.hasAttribute?.('disabled')
+      || node.getAttribute?.('aria-disabled') === 'true'
+      || String(node.className || '').includes('disabled');
+    if (disabled) {
+      continue;
+    }
+    if (clickNode(node)) {
+      return {
+        status: 'next-clicked',
+        selector: usernameMatch.selector,
+        buttonText: normalize(node.textContent || node.getAttribute?.('aria-label') || node.getAttribute?.('data-testid') || ''),
+      };
+    }
+  }
+
+  if (submitWithEnter(usernameInput)) {
+    return {
+      status: 'next-submitted-with-enter',
+      selector: usernameMatch.selector,
+    };
+  }
+
+  return { status: 'next-control-not-found', selector: usernameMatch.selector };
+}
+
 export async function resolveSiteAuthProfile(inputUrl, options = {}) {
   if (options.siteProfile) {
     return {
@@ -1130,21 +1255,29 @@ export async function waitForAuthenticatedSession(
   session,
   authConfig,
   {
+    assistManualLogin = false,
     timeoutMs = DEFAULT_LOGIN_WAIT_TIMEOUT_MS,
     pollMs = 1_000,
   } = {},
 ) {
   const deadline = Date.now() + timeoutMs;
   let lastState = null;
+  let lastError = null;
   while (Date.now() < deadline) {
+    if (assistManualLogin) {
+      try {
+        await assistManualLoginStep(session, authConfig);
+      } catch {
+        // Manual login assistance is best effort; keep polling for completed auth.
+      }
+    }
     try {
       lastState = await inspectLoginState(session, authConfig);
+      lastError = null;
     } catch (error) {
-      return {
-        status: 'session-unavailable',
-        loginState: lastState,
-        error,
-      };
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+      continue;
     }
     if (isConfirmedLoginState(lastState)) {
       return {
@@ -1158,6 +1291,7 @@ export async function waitForAuthenticatedSession(
   return {
     status: 'timeout',
     loginState: lastState,
+    error: lastError,
   };
 }
 
@@ -1236,6 +1370,18 @@ export async function ensureAuthenticatedSession(session, inputUrl, settings = {
   if (shouldNavigateToPostLogin) {
     await session.navigateAndWait(authConfig.postLoginUrl, buildAuthWaitPolicy(settings.timeoutMs ?? 30_000));
     initialState = await inspectLoginState(session, authConfig);
+  }
+  if (
+    !isConfirmedLoginState(initialState)
+    && (initialState?.loginStateDetected === true || initialState?.loggedIn === true)
+    && initialState?.hasLoginForm !== true
+    && initialState?.hasChallenge !== true
+  ) {
+    const waited = await waitForAuthenticatedSession(session, authConfig, {
+      timeoutMs: Math.min(20_000, settings.timeoutMs ?? 30_000),
+      pollMs: 800,
+    });
+    initialState = waited.loginState ?? initialState;
   }
   if (isConfirmedLoginState(initialState)) {
     return {

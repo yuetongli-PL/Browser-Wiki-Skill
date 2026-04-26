@@ -1,0 +1,312 @@
+{
+  "host": "x.com",
+  "archetype": "navigation-catalog",
+  "schemaVersion": 1,
+  "primaryArchetype": "catalog-detail",
+  "version": 1,
+  "pageTypes": {
+    "homeExact": [
+      "/home"
+    ],
+    "homePrefixes": [],
+    "searchResultsPrefixes": [
+      "/search"
+    ],
+    "contentDetailPrefixes": [
+      "/i/status/"
+    ],
+    "authorPrefixes": [
+      "/i/user/"
+    ],
+    "authorListExact": [
+      "/notifications",
+      "/messages",
+      "/i/bookmarks"
+    ],
+    "authorListPrefixes": [
+      "/notifications",
+      "/messages",
+      "/i/bookmarks"
+    ],
+    "authorDetailPrefixes": [
+      "/i/user/"
+    ],
+    "chapterPrefixes": [],
+    "historyPrefixes": [],
+    "authPrefixes": [
+      "/i/flow/login",
+      "/i/flow/signup",
+      "/login",
+      "/signup"
+    ],
+    "categoryPrefixes": [
+      "/explore"
+    ]
+  },
+  "search": {
+    "formSelectors": [
+      "form[role=\"search\"]",
+      "div[data-testid=\"SearchBox_Search_Input\"]"
+    ],
+    "inputSelectors": [
+      "input[data-testid=\"SearchBox_Search_Input\"]",
+      "input[aria-label*=\"Search\"]",
+      "input[type=\"search\"]"
+    ],
+    "submitSelectors": [
+      "button[type=\"submit\"]",
+      "div[data-testid=\"typeaheadResult\"]"
+    ],
+    "queryParamNames": [
+      "q"
+    ],
+    "resultTitleSelectors": [
+      "title",
+      "h1",
+      "h2"
+    ],
+    "resultBookSelectors": [
+      "a[href*=\"/status/\"]"
+    ],
+    "defaultQueries": [
+      "open source"
+    ],
+    "knownQueries": [
+      {
+        "query": "open source",
+        "title": "Open source",
+        "url": "https://x.com/opensource/status/1646527756281315330",
+        "authorName": "Open Source"
+      }
+    ]
+  },
+  "validationSamples": {
+    "videoSearchQuery": "open source",
+    "videoDetailUrl": "https://x.com/opensource/status/1646527756281315330",
+    "authorUrl": "https://x.com/opensource",
+    "authorVideosUrl": "https://x.com/opensource",
+    "categoryPopularUrl": "https://x.com/explore"
+  },
+  "authValidationSamples": {
+    "homeUrl": "https://x.com/home",
+    "notificationsUrl": "https://x.com/notifications",
+    "bookmarksUrl": "https://x.com/i/bookmarks",
+    "authorPostsUrl": "https://x.com/opensource",
+    "authorRepliesUrl": "https://x.com/opensource/with_replies",
+    "authorMediaUrl": "https://x.com/opensource/media",
+    "authorHighlightsUrl": "https://x.com/opensource/highlights",
+    "authorFollowingUrl": "https://x.com/opensource/following",
+    "searchLatestUrl": "https://x.com/search?q=open%20source&src=typed_query&f=live"
+  },
+  "pipeline": {
+    "skipBookContent": true
+  },
+  "authSession": {
+    "loginUrl": "https://x.com/i/flow/login",
+    "postLoginUrl": "https://x.com/home",
+    "verificationUrl": "https://x.com/home",
+    "keepaliveUrl": "https://x.com/home",
+    "keepaliveIntervalMinutes": 180,
+    "cooldownMinutesAfterRisk": 180,
+    "preferVisibleBrowserForAuthenticatedFlows": true,
+    "requireStableNetworkForAuthenticatedFlows": true,
+    "reuseLoginStateByDefault": true,
+    "autoLoginByDefault": false,
+    "credentialTarget": "BrowserWikiSkill:x.com",
+    "loginIndicatorSelectors": [
+      "a[data-testid=\"AppTabBar_Home_Link\"]",
+      "a[href=\"/home\"][role=\"link\"]",
+      "a[data-testid=\"SideNav_NewTweet_Button\"]",
+      "a[href=\"/compose/post\"]",
+      "div[data-testid=\"SideNav_AccountSwitcher_Button\"]",
+      "div[data-testid=\"SideNav_AccountSwitcher_Button\"] [data-testid^=\"UserAvatar-Container-\"]",
+      "a[data-testid=\"AppTabBar_Profile_Link\"]",
+      "a[data-testid=\"AppTabBar_Profile_Link\"][href^=\"/\"]",
+      "a[href*=\"/settings/profile\"]"
+    ],
+    "loginEntrySelectors": [
+      "a[href*=\"/i/flow/login\"]",
+      "a[href*=\"/login\"]"
+    ],
+    "usernameSelectors": [
+      "input[autocomplete=\"username\"]",
+      "input[name=\"text\"]",
+      "input[data-testid=\"ocfEnterTextTextInput\"]"
+    ],
+    "passwordSelectors": [
+      "input[name=\"password\"]",
+      "input[autocomplete=\"current-password\"]"
+    ],
+    "submitSelectors": [
+      "button[type=\"submit\"]",
+      "div[data-testid=\"LoginForm_Login_Button\"]",
+      "[data-testid=\"LoginForm_Login_Button\"]"
+    ],
+    "loggedOutIndicatorSelectors": [
+      "a[href*=\"/i/flow/login\"]",
+      "a[href*=\"/i/flow/signup\"]",
+      "[data-testid=\"loginButton\"]",
+      "input[autocomplete=\"username\"]",
+      "input[name=\"text\"]",
+      "input[name=\"password\"]"
+    ],
+    "challengeSelectors": [
+      "iframe[src*=\"captcha\"]",
+      "[data-testid*=\"verification\"]",
+      "[data-testid*=\"ocf\"]",
+      "input[name=\"challenge_response\"]",
+      "input[data-testid=\"ocfEnterTextTextInput\"]"
+    ],
+    "authRequiredPathPrefixes": [
+      "/home",
+      "/notifications",
+      "/messages",
+      "/i/bookmarks"
+    ]
+  },
+  "downloader": {
+    "defaultOutputRoot": "x-downloads",
+    "requiresLoginForHighestQuality": true,
+    "authorVideoListPathPrefixes": [
+      "/"
+    ],
+    "maxBatchItems": 100,
+    "defaultContainer": "mixed",
+    "defaultNamingStrategy": "account-date-id"
+  },
+  "social": {
+    "defaultOutputRoot": "x-downloads",
+    "requiresLogin": true,
+    "supportedActions": [
+      "account-info",
+      "profile-content",
+      "profile-following",
+      "profile-followers",
+      "followed-users",
+      "followed-posts-by-date",
+      "search",
+      "full-archive"
+    ],
+    "contentTypes": [
+      "posts",
+      "replies",
+      "media",
+      "highlights"
+    ],
+    "urlTemplates": {
+      "profile": "https://x.com/{account}",
+      "posts": "https://x.com/{account}",
+      "replies": "https://x.com/{account}/with_replies",
+      "media": "https://x.com/{account}/media",
+      "highlights": "https://x.com/{account}/highlights",
+      "following": "https://x.com/{account}/following",
+      "followers": "https://x.com/{account}/followers",
+      "search": "https://x.com/search?q={query}&src=typed_query&f=live"
+    },
+    "selectors": {
+      "postItems": "article[role=\"article\"]",
+      "postText": "div[data-testid=\"tweetText\"]",
+      "postLinks": "a[href*=\"/status/\"]",
+      "timestamps": "time[datetime]",
+      "media": "img, video, source",
+      "currentProfileLink": "a[data-testid=\"AppTabBar_Profile_Link\"][href^=\"/\"]",
+      "accountName": "div[data-testid=\"UserName\"], h1",
+      "accountBio": "div[data-testid=\"UserDescription\"]",
+      "relationLinks": "a[href^=\"/\"][role=\"link\"]"
+    },
+    "followedFeed": {
+      "route": "https://x.com/search?q=filter%3Afollows%20since%3A{date}%20until%3A{nextDate}&src=typed_query&f=live",
+      "dateFilterMode": "search-operator"
+    },
+    "archive": {
+      "defaultStrategy": "api-cursor-with-dom-fallback",
+      "apiEndpointPatterns": [
+        "/i/api/graphql/",
+        "/i/api/2/search/"
+      ],
+      "cursorTypes": [
+        "Bottom",
+        "ShowMoreThreads"
+      ],
+      "fallbackStrategy": "deep-dom-scroll",
+      "completenessBoundedBy": [
+        "api cursor availability",
+        "platform search limits",
+        "maxItems",
+        "maxApiPages"
+      ]
+    }
+  },
+  "sampling": {
+    "searchResultContentLimit": 5,
+    "authorContentLimit": 10,
+    "categoryContentLimit": 10,
+    "fallbackContentLimitWithSearch": 8
+  },
+  "navigation": {
+    "allowedHosts": [
+      "x.com",
+      "www.x.com"
+    ],
+    "contentPathPrefixes": [
+      "/i/status/"
+    ],
+    "authorPathPrefixes": [
+      "/i/user/"
+    ],
+    "authorListPathPrefixes": [
+      "/notifications",
+      "/messages",
+      "/i/bookmarks"
+    ],
+    "authorDetailPathPrefixes": [
+      "/i/user/"
+    ],
+    "categoryPathPrefixes": [
+      "/explore"
+    ],
+    "utilityPathPrefixes": [
+      "/home",
+      "/notifications",
+      "/messages",
+      "/i/bookmarks",
+      "/settings"
+    ],
+    "authPathPrefixes": [
+      "/i/flow/login",
+      "/i/flow/signup",
+      "/login",
+      "/signup"
+    ],
+    "categoryLabelKeywords": [
+      "Explore",
+      "Search",
+      "Trending"
+    ]
+  },
+  "contentDetail": {
+    "titleSelectors": [
+      "article[role=\"article\"] div[data-testid=\"tweetText\"]",
+      "article[role=\"article\"]",
+      "title"
+    ],
+    "authorNameSelectors": [
+      "article[role=\"article\"] a[href^=\"/\"][role=\"link\"]",
+      "div[data-testid=\"User-Name\"] a[href^=\"/\"]"
+    ],
+    "authorLinkSelectors": [
+      "article[role=\"article\"] a[href^=\"/\"][role=\"link\"]",
+      "div[data-testid=\"User-Name\"] a[href^=\"/\"]"
+    ]
+  },
+  "author": {
+    "titleSelectors": [
+      "div[data-testid=\"UserName\"]",
+      "h1",
+      "title"
+    ],
+    "workLinkSelectors": [
+      "a[href*=\"/status/\"]"
+    ]
+  }
+}

@@ -174,6 +174,30 @@ const downloaderSchema = {
   },
 };
 
+const looseObjectSchema = {
+  type: 'object',
+  additionalProperties: true,
+  properties: {},
+};
+
+const socialSchema = {
+  type: 'object',
+  additionalProperties: true,
+  properties: {
+    defaultOutputRoot: nonEmptyString(),
+    requiresLogin: { type: 'boolean' },
+    supportedActions: stringArray({ minItems: 1 }),
+    contentTypes: stringArray({ minItems: 1 }),
+    urlTemplates: looseObjectSchema,
+    selectors: looseObjectSchema,
+    profileContent: looseObjectSchema,
+    relations: looseObjectSchema,
+    followedFeed: looseObjectSchema,
+    search: looseObjectSchema,
+    media: looseObjectSchema,
+  },
+};
+
 const searchSchema = {
   type: 'object',
   additionalProperties: false,
@@ -268,6 +292,7 @@ const navigationCatalogSchema = {
     authValidationSamples: authValidationSamplesSchema,
     authSession: authSessionSchema,
     downloader: downloaderSchema,
+    social: socialSchema,
     pipeline: {
       type: 'object',
       additionalProperties: false,

@@ -20,6 +20,7 @@ node .\src\entrypoints\sites\site-scaffold.mjs https://<host>/ --archetype <navi
 - For chapter/content sites, fill `search`, `bookDetail`, and `chapter`.
 - Prefer selectors that survive minor DOM changes: start with semantic attributes, then add class-based fallbacks.
 - Add at least one `knownQueries` entry once a query and destination URL are stable enough to regression-test manually.
+- For sites with dynamic first-segment routes, such as `/<handle>/status/<id>` or `/<username>/`, add a small adapter instead of using `/` as a broad author prefix.
 
 ## 3. Verify the repository artifact map
 

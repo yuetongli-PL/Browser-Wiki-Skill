@@ -1,0 +1,291 @@
+{
+  "host": "www.instagram.com",
+  "archetype": "navigation-catalog",
+  "schemaVersion": 1,
+  "primaryArchetype": "catalog-detail",
+  "version": 1,
+  "pageTypes": {
+    "homeExact": [
+      "/"
+    ],
+    "homePrefixes": [],
+    "searchResultsPrefixes": [
+      "/explore/search"
+    ],
+    "contentDetailPrefixes": [
+      "/p/",
+      "/reel/",
+      "/tv/"
+    ],
+    "authorPrefixes": [
+      "/__profile__/"
+    ],
+    "authorListExact": [
+      "/direct/inbox"
+    ],
+    "authorListPrefixes": [
+      "/direct"
+    ],
+    "authorDetailPrefixes": [
+      "/__profile__/"
+    ],
+    "chapterPrefixes": [],
+    "historyPrefixes": [],
+    "authPrefixes": [
+      "/accounts/login",
+      "/accounts/emailsignup",
+      "/accounts/password/reset",
+      "/challenge"
+    ],
+    "categoryPrefixes": [
+      "/explore",
+      "/explore/tags",
+      "/popular",
+      "/reels"
+    ]
+  },
+  "search": {
+    "formSelectors": [
+      "form[role=\"search\"]",
+      "div[role=\"search\"]"
+    ],
+    "inputSelectors": [
+      "input[placeholder*=\"Search\"]",
+      "input[aria-label*=\"Search\"]",
+      "input[type=\"search\"]"
+    ],
+    "submitSelectors": [
+      "button[type=\"submit\"]",
+      "a[href^=\"/explore/tags/\"]",
+      "a[href^=\"/\"]"
+    ],
+    "queryParamNames": [
+      "q"
+    ],
+    "resultTitleSelectors": [
+      "title",
+      "h1",
+      "h2"
+    ],
+    "resultBookSelectors": [
+      "a[href^=\"/p/\"]",
+      "a[href^=\"/reel/\"]",
+      "a[href^=\"/tv/\"]"
+    ],
+    "defaultQueries": [
+      "open source"
+    ],
+    "knownQueries": [
+      {
+        "query": "open source",
+        "title": "Open source",
+        "url": "https://www.instagram.com/p/Cu2D2LxJw1a/",
+        "authorName": "Instagram"
+      }
+    ]
+  },
+  "validationSamples": {
+    "videoSearchQuery": "open source",
+    "videoDetailUrl": "https://www.instagram.com/p/Cu2D2LxJw1a/",
+    "authorUrl": "https://www.instagram.com/instagram/",
+    "authorVideosUrl": "https://www.instagram.com/instagram/",
+    "categoryPopularUrl": "https://www.instagram.com/explore/"
+  },
+  "authValidationSamples": {
+    "loginUrl": "https://www.instagram.com/accounts/login/",
+    "directInboxUrl": "https://www.instagram.com/direct/inbox/",
+    "authorPostsUrl": "https://www.instagram.com/instagram/",
+    "authorReelsUrl": "https://www.instagram.com/instagram/reels/",
+    "authorFollowingUrl": "https://www.instagram.com/instagram/following/",
+    "authorFollowersUrl": "https://www.instagram.com/instagram/followers/",
+    "searchUrl": "https://www.instagram.com/explore/search/?q=open%20source"
+  },
+  "pipeline": {
+    "skipBookContent": true
+  },
+  "authSession": {
+    "loginUrl": "https://www.instagram.com/accounts/login/",
+    "postLoginUrl": "https://www.instagram.com/",
+    "verificationUrl": "https://www.instagram.com/",
+    "keepaliveUrl": "https://www.instagram.com/",
+    "keepaliveIntervalMinutes": 180,
+    "cooldownMinutesAfterRisk": 180,
+    "preferVisibleBrowserForAuthenticatedFlows": true,
+    "requireStableNetworkForAuthenticatedFlows": true,
+    "reuseLoginStateByDefault": true,
+    "autoLoginByDefault": false,
+    "credentialTarget": "BrowserWikiSkill:instagram.com",
+    "loginIndicatorSelectors": [
+      "a[href=\"/\"][role=\"link\"]",
+      "a[href=\"/direct/inbox/\"]",
+      "svg[aria-label=\"Home\"]"
+    ],
+    "loginEntrySelectors": [
+      "a[href*=\"/accounts/login\"]",
+      "button[type=\"submit\"]"
+    ],
+    "loggedOutIndicatorSelectors": [
+      "a[href*=\"/accounts/login\"]",
+      "a[href*=\"/accounts/emailsignup\"]"
+    ],
+    "challengeSelectors": [
+      "form[action*=\"/challenge/\"]",
+      "iframe[src*=\"captcha\"]"
+    ],
+    "authRequiredPathPrefixes": [
+      "/direct",
+      "/accounts/edit"
+    ]
+  },
+  "downloader": {
+    "defaultOutputRoot": "instagram-downloads",
+    "requiresLoginForHighestQuality": true,
+    "authorVideoListPathPrefixes": [
+      "/"
+    ],
+    "maxBatchItems": 100,
+    "defaultContainer": "mixed",
+    "defaultNamingStrategy": "account-date-id"
+  },
+  "social": {
+    "defaultOutputRoot": "instagram-downloads",
+    "requiresLogin": true,
+    "supportedActions": [
+      "account-info",
+      "profile-content",
+      "profile-following",
+      "profile-followers",
+      "followed-users",
+      "followed-posts-by-date",
+      "search",
+      "full-archive"
+    ],
+    "contentTypes": [
+      "posts",
+      "reels",
+      "media",
+      "highlights"
+    ],
+    "urlTemplates": {
+      "profile": "https://www.instagram.com/{account}/",
+      "posts": "https://www.instagram.com/{account}/",
+      "reels": "https://www.instagram.com/{account}/reels/",
+      "media": "https://www.instagram.com/{account}/",
+      "highlights": "https://www.instagram.com/{account}/",
+      "following": "https://www.instagram.com/{account}/following/",
+      "followers": "https://www.instagram.com/{account}/followers/",
+      "search": "https://www.instagram.com/explore/search/?q={query}"
+    },
+    "selectors": {
+      "postItems": "article, main a[href^=\"/p/\"], main a[href^=\"/reel/\"], main a[href^=\"/tv/\"]",
+      "postText": "h1, span, div",
+      "postLinks": "a[href^=\"/p/\"], a[href^=\"/reel/\"], a[href^=\"/tv/\"]",
+      "timestamps": "time[datetime]",
+      "media": "img, video, source",
+      "currentProfileLink": "a[href^=\"/\"][role=\"link\"]",
+      "accountName": "header h1, header h2, h1",
+      "accountBio": "header section, header",
+      "relationLinks": "a[href^=\"/\"][role=\"link\"]"
+    },
+    "followedFeed": {
+      "route": "https://www.instagram.com/",
+      "dateFilterMode": "followed-profile-date-scan"
+    },
+    "archive": {
+      "defaultStrategy": "api-cursor-with-dom-fallback",
+      "followedDateStrategy": "following-dialog-profile-detail-scan",
+      "apiEndpointPatterns": [
+        "/graphql/query",
+        "/api/graphql",
+        "/api/v1/feed",
+        "/api/v1/media",
+        "/api/v1/users"
+      ],
+      "fallbackStrategy": "deep-dom-scroll-with-detail-date-verification",
+      "completenessBoundedBy": [
+        "dialog following pagination",
+        "profile visibility",
+        "detail page timestamp availability",
+        "maxUsers",
+        "maxItems"
+      ]
+    }
+  },
+  "sampling": {
+    "searchResultContentLimit": 5,
+    "authorContentLimit": 10,
+    "categoryContentLimit": 10,
+    "fallbackContentLimitWithSearch": 8
+  },
+  "navigation": {
+    "allowedHosts": [
+      "www.instagram.com",
+      "instagram.com"
+    ],
+    "contentPathPrefixes": [
+      "/p/",
+      "/reel/",
+      "/tv/"
+    ],
+    "authorPathPrefixes": [
+      "/__profile__/"
+    ],
+    "authorListPathPrefixes": [
+      "/direct"
+    ],
+    "authorDetailPathPrefixes": [
+      "/__profile__/"
+    ],
+    "categoryPathPrefixes": [
+      "/explore",
+      "/explore/tags",
+      "/reels"
+    ],
+    "utilityPathPrefixes": [
+      "/direct",
+      "/accounts/edit",
+      "/accounts/meta_verified",
+      "/web",
+      "/about",
+      "/privacy"
+    ],
+    "authPathPrefixes": [
+      "/accounts/login",
+      "/accounts/emailsignup",
+      "/accounts/password/reset",
+      "/challenge"
+    ],
+    "categoryLabelKeywords": [
+      "Explore",
+      "Tags",
+      "Reels"
+    ]
+  },
+  "contentDetail": {
+    "titleSelectors": [
+      "article h1",
+      "article",
+      "title"
+    ],
+    "authorNameSelectors": [
+      "article header a[href^=\"/\"]",
+      "a[role=\"link\"][href^=\"/\"]"
+    ],
+    "authorLinkSelectors": [
+      "article header a[href^=\"/\"]",
+      "a[role=\"link\"][href^=\"/\"]"
+    ]
+  },
+  "author": {
+    "titleSelectors": [
+      "header h2",
+      "h1",
+      "title"
+    ],
+    "workLinkSelectors": [
+      "a[href^=\"/p/\"]",
+      "a[href^=\"/reel/\"]",
+      "a[href^=\"/tv/\"]"
+    ]
+  }
+}

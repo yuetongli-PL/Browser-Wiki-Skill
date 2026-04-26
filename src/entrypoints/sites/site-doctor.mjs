@@ -1476,11 +1476,18 @@ function buildNextActions(report, sample) {
       || report?.authSession?.bootstrapStatus === 'credentials-unavailable'
       || report?.authSession?.currentUrl?.startsWith?.('https://www.xiaohongshu.com/login')
     );
+  const genericAuthBootstrapNeeded = !isXiaohongshuUrl(report?.site?.url)
+    && report?.authSession
+    && report?.sessionReuseWorked === false;
+  const authSiteLabel = report?.site?.siteKey ?? report?.site?.host ?? 'site';
+  const authEnvToken = String(authSiteLabel).toUpperCase().replace(/[^A-Z0-9]+/gu, '_');
   return uniqueSortedStrings([
     report.profile.status === 'fail' ? 'Fix profile validation errors before rerunning site-doctor.' : null,
     !sample ? 'Add profile.validationSamples.videoSearchQuery, profile.search.knownQueries[0], or pass --query for search validation.' : null,
     xiaohongshuAuthBootstrapNeeded ? 'Run Xiaohongshu site-login in a visible browser and complete one manual login so /notification can be reused.' : null,
     xiaohongshuAuthBootstrapNeeded ? 'After manual login finishes, rerun site-doctor to validate notification-inbox with the persistent Xiaohongshu profile.' : null,
+    genericAuthBootstrapNeeded ? `Run ${authSiteLabel} site-login in a visible browser: node .\\src\\entrypoints\\sites\\site-login.mjs ${report.site.url} --no-headless --reuse-login-state.` : null,
+    genericAuthBootstrapNeeded ? `Reuse an existing browser session with --user-data-dir or BWS_${authEnvToken}_USER_DATA_DIR, then rerun site-doctor.` : null,
     report.search?.status === 'fail' ? 'Update search selectors or the sample query until a search-results page is reachable.' : null,
     report.detail?.status === 'fail' ? 'Confirm content/detail path prefixes and result link selectors.' : null,
     report.author?.status === 'fail' ? 'Verify author path prefixes and author link selectors.' : null,
@@ -1835,6 +1842,7 @@ export async function siteDoctor(inputUrl, options = {}, deps = {}) {
       adapter: resolvedSite?.adapter ?? null,
     });
     report.adapterRecommendation = buildAdapterRecommendation(siteIdentity.adapterId);
+    report.site.siteKey = siteIdentity.siteKey ?? null;
     if (report.adapterRecommendation.startsWith('site-specific-adapter:')) {
       report.warnings.push(`Using existing site-specific adapter ${siteIdentity.adapterId}.`);
     }
@@ -1851,7 +1859,9 @@ export async function siteDoctor(inputUrl, options = {}, deps = {}) {
         toSemanticPageType,
       },
     });
-    if (scenarioSuite) {
+    const authSiteLabel = scenarioSuite?.siteLabel ?? siteIdentity.siteKey ?? settings.host;
+    const shouldProbeAuthSession = Boolean(validatedProfile.profile?.authSession);
+    if (shouldProbeAuthSession) {
       try {
         keepalivePreflight = await runtime.runAuthenticatedKeepalivePreflight(inputUrl, {
           profilePath: settings.profilePath,
@@ -1871,7 +1881,7 @@ export async function siteDoctor(inputUrl, options = {}, deps = {}) {
         });
         if (keepalivePreflight?.ran) {
           report.warnings.push(
-            `Ran ${scenarioSuite.siteLabel} keepalive preflight (${keepalivePreflight.trigger ?? keepalivePreflight.reason ?? 'keepalive'}) before doctor validation; status=${keepalivePreflight.keepaliveReport?.keepalive?.status ?? 'unknown'}.`,
+            `Ran ${authSiteLabel} keepalive preflight (${keepalivePreflight.trigger ?? keepalivePreflight.reason ?? 'keepalive'}) before doctor validation; status=${keepalivePreflight.keepaliveReport?.keepalive?.status ?? 'unknown'}.`,
           );
         }
       } catch (error) {
@@ -1886,7 +1896,7 @@ export async function siteDoctor(inputUrl, options = {}, deps = {}) {
           keepaliveReport: null,
           error: error?.message ?? String(error),
         };
-        report.warnings.push(`Could not run ${scenarioSuite.siteLabel} keepalive preflight: ${error.message ?? String(error)}`);
+        report.warnings.push(`Could not run ${authSiteLabel} keepalive preflight: ${error.message ?? String(error)}`);
       }
 
       try {
@@ -1922,19 +1932,19 @@ export async function siteDoctor(inputUrl, options = {}, deps = {}) {
             }
           : null;
         if (authProbe.attempted && !authProbe.authAvailable) {
-          report.warnings.push(`No reusable logged-in ${scenarioSuite.siteLabel} session was detected; authenticated-only scenarios may be skipped.`);
+          report.warnings.push(`No reusable logged-in ${authSiteLabel} session was detected; authenticated-only scenarios may be skipped.`);
         }
         if (authProbe.bootstrapAttempted && authProbe.bootstrapStatus) {
-          report.warnings.push(`Attempted ${scenarioSuite.siteLabel} auth bootstrap via site-login; status=${authProbe.bootstrapStatus}.`);
+          report.warnings.push(`Attempted ${authSiteLabel} auth bootstrap via site-login; status=${authProbe.bootstrapStatus}.`);
         }
         if (authProbe.bootstrapManualLoginRequired) {
-          report.warnings.push(`Automatic ${scenarioSuite.siteLabel} login bootstrap could not authenticate; complete one manual login in the visible browser to reuse authenticated scenarios.`);
+          report.warnings.push(`Automatic ${authSiteLabel} login bootstrap could not authenticate; complete one manual login in the visible browser to reuse authenticated scenarios.`);
         }
         if (authProbe.bootstrapError) {
-          report.warnings.push(`Could not complete ${scenarioSuite.siteLabel} auth bootstrap: ${authProbe.bootstrapError}`);
+          report.warnings.push(`Could not complete ${authSiteLabel} auth bootstrap: ${authProbe.bootstrapError}`);
         }
         if (authProbe.attempted && authProbe.profileQuarantined) {
-          report.warnings.push(`Reusable ${scenarioSuite.siteLabel} profile was quarantined for fingerprint ${authProbe.networkIdentityFingerprint ?? 'unknown'}.`);
+          report.warnings.push(`Reusable ${authSiteLabel} profile was quarantined for fingerprint ${authProbe.networkIdentityFingerprint ?? 'unknown'}.`);
         }
       } catch (error) {
         authProbe = {
@@ -1988,7 +1998,7 @@ export async function siteDoctor(inputUrl, options = {}, deps = {}) {
             thresholdMinutes: keepalivePreflight?.thresholdMinutes ?? null,
           },
         };
-        report.warnings.push(`Could not probe reusable ${scenarioSuite.siteLabel} login state: ${error.message ?? String(error)}`);
+        report.warnings.push(`Could not probe reusable ${authSiteLabel} login state: ${error.message ?? String(error)}`);
       }
     }
   } catch (error) {

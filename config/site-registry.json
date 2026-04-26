@@ -46,6 +46,42 @@
       "siteKey": "xiaohongshu",
       "adapterId": "xiaohongshu",
       "repoSkillDir": "skills/xiaohongshu-explore"
+    },
+    "x.com": {
+      "canonicalBaseUrl": "https://x.com/",
+      "siteArchetype": "catalog-detail",
+      "host": "x.com",
+      "siteKey": "x",
+      "adapterId": "x",
+      "downloadEntrypoint": "src/entrypoints/sites/x-action.mjs",
+      "repoSkillDir": "skills/x",
+      "scriptLanguage": "python",
+      "interpreterRequired": "pypy3",
+      "templateVersion": 3,
+      "capabilityFamilies": [
+        "download-content",
+        "query-account-profile",
+        "query-social-content",
+        "query-social-relations"
+      ]
+    },
+    "www.instagram.com": {
+      "canonicalBaseUrl": "https://www.instagram.com/",
+      "siteArchetype": "catalog-detail",
+      "host": "www.instagram.com",
+      "siteKey": "instagram",
+      "adapterId": "instagram",
+      "downloadEntrypoint": "src/entrypoints/sites/instagram-action.mjs",
+      "repoSkillDir": "skills/instagram",
+      "scriptLanguage": "python",
+      "interpreterRequired": "pypy3",
+      "templateVersion": 3,
+      "capabilityFamilies": [
+        "download-content",
+        "query-account-profile",
+        "query-social-content",
+        "query-social-relations"
+      ]
     }
   }
 }

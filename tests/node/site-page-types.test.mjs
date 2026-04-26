@@ -144,6 +144,88 @@ test('inferPageTypeFromUrl recognizes Xiaohongshu explore, search, note, and use
   );
 });
 
+test('inferPageTypeFromUrl recognizes X timeline, search, post, profile, and auth routes', async () => {
+  const siteProfile = await readJsonFile(path.resolve('profiles/x.com.json'));
+
+  assert.equal(
+    inferPageTypeFromUrl('https://x.com/home', siteProfile),
+    'home',
+  );
+  assert.equal(
+    inferPageTypeFromUrl('https://x.com/search?q=open%20source&src=typed_query', siteProfile),
+    'search-results-page',
+  );
+  assert.equal(
+    inferPageTypeFromUrl('https://x.com/opensource/status/1646527756281315330', siteProfile),
+    'book-detail-page',
+  );
+  assert.equal(
+    inferPageTypeFromUrl('https://x.com/opensource', siteProfile),
+    'author-page',
+  );
+  assert.equal(
+    inferPageTypeFromUrl('https://x.com/opensource/with_replies', siteProfile),
+    'author-page',
+  );
+  assert.equal(
+    inferPageTypeFromUrl('https://x.com/opensource/media', siteProfile),
+    'author-page',
+  );
+  assert.equal(
+    inferPageTypeFromUrl('https://x.com/opensource/following', siteProfile),
+    'author-list-page',
+  );
+  assert.equal(
+    inferPageTypeFromUrl('https://x.com/notifications', siteProfile),
+    'author-list-page',
+  );
+  assert.equal(
+    inferPageTypeFromUrl('https://x.com/i/flow/login', siteProfile),
+    'auth-page',
+  );
+});
+
+test('inferPageTypeFromUrl recognizes Instagram home, explore, post, reel, profile, and auth routes', async () => {
+  const siteProfile = await readJsonFile(path.resolve('profiles/www.instagram.com.json'));
+
+  assert.equal(
+    inferPageTypeFromUrl('https://www.instagram.com/', siteProfile),
+    'home',
+  );
+  assert.equal(
+    inferPageTypeFromUrl('https://www.instagram.com/explore/tags/opensource/', siteProfile),
+    'category-page',
+  );
+  assert.equal(
+    inferPageTypeFromUrl('https://www.instagram.com/explore/search/?q=open%20source', siteProfile),
+    'search-results-page',
+  );
+  assert.equal(
+    inferPageTypeFromUrl('https://www.instagram.com/p/Cu2D2LxJw1a/', siteProfile),
+    'book-detail-page',
+  );
+  assert.equal(
+    inferPageTypeFromUrl('https://www.instagram.com/reel/Cu2D2LxJw1a/', siteProfile),
+    'book-detail-page',
+  );
+  assert.equal(
+    inferPageTypeFromUrl('https://www.instagram.com/instagram/', siteProfile),
+    'author-page',
+  );
+  assert.equal(
+    inferPageTypeFromUrl('https://www.instagram.com/instagram/reels/', siteProfile),
+    'author-page',
+  );
+  assert.equal(
+    inferPageTypeFromUrl('https://www.instagram.com/instagram/following/', siteProfile),
+    'author-list-page',
+  );
+  assert.equal(
+    inferPageTypeFromUrl('https://www.instagram.com/accounts/login/', siteProfile),
+    'auth-page',
+  );
+});
+
 test('inferPageTypeFromUrl uses adapter-aware Jable model routes while keeping profile-configured routes', async () => {
   const siteProfile = await readJsonFile(path.resolve('profiles/jable.tv.json'));
 
@@ -248,4 +330,22 @@ test('resolveConfiguredPageTypes exposes Xiaohongshu author and detail page type
   assert.ok(pageTypes.includes('content-detail-page'));
   assert.ok(pageTypes.includes('author-page'));
   assert.ok(pageTypes.includes('category-page'));
+});
+
+test('resolveConfiguredPageTypes exposes X and Instagram generic social page types', async () => {
+  const xProfile = await readJsonFile(path.resolve('profiles/x.com.json'));
+  const instagramProfile = await readJsonFile(path.resolve('profiles/www.instagram.com.json'));
+
+  for (const pageTypes of [
+    resolveConfiguredPageTypes(xProfile),
+    resolveConfiguredPageTypes(instagramProfile),
+  ]) {
+    assert.ok(pageTypes.includes('auth-page'));
+    assert.ok(pageTypes.includes('home'));
+    assert.ok(pageTypes.includes('search-results-page'));
+    assert.ok(pageTypes.includes('book-detail-page'));
+    assert.ok(pageTypes.includes('content-detail-page'));
+    assert.ok(pageTypes.includes('author-page'));
+    assert.ok(pageTypes.includes('category-page'));
+  }
 });

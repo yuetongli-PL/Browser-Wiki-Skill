@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-04-23T13:49:08.629Z",
+  "generatedAt": "2026-04-26T11:12:46.355Z",
   "hosts": {
     "www.22biqu.com": {
       "host": "www.22biqu.com",
@@ -73,6 +73,52 @@
         "navigate-to-category",
         "navigate-to-content",
         "navigate-to-utility-page",
+        "search-content",
+        "switch-in-page-state"
+      ]
+    },
+    "x.com": {
+      "host": "x.com",
+      "scriptPath": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\crawler-scripts\\x.com\\crawler.py",
+      "metaPath": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\crawler-scripts\\x.com\\crawler.meta.json",
+      "profileHash": "a8f7de6614983622a12b81c602634aa2fab2e346f0252527850af5f623bcf860",
+      "lastUsedAt": "2026-04-26T11:12:46.354Z",
+      "status": "generated",
+      "scriptLanguage": "python",
+      "interpreterRequired": "pypy3",
+      "templateVersion": 3,
+      "capabilities": [
+        "download-content",
+        "navigate-to-author",
+        "navigate-to-category",
+        "navigate-to-content",
+        "navigate-to-utility-page",
+        "query-account-profile",
+        "query-social-content",
+        "query-social-relations",
+        "search-content",
+        "switch-in-page-state"
+      ]
+    },
+    "www.instagram.com": {
+      "host": "www.instagram.com",
+      "scriptPath": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\crawler-scripts\\www.instagram.com\\crawler.py",
+      "metaPath": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\crawler-scripts\\www.instagram.com\\crawler.meta.json",
+      "profileHash": "548b81738d4bf27a077a296f2b96d7f5a325543fabe87e8dcf7651db7a73af32",
+      "lastUsedAt": "2026-04-26T10:22:10.465Z",
+      "status": "reused",
+      "scriptLanguage": "python",
+      "interpreterRequired": "pypy3",
+      "templateVersion": 3,
+      "capabilities": [
+        "download-content",
+        "navigate-to-author",
+        "navigate-to-category",
+        "navigate-to-content",
+        "navigate-to-utility-page",
+        "query-account-profile",
+        "query-social-content",
+        "query-social-relations",
         "search-content",
         "switch-in-page-state"
       ]

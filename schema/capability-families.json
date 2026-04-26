@@ -45,6 +45,34 @@
       "approvalActionKinds": []
     },
     {
+      "id": "download-content",
+      "safeActionKinds": [
+        "download-media"
+      ],
+      "approvalActionKinds": []
+    },
+    {
+      "id": "query-account-profile",
+      "safeActionKinds": [
+        "query-social"
+      ],
+      "approvalActionKinds": []
+    },
+    {
+      "id": "query-social-content",
+      "safeActionKinds": [
+        "query-social"
+      ],
+      "approvalActionKinds": []
+    },
+    {
+      "id": "query-social-relations",
+      "safeActionKinds": [
+        "query-social"
+      ],
+      "approvalActionKinds": []
+    },
+    {
       "id": "search-content",
       "safeActionKinds": [
         "search-submit"

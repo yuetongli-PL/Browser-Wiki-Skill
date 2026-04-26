@@ -77,6 +77,8 @@ test('validateProfileFile accepts the checked-in profiles', async () => {
   const bilibili = await validateProfileFile(path.resolve('profiles/www.bilibili.com.json'));
   const douyin = await validateProfileFile(path.resolve('profiles/www.douyin.com.json'));
   const xiaohongshu = await validateProfileFile(path.resolve('profiles/www.xiaohongshu.com.json'));
+  const x = await validateProfileFile(path.resolve('profiles/x.com.json'));
+  const instagram = await validateProfileFile(path.resolve('profiles/www.instagram.com.json'));
 
   assert.equal(twentyTwoBiqu.valid, true);
   assert.equal(twentyTwoBiqu.host, 'www.22biqu.com');
@@ -156,6 +158,38 @@ test('validateProfileFile accepts the checked-in profiles', async () => {
   assert.equal(xiaohongshu.profile.downloader.defaultOutputRoot, 'note-downloads');
   assert.equal(xiaohongshu.profile.downloader.maxBatchItems, 20);
   assert.equal(xiaohongshu.profile.downloader.defaultNamingStrategy, 'title-id');
+  assert.equal(x.valid, true);
+  assert.equal(x.host, 'x.com');
+  assert.equal(x.archetype, 'navigation-catalog');
+  assert.equal(x.profile.pipeline.skipBookContent, true);
+  assert.equal(x.profile.validationSamples.videoDetailUrl, 'https://x.com/opensource/status/1646527756281315330');
+  assert.equal(x.profile.authSession.loginUrl, 'https://x.com/i/flow/login');
+  assert.equal(x.profile.authSession.autoLoginByDefault, false);
+  assert.ok(x.profile.authSession.loginIndicatorSelectors.includes('div[data-testid="SideNav_AccountSwitcher_Button"]'));
+  assert.ok(x.profile.authSession.loginIndicatorSelectors.includes('div[data-testid="SideNav_AccountSwitcher_Button"] [data-testid^="UserAvatar-Container-"]'));
+  assert.ok(x.profile.authSession.loginIndicatorSelectors.includes('a[data-testid="AppTabBar_Profile_Link"][href^="/"]'));
+  assert.equal(x.profile.authSession.loginIndicatorSelectors.includes('a[href="/home"]'), false);
+  assert.equal(x.profile.authSession.loginIndicatorSelectors.includes('a[href="/notifications"]'), false);
+  assert.ok(x.profile.authSession.loggedOutIndicatorSelectors.includes('input[autocomplete="username"]'));
+  assert.ok(x.profile.authSession.loggedOutIndicatorSelectors.includes('[data-testid="loginButton"]'));
+  assert.ok(x.profile.authSession.challengeSelectors.includes('input[data-testid="ocfEnterTextTextInput"]'));
+  assert.deepEqual(x.profile.authSession.authRequiredPathPrefixes, ['/home', '/notifications', '/messages', '/i/bookmarks']);
+  assert.equal(x.profile.downloader.defaultOutputRoot, 'x-downloads');
+  assert.equal(x.profile.social.defaultOutputRoot, 'x-downloads');
+  assert.ok(x.profile.social.supportedActions.includes('followed-posts-by-date'));
+  assert.equal(x.profile.social.urlTemplates.replies, 'https://x.com/{account}/with_replies');
+  assert.equal(instagram.valid, true);
+  assert.equal(instagram.host, 'www.instagram.com');
+  assert.equal(instagram.archetype, 'navigation-catalog');
+  assert.equal(instagram.profile.pipeline.skipBookContent, true);
+  assert.equal(instagram.profile.validationSamples.videoDetailUrl, 'https://www.instagram.com/p/Cu2D2LxJw1a/');
+  assert.equal(instagram.profile.authSession.loginUrl, 'https://www.instagram.com/accounts/login/');
+  assert.equal(instagram.profile.authSession.autoLoginByDefault, false);
+  assert.deepEqual(instagram.profile.authSession.authRequiredPathPrefixes, ['/direct', '/accounts/edit']);
+  assert.equal(instagram.profile.downloader.defaultOutputRoot, 'instagram-downloads');
+  assert.equal(instagram.profile.social.defaultOutputRoot, 'instagram-downloads');
+  assert.ok(instagram.profile.social.contentTypes.includes('reels'));
+  assert.equal(instagram.profile.social.urlTemplates.following, 'https://www.instagram.com/{account}/following/');
 });
 
 test('validateProfileObject rejects missing required fields with path details', () => {

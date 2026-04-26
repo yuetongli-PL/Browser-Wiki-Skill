@@ -2,6 +2,8 @@
 
 import { createBilibiliSiteDoctorScenarioSuite } from '../bilibili/doctor/scenarios.mjs';
 import { createDouyinSiteDoctorScenarioSuite } from '../douyin/doctor/scenarios.mjs';
+import { createInstagramSiteDoctorScenarioSuite } from '../instagram/doctor/scenarios.mjs';
+import { createXSiteDoctorScenarioSuite } from '../x/doctor/scenarios.mjs';
 import { createXiaohongshuSiteDoctorScenarioSuite } from '../xiaohongshu/doctor/scenarios.mjs';
 
 export function resolveSiteDoctorScenarioSuite({
@@ -14,6 +16,10 @@ export function resolveSiteDoctorScenarioSuite({
       return createBilibiliSiteDoctorScenarioSuite({ profile, helpers });
     case 'douyin':
       return createDouyinSiteDoctorScenarioSuite({ helpers });
+    case 'instagram':
+      return createInstagramSiteDoctorScenarioSuite({ helpers });
+    case 'x':
+      return createXSiteDoctorScenarioSuite({ helpers });
     case 'xiaohongshu':
       return createXiaohongshuSiteDoctorScenarioSuite({ profile, helpers });
     default:

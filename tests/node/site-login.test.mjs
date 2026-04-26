@@ -304,6 +304,90 @@ test('siteLogin uses the login URL as startup page when interactive manual login
   }
 });
 
+test('siteLogin reports manual-login-timeout after an interactive manual wait expires', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-login-manual-timeout-'));
+
+  try {
+    const report = await siteLogin('https://www.bilibili.com/', {
+      outDir: workspace,
+      profilePath: path.resolve('profiles/www.bilibili.com.json'),
+      headless: false,
+      waitForManualLogin: true,
+      autoLogin: false,
+      manualLoginTimeoutMs: 25,
+    }, {
+      async resolveSiteAuthProfile() {
+        return createResolvedProfile(workspace);
+      },
+      async resolveSiteBrowserSessionOptions() {
+        return createResolvedBrowserOptions(workspace);
+      },
+      async inspectPersistentProfileHealth() {
+        return {
+          healthy: true,
+          warnings: [],
+        };
+      },
+      async openBrowserSession() {
+        return {
+          browserStartUrl: arguments[0]?.startupUrl ?? null,
+          browserAttachedVia: 'existing-target',
+          async navigateAndWait() {},
+          async close() {
+            return {
+              shutdownMode: 'graceful',
+              profileFlush: { stable: true },
+            };
+          },
+        };
+      },
+      async ensureAuthenticatedSession() {
+        return {
+          status: 'credentials-unavailable',
+          credentials: {
+            available: false,
+            source: null,
+          },
+          challengeRequired: false,
+          loginState: {
+            currentUrl: 'https://passport.bilibili.com/login',
+            title: 'bilibili login',
+            loggedIn: false,
+            loginStateDetected: false,
+            identityConfirmed: false,
+            identitySource: null,
+          },
+        };
+      },
+      async inspectLoginState() {
+        throw new Error('final inspect should use the manual wait login state');
+      },
+      async waitForAuthenticatedSession(_session, _authConfig, options = {}) {
+        assert.equal(options.timeoutMs, 25);
+        assert.equal(options.assistManualLogin, true);
+        return {
+          status: 'timeout',
+          loginState: {
+            currentUrl: 'https://passport.bilibili.com/login',
+            title: 'bilibili login',
+            loggedIn: false,
+            loginStateDetected: false,
+            identityConfirmed: false,
+            identitySource: null,
+          },
+        };
+      },
+    });
+
+    assert.equal(report.auth.status, 'manual-login-timeout');
+    assert.equal(report.auth.waitedForManualLogin, true);
+    assert.equal(report.auth.waitStatus, 'timeout');
+    assert.match(report.warnings.join('\n'), /Timed out waiting 25 ms/u);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test('siteLogin reports session-reused when persisted session is already authenticated', async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-login-reused-'));
   const startupUrls = [];

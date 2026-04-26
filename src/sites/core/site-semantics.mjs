@@ -108,6 +108,38 @@ export function remapSupportedIntent(intentType, context) {
         default:
           return intentType;
       }
+    case 'x':
+      switch (intentType) {
+        case 'search-book':
+        case 'search-video':
+        case 'search-work':
+          return 'search-posts';
+        case 'open-book':
+        case 'open-video':
+        case 'open-work':
+          return 'open-post';
+        case 'download-video':
+        case 'download-work':
+          return 'download-book';
+        default:
+          return intentType;
+      }
+    case 'instagram':
+      switch (intentType) {
+        case 'search-book':
+        case 'search-video':
+        case 'search-work':
+          return 'search-content';
+        case 'open-book':
+        case 'open-video':
+        case 'open-work':
+          return 'open-post';
+        case 'download-video':
+        case 'download-work':
+          return 'download-book';
+        default:
+          return intentType;
+      }
     default:
       return intentType;
   }

@@ -1,0 +1,35 @@
+{
+  "host": "x.com",
+  "baseUrl": "https://x.com/",
+  "generatedAt": "2026-04-26T11:12:46.351Z",
+  "scriptLanguage": "python",
+  "interpreterRequired": "pypy3",
+  "templateVersion": 3,
+  "profilePath": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\profiles\\x.com.json",
+  "profileHash": "a8f7de6614983622a12b81c602634aa2fab2e346f0252527850af5f623bcf860",
+  "profileVersion": 1,
+  "capabilities": [
+    "search-content",
+    "navigate-to-content",
+    "navigate-to-author",
+    "navigate-to-category",
+    "navigate-to-utility-page",
+    "download-content",
+    "query-account-profile",
+    "query-social-content",
+    "query-social-relations",
+    "switch-in-page-state"
+  ],
+  "dependencies": [
+    "httpx",
+    "selectolax",
+    "anyio"
+  ],
+  "urlFamily": [
+    "https://x.com/"
+  ],
+  "historicalContext": {
+    "sourceRunDir": null,
+    "books": []
+  }
+}

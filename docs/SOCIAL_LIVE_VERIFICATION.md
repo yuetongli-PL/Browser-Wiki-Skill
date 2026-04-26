@@ -1,0 +1,222 @@
+# Social Live Verification
+
+`scripts/social-live-verify.mjs` is the repeatable live acceptance runner for the X and Instagram social entrypoints. `scripts/social-kb-refresh.mjs` is the scenario-level KB state refresh runner for login walls, challenge/risk pages, search, author/profile pages, following lists/dialogs, and empty DOM app shells. `scripts/social-auth-recover.mjs` is the auth recovery wrapper that checks reusable sessions, optionally opens visible `site-login` for manual recovery, and can rerun auth verification cases after recovery. `scripts/social-auth-import.mjs` imports externally provided cookies into the reusable browser profile when password/challenge automation is not viable. These scripts are intentionally plan-first.
+
+## Safety Model
+
+- Default mode is dry-run plan mode.
+- `--execute` runs selected commands sequentially, not in parallel.
+- Execution writes `runs/social-live-verify/<timestamp>/manifest.json` with command order, options, timestamps, exit codes, artifact summaries, archive completeness, auth recovery status, runtime risk, and media completeness.
+- `social-kb-refresh` writes `runs/social-kb-refresh/<timestamp>/manifest.json` even in dry-run mode so the exact scenario command and expected artifact contract can be reviewed before live traffic.
+- `social-kb-refresh` applies a per-scenario outer timeout with `--case-timeout <ms>` in addition to the `site-doctor` `--timeout <ms>` flag. A timed-out scenario is recorded as `blocked` with reason `timeout`.
+- `social-kb-refresh` continues after failed, blocked, or timed-out scenarios by default and aggregates the final manifest status after the selected matrix completes. Use `--fail-fast` to stop after the first non-passing scenario; the manifest records whether fail-fast triggered and which cases were skipped.
+- The runner does not modify router code, tests, profiles, or entrypoints.
+
+## Quick Start
+
+```powershell
+# Preview the complete matrix without live traffic.
+node .\scripts\social-live-verify.mjs
+
+# Preview only Instagram followed-date verification.
+node .\scripts\social-live-verify.mjs --case instagram-followed-date --date 2026-04-26
+
+# Preview scenario-level KB state refresh without live traffic.
+node .\scripts\social-kb-refresh.mjs --site all
+
+# Diagnose X auth recovery without live traffic.
+node .\scripts\social-auth-recover.mjs --site x --verify
+
+# Preview cookie import without writing to the browser profile.
+node .\scripts\social-auth-import.mjs --site x --cookie-file C:\tmp\x-cookies.json
+
+# Execute a bounded smoke matrix with explicit accounts.
+node .\scripts\social-live-verify.mjs --execute --x-account opensource --ig-account instagram --date 2026-04-26 --max-items 10 --max-users 10
+```
+
+## Command Matrix
+
+Each matrix row has three separate classifications:
+
+- `command`: child process result, recorded from `exitCode` and `signal`.
+- `artifact`: parsed command output, usually the action manifest, `doctor-report.json`, or KB refresh manifest.
+- `status`: aggregate acceptance status for the live matrix. Artifact classification wins over raw command failure when the artifact clearly reports `blocked` or `skipped`.
+
+| Case | Coverage | Command | Primary artifact | Artifact/status classification |
+| --- | --- | --- | --- | --- |
+| `x-full-archive` | X full archive | `node src/entrypoints/sites/x-action.mjs full-archive <x-account> --max-items <n> --timeout <ms> --run-dir <run>` | `<run>/manifest.json` | `passed` when archive is complete or bounded; `failed` when archive is incomplete; `blocked` for rate limits, login wall, challenge, session invalidation, fingerprint risk, or timeout; `skipped` when reusable login credentials are unavailable. |
+| `instagram-full-archive` | IG full archive | `node src/entrypoints/sites/instagram-action.mjs full-archive <ig-account> --max-items <n> --timeout <ms> --run-dir <run>` | `<run>/manifest.json` | Same archive rules as X. Missing Instagram login is `skipped`; Instagram login wall, challenge, expired session, or recovery-needed state is `blocked`, not a generic failure. |
+| `instagram-followed-date` | IG followed-date | `node src/entrypoints/sites/instagram-action.mjs followed-posts-by-date --date <YYYY-MM-DD> --max-users <n> --max-items <n> --timeout <ms> --run-dir <run>` | `<run>/manifest.json` | `passed` when the bounded followed-date scan completes; `blocked` for auth/risk/runtime blocks; `skipped` when no reusable logged-in Instagram session is available. |
+| `x-media-download` | X media download | `node src/entrypoints/sites/x-action.mjs profile-content <x-account> --content-type media --download-media --max-items <n> --max-media-downloads <n> --timeout <ms> --run-dir <run>` | `<run>/manifest.json`, optional `<run>/downloads.jsonl` | `passed` when expected media downloads are present; `failed` when expected media exists but not all downloads complete; `blocked` for auth/risk/runtime blocks; `skipped` when download session/login state is unavailable before media work can start. |
+| `instagram-media-download` | IG media download | `node src/entrypoints/sites/instagram-action.mjs profile-content <ig-account> --content-type media --download-media --max-items <n> --max-media-downloads <n> --timeout <ms> --run-dir <run>` | `<run>/manifest.json`, optional `<run>/downloads.jsonl` | Same media rules as X. Missing Instagram login/download session is `skipped`; login wall, challenge, expired session, or platform throttle is `blocked`. |
+| `x-auth-doctor` | X auth recovery/site-doctor | `node src/entrypoints/sites/site-doctor.mjs https://x.com/home --profile-path profiles/x.com.json --knowledge-base-dir knowledge-base/x.com --reuse-login-state --no-headless` | latest `<out-dir>/*/doctor-report.json` | `passed` when scenarios pass or are intentionally skipped; `failed` for scenario fail/error; `blocked` for `not-logged-in`, anti-crawl, rate-limit, fingerprint, or platform-boundary reason codes. |
+| `instagram-auth-doctor` | IG auth recovery/site-doctor | `node src/entrypoints/sites/site-doctor.mjs https://www.instagram.com/ --profile-path profiles/www.instagram.com.json --knowledge-base-dir knowledge-base/www.instagram.com --reuse-login-state --no-headless` | latest `<out-dir>/*/doctor-report.json` | Same doctor rules as X. Auth-only Instagram scenarios skipped with `not-logged-in` are classified as `blocked` for acceptance. |
+| `x-kb-refresh` | X scenario KB state refresh | `node scripts/social-kb-refresh.mjs --site x --run-root <run>` | latest `<run>/manifest.json` | `passed` when selected scenario cases pass; `failed` for child failures; `blocked` for timeouts and blocked scenario reason codes. |
+| `instagram-kb-refresh` | IG scenario KB state refresh | `node scripts/social-kb-refresh.mjs --site instagram --run-root <run>` | latest `<run>/manifest.json` | Same KB refresh rules as X, including `not-logged-in` and timeout as `blocked`. |
+
+Final matrix `status` values:
+
+- `passed`: every selected artifact passed.
+- `failed`: at least one artifact failed, or a command failed without a more specific artifact classification.
+- `blocked`: at least one artifact is blocked by auth, platform risk, rate limit, challenge, or timeout.
+- `skipped`: at least one artifact is skipped because required reusable login/session material is absent before live validation can proceed.
+- `unknown`: required artifacts are missing or cannot be classified.
+
+## Scenario KB Refresh
+
+Use `social-kb-refresh` when the acceptance target is KB state freshness rather than archive/media behavior. Dry-run mode writes a manifest and prints the concrete `site-doctor` commands without opening a browser:
+
+```powershell
+node .\scripts\social-kb-refresh.mjs --site all
+```
+
+Execute one focused scenario:
+
+```powershell
+node .\scripts\social-kb-refresh.mjs --execute --case instagram-following-modal --ig-account instagram --case-timeout 600000
+```
+
+Execute all search and empty-DOM probes for both sites:
+
+```powershell
+node .\scripts\social-kb-refresh.mjs --execute --surface search --surface empty-dom --query "open source"
+```
+
+Scenario case ids:
+
+| Case | Surface | Start URL shape | Primary artifact root |
+| --- | --- | --- | --- |
+| `x-login-wall` | login wall | `https://x.com/i/flow/login` | `runs/social-kb-refresh/<timestamp>/x-login-wall/` |
+| `x-challenge` | challenge/risk | `https://x.com/home` | `runs/social-kb-refresh/<timestamp>/x-challenge/` |
+| `x-search` | search | `https://x.com/search?q=<query>&src=typed_query&f=live` | `runs/social-kb-refresh/<timestamp>/x-search/` |
+| `x-author-page` | author page | `https://x.com/<x-account>` | `runs/social-kb-refresh/<timestamp>/x-author-page/` |
+| `x-following-modal` | following list | `https://x.com/<x-account>/following` | `runs/social-kb-refresh/<timestamp>/x-following-modal/` |
+| `x-empty-dom` | empty DOM/app shell | `https://x.com/` | `runs/social-kb-refresh/<timestamp>/x-empty-dom/` |
+| `instagram-login-wall` | login wall | `https://www.instagram.com/accounts/login/` | `runs/social-kb-refresh/<timestamp>/instagram-login-wall/` |
+| `instagram-challenge` | challenge/risk | `https://www.instagram.com/challenge/` | `runs/social-kb-refresh/<timestamp>/instagram-challenge/` |
+| `instagram-search` | search | `https://www.instagram.com/explore/search/?q=<query>` | `runs/social-kb-refresh/<timestamp>/instagram-search/` |
+| `instagram-author-page` | author page | `https://www.instagram.com/<ig-account>/` | `runs/social-kb-refresh/<timestamp>/instagram-author-page/` |
+| `instagram-following-modal` | following dialog/list | `https://www.instagram.com/<ig-account>/following/` | `runs/social-kb-refresh/<timestamp>/instagram-following-modal/` |
+| `instagram-empty-dom` | empty DOM/app shell | `https://www.instagram.com/` | `runs/social-kb-refresh/<timestamp>/instagram-empty-dom/` |
+
+Each command writes a top-level `manifest.json` plus `site-doctor` artifacts under the case artifact root. After execution, the manifest records the discovered `doctor-report.json`, `doctor-report.md`, capture manifest, expand manifest, scenario count, and per-scenario status/reason codes when the doctor report can be parsed.
+
+The KB refresh manifest also records:
+
+- `timeoutPolicy.forwardedTimeoutMs`: the inner `site-doctor --timeout` value.
+- `timeoutPolicy.caseTimeoutMs`: the outer per-scenario child-process timeout.
+- `failFast`: whether fail-fast was enabled, whether it triggered, the case that stopped execution, and skipped case ids.
+- `results[].timeout`: whether the outer timeout fired for that scenario.
+- `results[].blocked`: blocked status and reason, including `timeout`, `not-logged-in`, `anti-crawl-*`, `browser-fingerprint-risk`, or `platform-boundary`.
+
+## Common Options
+
+```powershell
+node .\scripts\social-live-verify.mjs `
+  --site instagram `
+  --case instagram-full-archive `
+  --case instagram-media-download `
+  --ig-account instagram `
+  --max-items 25 `
+  --max-media-downloads 100 `
+  --timeout 120000
+```
+
+- `--site x|instagram|all` filters site-specific matrix rows.
+- `--case <id>` can be repeated for a custom subset.
+- `--account <handle>` applies one account to both sites; `--x-account` and `--ig-account` override per site.
+- `--date <YYYY-MM-DD>` drives the IG followed-date case.
+- `--max-items`, `--max-users`, and `--timeout` keep live acceptance bounded.
+- `--case-timeout` bounds each `social-kb-refresh` scenario from outside the child process.
+- `--fail-fast` makes `social-kb-refresh` stop after the first failed, blocked, or timed-out scenario; without it, later cases still run.
+- `--max-media-downloads` bounds the media download cases independently from post count.
+- `--browser-profile-root`, `--browser-path`, and `--user-data-dir` are forwarded to social actions and site-doctor where supported.
+- `--headless` or `--no-headless` controls browser visibility; default is `--no-headless` for auth-sensitive checks.
+
+## Auth Recovery
+
+Use `social-auth-recover` before rerunning X or Instagram live cases when the last matrix says `credentials-unavailable`, `login-wall`, `session-invalid`, or `needsRecovery`.
+
+```powershell
+# Non-interactive reusable-profile health check.
+node .\scripts\social-auth-recover.mjs --execute --site x --verify
+
+# Open a visible browser, wait for one manual login, then rerun x-auth-doctor.
+node .\scripts\social-auth-recover.mjs --execute --site x --manual --verify --manual-timeout 600000
+
+# Reuse an already logged-in Chrome profile or cookie-backed user data directory.
+node .\scripts\social-auth-recover.mjs --execute --site x --manual --verify --user-data-dir C:\Path\To\Chrome\UserData\Profile
+```
+
+The recovery manifest is written under `runs/social-auth-recover/<timestamp>/manifest.json`. A `needs-manual-login` result is not a parser failure; it means the persistent profile is not authenticated and the manifest includes the exact `site-login` command to run. After the manual login command completes with `persistenceVerified: true`, rerun `social-auth-recover --execute --site x --verify` or the full `social-live-verify` matrix.
+
+When X blocks the username-to-password step or requires browser-side verification, import a current cookie set instead of automating the password flow. Prefer a local file or environment variable so secrets do not enter shell history or chat logs:
+
+```powershell
+# JSON export, Netscape cookies.txt, raw Cookie header, and Set-Cookie lines are supported.
+node .\scripts\social-auth-import.mjs --execute --site x --cookie-file C:\tmp\x-cookies.json
+
+# Safer for a raw Cookie header.
+$env:X_COOKIE_HEADER = "auth_token=...; ct0=...; twid=..."
+node .\scripts\social-auth-import.mjs --execute --site x --cookie-header-env X_COOKIE_HEADER
+Remove-Item Env:\X_COOKIE_HEADER
+```
+
+The import manifest is written under `runs/social-auth-import/<timestamp>/manifest.json`. It records cookie names, domains, missing required cookie names, the target `userDataDir`, and the post-import auth probe, but it does not write cookie values. For X, `auth_token` and `ct0` are the minimum expected cookies; `twid` and other first-party cookies improve reuse reliability.
+
+## Recommended Acceptance Passes
+
+1. Run the full dry-run and inspect command targets:
+
+```powershell
+node .\scripts\social-live-verify.mjs --x-account <x-account> --ig-account <ig-account> --date <YYYY-MM-DD>
+```
+
+2. Execute a narrow auth/KB pass before archive or media download:
+
+```powershell
+node .\scripts\social-live-verify.mjs --execute --case x-auth-doctor --case instagram-auth-doctor --case x-kb-refresh --case instagram-kb-refresh
+```
+
+For a scenario-only KB refresh pass, prefer the focused runner:
+
+```powershell
+node .\scripts\social-kb-refresh.mjs --execute --site all --x-account <x-account> --ig-account <ig-account>
+```
+
+3. Execute bounded archive and media checks:
+
+```powershell
+node .\scripts\social-live-verify.mjs --execute --case x-full-archive --case instagram-full-archive --case x-media-download --case instagram-media-download --max-items 10
+```
+
+4. Execute the Instagram followed-date pass separately when the date is the acceptance target:
+
+```powershell
+node .\scripts\social-live-verify.mjs --execute --case instagram-followed-date --date <YYYY-MM-DD> --max-users 10 --max-items 10
+```
+
+## Manifest Review
+
+After an execute run, inspect:
+
+```powershell
+Get-Content .\runs\social-live-verify\<timestamp>\manifest.json
+Get-Content .\runs\social-kb-refresh\<timestamp>\manifest.json
+```
+
+Use `status`, per-command `exitCode`, and the command-specific run directories referenced by `--run-dir` or site-doctor `--out-dir` to decide whether the live acceptance pass is complete, blocked by auth, or bounded by platform limits. For KB state refresh, also inspect `results[].artifacts.scenarioStatuses[]` for `not-logged-in`, `anti-crawl-*`, `empty-shell`, `platform-boundary`, or `matching-state-missing`.
+
+For social action cases, inspect `results[].artifactSummary` first. It classifies each case as `passed`, `failed`, `blocked`, or `unknown`, and links the action `manifest.json`. Full action manifests include `outcome`, `runtimeRisk`, `authHealth`, `completeness`, `downloads`, `api-capture-debug.json`, optional `api-drift-samples.json`, and optional `downloads.jsonl`.
+
+Useful risk controls:
+
+```powershell
+node .\scripts\social-live-verify.mjs --execute --risk-backoff-ms 30000 --risk-retries 2 --api-retries 2
+```
+
+## Doctor Scenario Coverage
+
+The X and Instagram `site-doctor` passes now run first-class scenario suites instead of only a generic auth probe. These suites validate public post/detail/profile states, authenticated search or inbox/following states, and report `not-logged-in`, `anti-crawl-*`, `empty-shell`, or platform-boundary reasons when a matched state is not usable.
+
+Authenticated scenarios still require a reusable browser profile or `--user-data-dir`. Without a valid session, `site-doctor` skips those scenarios with `not-logged-in` rather than treating the skip as a parser failure.
