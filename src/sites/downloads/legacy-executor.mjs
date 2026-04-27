@@ -17,6 +17,11 @@ import {
 } from './contracts.mjs';
 import { buildDownloadRunLayout } from './artifacts.mjs';
 import { buildLegacyDownloadCommand } from './modules.mjs';
+import {
+  isSuccessfulQueueStatus,
+  loadDownloadRecoveryState,
+  queueKey,
+} from './recovery.mjs';
 
 export async function spawnJsonCommand(command, args = [], options = {}) {
   const cwd = options.cwd ?? process.cwd();
@@ -475,6 +480,156 @@ function renderLegacyReport(manifest) {
   return `${lines.join('\n')}\n`;
 }
 
+function isLegacyRecoveryRequested(request = {}, options = {}) {
+  return Boolean(
+    request.retryFailedOnly
+      ?? options.retryFailedOnly
+      ?? request.resume
+      ?? options.resume
+      ?? false,
+  );
+}
+
+function legacyRecoveryMode(request = {}, options = {}) {
+  return (request.retryFailedOnly ?? options.retryFailedOnly) ? 'retry-failed' : 'resume';
+}
+
+function commandSupportsRecovery(commandSpec, mode) {
+  const args = Array.isArray(commandSpec?.args) ? commandSpec.args.map((arg) => String(arg)) : [];
+  if (mode === 'retry-failed') {
+    return args.includes('--retry-failed') || args.includes('--retry-failed-only');
+  }
+  return args.includes('--resume');
+}
+
+function recoveryCounts(recoveryState = {}) {
+  const queue = Array.isArray(recoveryState.queue) ? recoveryState.queue : [];
+  const failed = queue.filter((entry) => String(entry?.status ?? '').toLowerCase() === 'failed').length;
+  const skipped = queue.filter((entry) => String(entry?.status ?? '').toLowerCase() === 'skipped').length;
+  const downloaded = queue.filter((entry) => isSuccessfulQueueStatus(entry?.status) && String(entry?.status ?? '').toLowerCase() !== 'skipped').length;
+  return {
+    expected: queue.length,
+    attempted: downloaded + failed,
+    downloaded,
+    skipped,
+    failed,
+  };
+}
+
+function failedResourcesFromRecoveryProblems(recoveryState = {}, reason, detail) {
+  const failedEntries = Array.isArray(recoveryState.failedQueueEntries) ? recoveryState.failedQueueEntries : [];
+  if (failedEntries.length) {
+    return failedEntries.map((entry) => ({
+      resourceId: entry.resourceId ?? entry.id ?? entry.key ?? queueKey(entry) ?? 'legacy-resource',
+      url: entry.url ?? entry.result?.url ?? undefined,
+      filePath: entry.filePath ?? entry.result?.filePath ?? undefined,
+      reason: entry.reason ?? entry.result?.reason ?? reason,
+      error: entry.error ?? entry.result?.error ?? null,
+    }));
+  }
+  const problems = Array.isArray(recoveryState.problems) ? recoveryState.problems : [];
+  if (problems.length) {
+    return problems.map((problem) => ({
+      resourceId: problem.resourceId ?? 'legacy-recovery',
+      url: problem.url ?? undefined,
+      filePath: problem.path ?? problem.filePath ?? undefined,
+      reason: problem.reason ?? reason,
+      error: problem.error ?? problem.detail ?? null,
+    }));
+  }
+  return reason && reason !== 'retry-failed-none' && reason !== 'resume-state-missing'
+    ? [{
+      resourceId: 'legacy-recovery',
+      reason,
+      error: detail ?? null,
+    }]
+    : [];
+}
+
+async function writeLegacyRecoveryManifest({ layout, plan, sessionLease, commandSpec, recoveryState, status, reason, detail }) {
+  const counts = recoveryCounts(recoveryState);
+  const failedResources = failedResourcesFromRecoveryProblems(recoveryState, reason, detail);
+  if (failedResources.length > counts.failed) {
+    counts.failed = failedResources.length;
+  }
+  const manifest = normalizeDownloadRunManifest({
+    runId: layout.runId,
+    planId: plan.id,
+    siteKey: plan.siteKey,
+    status,
+    reason,
+    counts,
+    files: [],
+    failedResources,
+    resumeCommand: buildResumeCommand(plan, layout),
+    artifacts: {
+      manifest: layout.manifestPath,
+      queue: layout.queuePath,
+      downloadsJsonl: layout.downloadsJsonlPath,
+      reportMarkdown: layout.reportMarkdownPath,
+      plan: layout.planPath,
+      resolvedTask: layout.resolvedTaskPath,
+      runDir: layout.runDir,
+      filesDir: layout.filesDir,
+      source: recoveryState.manifest?.artifacts?.source,
+    },
+    session: sessionLease,
+    legacy: {
+      entrypoint: plan.legacy.entrypoint,
+      executorKind: commandSpec.executorKind,
+      command: commandSpec.command,
+      args: commandSpec.args,
+      exitCode: null,
+      reasonCode: reason,
+      artifacts: recoveryState.manifest?.artifacts?.source,
+      recovery: {
+        mode: recoveryState.mode,
+        queueKind: recoveryState.queueKind,
+        recognizedArtifacts: recoveryState.recognizedArtifacts ?? [],
+        problems: recoveryState.problems ?? [],
+        detail,
+      },
+      stdoutJson: false,
+    },
+    createdAt: new Date().toISOString(),
+    finishedAt: new Date().toISOString(),
+  });
+  await writeJsonFile(layout.queuePath, Array.isArray(recoveryState.queue) ? recoveryState.queue : []);
+  await writeJsonLines(layout.downloadsJsonlPath, [{
+    legacy: true,
+    recovery: true,
+    status,
+    reason,
+    detail,
+    counts,
+    failedResources,
+  }]);
+  await writeJsonFile(layout.manifestPath, manifest);
+  await writeTextFile(layout.reportMarkdownPath, renderLegacyReport(manifest));
+  return manifest;
+}
+
+function legacyRecoveryPreflightResult(commandSpec, recoveryState, mode) {
+  if (recoveryState.terminal) {
+    return recoveryState.terminal;
+  }
+  if (mode === 'resume' && !recoveryState.oldStateExists) {
+    return {
+      status: 'skipped',
+      reason: 'resume-state-missing',
+      detail: 'No previous manifest, queue, media queue, or source artifact exists for this legacy run directory.',
+    };
+  }
+  if (!commandSupportsRecovery(commandSpec, mode)) {
+    return {
+      status: 'skipped',
+      reason: mode === 'retry-failed' ? 'legacy-retry-failed-unsupported' : 'legacy-resume-unsupported',
+      detail: `The legacy command does not expose ${mode === 'retry-failed' ? '--retry-failed-only' : '--resume'}, so the wrapper cannot guarantee this recovery mode without rerunning normal legacy work.`,
+    };
+  }
+  return null;
+}
+
 export async function executeLegacyDownloadTask(plan, sessionLease = null, request = {}, options = {}, deps = {}) {
   if (!plan.legacy?.entrypoint) {
     throw new Error('executeLegacyDownloadTask requires plan.legacy.entrypoint.');
@@ -508,6 +663,25 @@ export async function executeLegacyDownloadTask(plan, sessionLease = null, reque
       reason: 'legacy-downloader-required',
     },
   });
+
+  if (isLegacyRecoveryRequested(request, options)) {
+    const mode = legacyRecoveryMode(request, options);
+    const recoveryState = await loadDownloadRecoveryState(layout, [], mode);
+    const preflight = legacyRecoveryPreflightResult(commandSpec, recoveryState, mode);
+    if (preflight) {
+      return await writeLegacyRecoveryManifest({
+        layout,
+        plan,
+        sessionLease,
+        commandSpec,
+        recoveryState,
+        status: preflight.status,
+        reason: preflight.reason,
+        detail: preflight.detail,
+      });
+    }
+  }
+
   await writeJsonFile(layout.queuePath, []);
 
   let processResult;

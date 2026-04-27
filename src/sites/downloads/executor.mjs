@@ -190,14 +190,18 @@ async function mapWithConcurrency(items, concurrency, mapper) {
   return results;
 }
 
-function buildQueue(resources, layout, previousQueue = []) {
-  const previousByKey = new Map((Array.isArray(previousQueue) ? previousQueue : [])
-    .map((entry) => [queueKey(entry), entry])
-    .filter(([key]) => key));
+function buildQueue(resources, layout, recoveryState = null) {
+  const previousQueue = Array.isArray(recoveryState) ? recoveryState : recoveryState?.queue;
+  const previousByKey = recoveryState?.previousByKey instanceof Map
+    ? recoveryState.previousByKey
+    : new Map((Array.isArray(previousQueue) ? previousQueue : [])
+      .map((entry) => [queueKey(entry), entry])
+      .filter(([key]) => key));
   return resources.map((resource, index) => {
     const previous = previousByKey.get(queueKey(resource)) ?? previousByKey.get(resource.url);
     return {
       id: resource.id,
+      key: previous?.key ?? previous?.downloadKey ?? null,
       index,
       status: previous?.status ?? 'pending',
       url: resource.url,
@@ -206,6 +210,7 @@ function buildQueue(resources, layout, previousQueue = []) {
       sourceUrl: resource.sourceUrl ?? previous?.sourceUrl ?? null,
       reason: previous?.reason ?? null,
       bytes: previous?.bytes ?? null,
+      result: previous?.result ?? null,
     };
   });
 }
@@ -469,7 +474,7 @@ export async function executeResolvedDownloadTask(resolvedTaskInput, plan, sessi
   const recoveryMode = retryFailedOnly ? 'retry-failed' : resume ? 'resume' : 'none';
   const recoveryState = await loadDownloadRecoveryState(layout, resources, recoveryMode);
   const recoveryProblems = [...(recoveryState.problems ?? [])];
-  const queue = buildQueue(resources, layout, recoveryState.queue);
+  const queue = buildQueue(resources, layout, recoveryState);
 
   await writeJsonFile(layout.planPath, plan);
   await writeJsonFile(layout.resolvedTaskPath, resolvedTask);
