@@ -61,6 +61,104 @@ function absoluteUrl(value, baseUrl) {
   }
 }
 
+function decodeHtmlEntities(value) {
+  return String(value ?? '')
+    .replace(/&#(\d+);/gu, (_, code) => {
+      try {
+        return String.fromCodePoint(Number(code));
+      } catch {
+        return _;
+      }
+    })
+    .replace(/&#x([0-9a-f]+);/giu, (_, code) => {
+      try {
+        return String.fromCodePoint(Number.parseInt(code, 16));
+      } catch {
+        return _;
+      }
+    })
+    .replace(/&nbsp;/giu, ' ')
+    .replace(/&quot;/giu, '"')
+    .replace(/&#39;/giu, '\'')
+    .replace(/&apos;/giu, '\'')
+    .replace(/&lt;/giu, '<')
+    .replace(/&gt;/giu, '>')
+    .replace(/&amp;/giu, '&');
+}
+
+function stripHtml(value) {
+  return normalizeText(
+    decodeHtmlEntities(
+      String(value ?? '')
+        .replace(/<script[\s\S]*?<\/script>/giu, ' ')
+        .replace(/<style[\s\S]*?<\/style>/giu, ' ')
+        .replace(/<br\s*\/?>/giu, '\n')
+        .replace(/<\/(?:p|div|dd|dt|li|h[1-6])>/giu, '\n')
+        .replace(/<[^>]+>/gu, ' '),
+    ),
+  );
+}
+
+function attributeValue(attributes, name) {
+  const pattern = new RegExp(`\\b${name}\\s*=\\s*(["'])(.*?)\\1`, 'iu');
+  return decodeHtmlEntities(attributes.match(pattern)?.[2] ?? '');
+}
+
+function extractMetaContent(html, names = []) {
+  const targets = new Set(toArray(names).map((name) => normalizeText(name).toLowerCase()).filter(Boolean));
+  if (targets.size === 0) {
+    return '';
+  }
+  const pattern = /<meta\b([^>]*)>/giu;
+  let match = pattern.exec(html);
+  while (match) {
+    const attrs = match[1] ?? '';
+    const metaName = normalizeText(attributeValue(attrs, 'property') || attributeValue(attrs, 'name')).toLowerCase();
+    if (targets.has(metaName)) {
+      const content = normalizeText(attributeValue(attrs, 'content'));
+      if (content) {
+        return content;
+      }
+    }
+    match = pattern.exec(html);
+  }
+  return '';
+}
+
+function extractFirstTextByRegex(html, regexes = []) {
+  for (const regex of regexes) {
+    const match = html.match(regex);
+    const text = stripHtml(match?.[1] ?? '');
+    if (text) {
+      return text;
+    }
+  }
+  return '';
+}
+
+function extractTitle(html) {
+  return extractFirstTextByRegex(html, [/<title[^>]*>([\s\S]*?)<\/title>/iu]);
+}
+
+function extractAnchors(html, baseUrl) {
+  const anchors = [];
+  const pattern = /<a\b([^>]*?)href\s*=\s*(["'])(.*?)\2([^>]*)>([\s\S]*?)<\/a>/giu;
+  let match = pattern.exec(html);
+  while (match) {
+    const href = normalizeUrlNoFragment(absoluteUrl(match[3], baseUrl));
+    const text = stripHtml(match[5]);
+    if (href && text) {
+      anchors.push({
+        href,
+        text,
+        attrs: `${match[1] ?? ''} ${match[4] ?? ''}`,
+      });
+    }
+    match = pattern.exec(html);
+  }
+  return anchors;
+}
+
 function normalizeUrlNoFragment(value, baseUrl = undefined) {
   const normalized = normalizeText(value);
   if (!normalized) {
@@ -85,6 +183,150 @@ function fileNameForChapter(chapter, index) {
   );
   const prefix = String(index + 1).padStart(4, '0');
   return `${prefix}-${title}.txt`;
+}
+
+function is22BiquBookDirectoryUrl(value) {
+  try {
+    return /\/biqu\d+\/?$/iu.test(new URL(value).pathname);
+  } catch {
+    return /\/biqu\d+\/?$/iu.test(normalizeText(value));
+  }
+}
+
+function is22BiquChapterUrl(value) {
+  try {
+    return /\/biqu\d+\/\d+(?:_\d+)?\.html$/iu.test(new URL(value).pathname);
+  } catch {
+    return /\/biqu\d+\/\d+(?:_\d+)?\.html$/iu.test(normalizeText(value));
+  }
+}
+
+function bookPathFromUrl(value) {
+  try {
+    return new URL(value).pathname.match(/\/biqu\d+\//iu)?.[0] ?? '';
+  } catch {
+    return normalizeText(value).match(/\/biqu\d+\//iu)?.[0] ?? '';
+  }
+}
+
+function chapterNumericId(value) {
+  try {
+    const match = new URL(value).pathname.match(/\/(\d+)(?:_\d+)?\.html$/iu);
+    const parsed = Number(match?.[1]);
+    return Number.isFinite(parsed) ? parsed : null;
+  } catch {
+    const match = normalizeText(value).match(/\/(\d+)(?:_\d+)?\.html$/iu);
+    const parsed = Number(match?.[1]);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+}
+
+function titleChapterNumber(value) {
+  const match = normalizeText(value).match(/(?:第\s*)?(\d+)\s*(?:章|节|回)?/iu);
+  const parsed = Number(match?.[1]);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function sortDirectoryChapters(chapters = []) {
+  return chapters
+    .map((chapter, originalIndex) => ({ chapter, originalIndex }))
+    .sort((left, right) => {
+      const leftUrlId = chapterNumericId(left.chapter.href);
+      const rightUrlId = chapterNumericId(right.chapter.href);
+      if (leftUrlId !== null && rightUrlId !== null && leftUrlId !== rightUrlId) {
+        return leftUrlId - rightUrlId;
+      }
+      const leftTitleId = titleChapterNumber(left.chapter.title);
+      const rightTitleId = titleChapterNumber(right.chapter.title);
+      if (leftTitleId !== null && rightTitleId !== null && leftTitleId !== rightTitleId) {
+        return leftTitleId - rightTitleId;
+      }
+      return left.originalIndex - right.originalIndex;
+    })
+    .map((entry) => entry.chapter);
+}
+
+function shouldSkipDirectoryAnchorText(value) {
+  const normalized = normalizeText(value).toLowerCase();
+  return [
+    '上一章',
+    '下一章',
+    '返回目录',
+    '加入书签',
+    '章节报错',
+    '投推荐票',
+    '上一页',
+    '下一页',
+  ].includes(normalized);
+}
+
+function parseDirectoryChaptersFromHtml(html, baseUrl) {
+  const bookPath = bookPathFromUrl(baseUrl);
+  const seen = new Set();
+  const chapters = [];
+  for (const anchor of extractAnchors(html, baseUrl)) {
+    if (!is22BiquChapterUrl(anchor.href)) {
+      continue;
+    }
+    if (bookPath && !new URL(anchor.href).pathname.includes(bookPath)) {
+      continue;
+    }
+    if (shouldSkipDirectoryAnchorText(anchor.text)) {
+      continue;
+    }
+    const href = normalizeUrlNoFragment(anchor.href);
+    if (!href || seen.has(href)) {
+      continue;
+    }
+    seen.add(href);
+    chapters.push({
+      href,
+      title: anchor.text,
+    });
+  }
+  return sortDirectoryChapters(chapters)
+    .map((chapter, index) => ({
+      ...chapter,
+      chapterIndex: index + 1,
+    }));
+}
+
+function parseDirectoryBookFromHtml(html, finalUrl, source = 'directory-html') {
+  const normalizedHtml = String(html ?? '');
+  const finalUrlValue = normalizeUrlNoFragment(finalUrl);
+  const metaBookUrl = extractMetaContent(normalizedHtml, ['og:novel:read_url', 'og:url']);
+  const bookUrlValue = is22BiquBookDirectoryUrl(finalUrlValue)
+    ? finalUrlValue
+    : normalizeUrlNoFragment(firstText(metaBookUrl, finalUrlValue));
+  if (!normalizedHtml.trim() || !bookUrlValue) {
+    return null;
+  }
+  const chapters = parseDirectoryChaptersFromHtml(normalizedHtml, bookUrlValue);
+  if (chapters.length === 0) {
+    return null;
+  }
+  const title = firstText(
+    extractMetaContent(normalizedHtml, ['og:novel:book_name']),
+    extractFirstTextByRegex(normalizedHtml, [
+      /<h1[^>]*>([\s\S]*?)<\/h1>/iu,
+      /<h2[^>]*>([\s\S]*?)<\/h2>/iu,
+    ]),
+    extractTitle(normalizedHtml).replace(/[（(].*$/u, ''),
+    bookUrlValue,
+  );
+  return {
+    chapters,
+    book: {
+      title,
+      url: bookUrlValue,
+      id: bookPathFromUrl(bookUrlValue).replace(/\W+/gu, '-').replace(/^-|-$/gu, ''),
+      source,
+    },
+    directory: {
+      source,
+      chapterCount: chapters.length,
+    },
+  };
 }
 
 function requestDryRun(request, plan) {
@@ -118,6 +360,138 @@ function fixtureDirCandidates(request = {}, context = {}) {
     context.fixtureDir,
     context.mockDir,
   ].map((value) => normalizeText(value)).filter(Boolean);
+}
+
+function stringValue(value) {
+  return typeof value === 'string' && value.trim() ? value : '';
+}
+
+function directoryNestedInputs(request = {}, context = {}) {
+  return [
+    isObject(request.directory) ? request.directory : {},
+    isObject(request.fixture) ? request.fixture : {},
+    isObject(request.mock) ? request.mock : {},
+    isObject(request.bookDirectory) ? request.bookDirectory : {},
+    isObject(context.directory) ? context.directory : {},
+    isObject(context.fixture) ? context.fixture : {},
+    isObject(context.mock) ? context.mock : {},
+    isObject(context.bookDirectory) ? context.bookDirectory : {},
+  ];
+}
+
+function directoryHtmlStringCandidates(request = {}, context = {}) {
+  const nested = directoryNestedInputs(request, context);
+  return [
+    request.html,
+    request.htmlString,
+    request.rawHtml,
+    request.pageHtml,
+    request.sourceHtml,
+    request.fixtureHtml,
+    request.fixtureHtmlString,
+    request.mockHtml,
+    request.responseHtml,
+    request.directoryHtml,
+    request.directoryHtmlString,
+    request.bookHtml,
+    request.bookDirectoryHtml,
+    request.bookDirectoryHtmlString,
+    context.html,
+    context.htmlString,
+    context.rawHtml,
+    context.pageHtml,
+    context.sourceHtml,
+    context.fixtureHtml,
+    context.fixtureHtmlString,
+    context.mockHtml,
+    context.responseHtml,
+    context.directoryHtml,
+    context.directoryHtmlString,
+    context.bookHtml,
+    context.bookDirectoryHtml,
+    context.bookDirectoryHtmlString,
+    ...nested.flatMap((entry) => [
+      entry.html,
+      entry.htmlString,
+      entry.rawHtml,
+      entry.pageHtml,
+      entry.sourceHtml,
+      entry.fixtureHtml,
+      entry.fixtureHtmlString,
+      entry.directoryHtml,
+      entry.directoryHtmlString,
+      entry.bookHtml,
+      entry.bookDirectoryHtml,
+      entry.bookDirectoryHtmlString,
+    ]),
+  ].map((value) => stringValue(value)).filter(Boolean);
+}
+
+function directoryHtmlPathCandidates(request = {}, context = {}) {
+  const nested = directoryNestedInputs(request, context);
+  return [
+    request.fixtureHtml,
+    request.directoryHtml,
+    request.bookDirectoryHtml,
+    request.htmlPath,
+    request.htmlFile,
+    request.htmlFilePath,
+    request.fixtureHtmlPath,
+    request.fixtureHtmlFile,
+    request.fixtureHtmlFilePath,
+    request.mockHtmlPath,
+    request.mockHtmlFile,
+    request.directoryHtmlPath,
+    request.directoryHtmlFile,
+    request.bookHtmlPath,
+    request.bookHtmlFile,
+    request.bookDirectoryHtmlPath,
+    request.bookDirectoryHtmlFile,
+    context.fixtureHtml,
+    context.directoryHtml,
+    context.bookDirectoryHtml,
+    context.htmlPath,
+    context.htmlFile,
+    context.htmlFilePath,
+    context.fixtureHtmlPath,
+    context.fixtureHtmlFile,
+    context.fixtureHtmlFilePath,
+    context.mockHtmlPath,
+    context.mockHtmlFile,
+    context.directoryHtmlPath,
+    context.directoryHtmlFile,
+    context.bookHtmlPath,
+    context.bookHtmlFile,
+    context.bookDirectoryHtmlPath,
+    context.bookDirectoryHtmlFile,
+    ...nested.flatMap((entry) => [
+      entry.fixtureHtml,
+      entry.directoryHtml,
+      entry.bookDirectoryHtml,
+      entry.htmlPath,
+      entry.htmlFile,
+      entry.htmlFilePath,
+      entry.fixtureHtmlPath,
+      entry.fixtureHtmlFile,
+      entry.fixtureHtmlFilePath,
+      entry.directoryHtmlPath,
+      entry.directoryHtmlFile,
+      entry.bookHtmlPath,
+      entry.bookHtmlFile,
+    ]),
+  ].map((value) => normalizeText(value)).filter(Boolean);
+}
+
+function resolveDirectoryHtmlPath(value, request = {}, context = {}) {
+  const normalized = normalizeText(value);
+  if (!normalized) {
+    return '';
+  }
+  if (path.isAbsolute(normalized)) {
+    return normalized;
+  }
+  const baseDir = firstText(request.workspaceRoot, context.workspaceRoot, request.cwd, context.cwd, '.');
+  return path.resolve(baseDir, normalized);
 }
 
 function resolveFixturePath(value, baseDir) {
@@ -258,6 +632,34 @@ async function loadChaptersForBook(book, root) {
   return Array.isArray(chapters) ? chapters : [];
 }
 
+async function loadDirectoryHtmlChaptersForBook(book, root, request, plan) {
+  const inlineHtml = stringValue(firstText(book.directoryHtml, book.bookDirectoryHtml, book.html, book.rawHtml));
+  const htmlFile = firstText(
+    book.directoryHtmlFile,
+    book.directoryHtmlPath,
+    book.bookDirectoryHtmlFile,
+    book.bookDirectoryHtmlPath,
+    book.htmlFile,
+    book.htmlPath,
+  );
+  const finalUrl = bookUrl(book) || requestedBookUrl(request, plan);
+  if (!finalUrl) {
+    return null;
+  }
+  if (inlineHtml) {
+    return parseDirectoryBookFromHtml(inlineHtml, finalUrl, 'book-content-directory-html');
+  }
+  if (!htmlFile) {
+    return null;
+  }
+  try {
+    const htmlPath = resolveFixturePath(htmlFile, root);
+    return parseDirectoryBookFromHtml(await readFile(htmlPath, 'utf8'), finalUrl, 'book-content-directory-html');
+  } catch {
+    return null;
+  }
+}
+
 function chapterOrderValue(chapter = {}) {
   const value = chapter.chapterIndex ?? chapter.index ?? chapter.order ?? chapter.sequence;
   const parsed = Number(value);
@@ -295,20 +697,160 @@ async function chapterEntriesFromFixtures(request, plan, context) {
       continue;
     }
     const chapters = stableChapterEntries(await loadChaptersForBook(book, fixture.root));
-    if (chapters.length === 0) {
-      continue;
+    if (chapters.length > 0) {
+      return {
+        chapters,
+        book: {
+          title: bookTitle(book),
+          url: bookUrl(book),
+          id: firstText(book.bookId, book.id),
+          source: firstText(book.source, 'book-content-fixture'),
+        },
+      };
     }
-    return {
-      chapters,
-      book: {
-        title: bookTitle(book),
-        url: bookUrl(book),
-        id: firstText(book.bookId, book.id),
-        source: firstText(book.source, 'book-content-fixture'),
-      },
-    };
+
+    const directoryHtml = await loadDirectoryHtmlChaptersForBook(book, fixture.root, request, plan);
+    if (directoryHtml?.chapters?.length > 0) {
+      return {
+        chapters: directoryHtml.chapters,
+        book: {
+          title: firstText(bookTitle(book), directoryHtml.book?.title),
+          url: firstText(bookUrl(book), directoryHtml.book?.url),
+          id: firstText(book.bookId, book.id, directoryHtml.book?.id),
+          source: firstText(book.source, directoryHtml.book?.source, 'book-content-directory-html'),
+        },
+      };
+    }
   }
   return null;
+}
+
+async function directoryHtmlPayloadsFromFixtures(request = {}, plan = {}, context = {}) {
+  const finalUrl = requestedBookUrl(request, plan);
+  const payloads = directoryHtmlStringCandidates(request, context)
+    .map((html) => ({
+      html,
+      finalUrl,
+      source: 'fixture-html-string',
+    }));
+  const seenPaths = new Set();
+  for (const candidate of directoryHtmlPathCandidates(request, context)) {
+    const filePath = resolveDirectoryHtmlPath(candidate, request, context);
+    const key = path.resolve(filePath).toLowerCase();
+    if (!filePath || seenPaths.has(key) || !await pathExists(filePath)) {
+      continue;
+    }
+    seenPaths.add(key);
+    try {
+      payloads.push({
+        html: await readFile(filePath, 'utf8'),
+        finalUrl,
+        source: 'fixture-html-file',
+        filePath,
+      });
+    } catch {
+      continue;
+    }
+  }
+  return payloads;
+}
+
+function injectedFetchImpl(request = {}, context = {}) {
+  for (const candidate of [
+    request.fetchImpl,
+    request.mockFetchImpl,
+    context.fetchImpl,
+    context.mockFetchImpl,
+    context.deps?.fetchImpl,
+    context.options?.fetchImpl,
+  ]) {
+    if (typeof candidate === 'function') {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+async function responseToText(response) {
+  if (typeof response === 'string') {
+    return response;
+  }
+  if (!response || response.ok === false) {
+    return '';
+  }
+  if (typeof response.text === 'function') {
+    return await response.text();
+  }
+  return stringValue(response.body) || stringValue(response.data);
+}
+
+async function directoryHtmlPayloadFromFetch(request = {}, plan = {}, context = {}, sessionLease = null) {
+  const fetchImpl = injectedFetchImpl(request, context);
+  const finalUrl = requestedBookUrl(request, plan);
+  if (!fetchImpl || !finalUrl || !is22BiquBookDirectoryUrl(finalUrl)) {
+    return null;
+  }
+  try {
+    const response = await fetchImpl(finalUrl, {
+      method: 'GET',
+      headers: {
+        ...(sessionLease?.headers ?? {}),
+        ...(isObject(request.headers) ? request.headers : {}),
+      },
+      redirect: 'follow',
+    });
+    const html = await responseToText(response);
+    if (!stringValue(html)) {
+      return null;
+    }
+    return {
+      html,
+      finalUrl: normalizeUrlNoFragment(firstText(response?.url, finalUrl)),
+      source: 'fetchImpl',
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function chapterEntriesFromDirectoryHtml(request, plan, context, sessionLease) {
+  for (const payload of await directoryHtmlPayloadsFromFixtures(request, plan, context)) {
+    const parsed = parseDirectoryBookFromHtml(payload.html, payload.finalUrl, payload.source);
+    if (parsed) {
+      parsed.directory.filePath = payload.filePath || undefined;
+      return parsed;
+    }
+  }
+
+  const fetchedPayload = await directoryHtmlPayloadFromFetch(request, plan, context, sessionLease);
+  if (fetchedPayload) {
+    return parseDirectoryBookFromHtml(fetchedPayload.html, fetchedPayload.finalUrl, fetchedPayload.source);
+  }
+  return null;
+}
+
+function withDirectoryMetadata(resolved, directory) {
+  const metadata = {
+    ...resolved.metadata,
+    resolver: {
+      ...(resolved.metadata?.resolver ?? {}),
+      method: 'native-22biqu-directory',
+    },
+    directory: {
+      source: directory?.source,
+      filePath: directory?.filePath,
+      chapterCount: directory?.chapterCount,
+    },
+  };
+  delete metadata.bookContent;
+  return {
+    ...resolved,
+    metadata,
+    completeness: {
+      ...resolved.completeness,
+      reason: '22biqu-directory-provided',
+    },
+  };
 }
 
 function resolveChapterResources(plan, sessionLease, context, chapterEntries, details = {}) {
@@ -417,6 +959,14 @@ export async function resolveResources(plan, sessionLease = null, context = {}) 
           reason: '22biqu-book-content-provided',
         },
       };
+    }
+  }
+
+  const directoryChapters = await chapterEntriesFromDirectoryHtml(request, plan, context, sessionLease);
+  if (directoryChapters) {
+    const resolved = resolveChapterResources(plan, sessionLease, context, directoryChapters.chapters, directoryChapters);
+    if (resolved) {
+      return withDirectoryMetadata(resolved, directoryChapters.directory);
     }
   }
 
