@@ -425,6 +425,7 @@ test('social API parser extracts Instagram carousel media without user-node fals
       carousel_media: [
         {
           pk: 'child-image',
+          media_type: 1,
           image_versions2: {
             candidates: [
               { url: 'https://cdninstagram.com/child-image-small.jpg', width: 320, height: 320 },
@@ -434,6 +435,7 @@ test('social API parser extracts Instagram carousel media without user-node fals
         },
         {
           pk: 'child-video',
+          media_type: 2,
           image_versions2: { candidates: [{ url: 'https://cdninstagram.com/video-poster.jpg', width: 640, height: 640 }] },
           video_versions: [
             { url: 'https://cdninstagram.com/video-small.mp4', width: 480, height: 480 },
@@ -2345,6 +2347,23 @@ test('social action CLI parser keeps site defaults and maps common flags', () =>
   assert.equal(parsed.runDir, 'runs/social/manual');
   assert.equal(parsed.resume, true);
   assert.equal(parsed.dryRun, true);
+
+  const aliasParsed = parseSocialActionArgs([
+    'full-archive',
+    'instagram',
+    '--download-media',
+    '--download-concurrency',
+    '4',
+    '--download-retries',
+    '6',
+    '--download-backoff-ms',
+    '1500',
+  ], { site: 'instagram' });
+  assert.equal(aliasParsed.fullArchive, true);
+  assert.equal(aliasParsed.downloadMedia, true);
+  assert.equal(aliasParsed.mediaDownloadConcurrency, '4');
+  assert.equal(aliasParsed.mediaDownloadRetries, '6');
+  assert.equal(aliasParsed.mediaDownloadBackoffMs, '1500');
 });
 
 test('social action CLI parser handles explicit API cursor booleans', () => {
