@@ -531,6 +531,139 @@ test('runSocialAction suppresses API cursor for Instagram relation actions', asy
   assert.equal(result.settings.apiCursorSuppressed, true);
 });
 
+test('runSocialAction archives Instagram profile content through api v1 feed user fallback', async (t) => {
+  const runDir = await mkdtemp(path.join(os.tmpdir(), 'bws-social-ig-feed-user-'));
+  t.after(async () => {
+    await rm(runDir, { recursive: true, force: true });
+  });
+  const requests = [];
+  const fakeSession = {
+    async navigateAndWait() {},
+    async evaluateValue() {
+      return 'https://www.instagram.com/instagram/';
+    },
+    async callPageFunction(fn, ...args) {
+      const source = String(fn);
+      if (source.includes('pageFetchJson')) {
+        const request = args[0] || {};
+        const url = String(request.url || request);
+        requests.push(url);
+        if (url.includes('/api/v1/users/web_profile_info/')) {
+          return {
+            ok: true,
+            status: 200,
+            headers: {},
+            json: {
+              data: {
+                user: {
+                  id: '25025320',
+                  username: 'instagram',
+                  full_name: 'Instagram',
+                  edge_owner_to_timeline_media: { count: 2 },
+                },
+              },
+            },
+          };
+        }
+        if (url.includes('/api/v1/feed/user/25025320/') && !url.includes('max_id=')) {
+          return {
+            ok: true,
+            status: 200,
+            headers: {},
+            json: {
+              items: [{
+                pk: 'feed-1',
+                code: 'FEEDONE',
+                taken_at: 1777053600,
+                user: { pk: '25025320', username: 'instagram' },
+                caption: null,
+                image_versions2: { candidates: [{ url: 'https://cdninstagram.com/feed-one.jpg', width: 1080, height: 1350 }] },
+              }],
+              more_available: true,
+              next_max_id: 'NEXT_MAX_ID',
+            },
+          };
+        }
+        if (url.includes('/api/v1/feed/user/25025320/') && url.includes('max_id=NEXT_MAX_ID')) {
+          return {
+            ok: true,
+            status: 200,
+            headers: {},
+            json: {
+              items: [{
+                pk: 'feed-2',
+                code: 'FEEDTWO',
+                taken_at: 1777140000,
+                user: { pk: '25025320', username: 'instagram' },
+                caption: { text: 'second feed item' },
+                video_versions: [{ url: 'https://cdninstagram.com/feed-two.mp4', width: 1080, height: 1920 }],
+                image_versions2: { candidates: [{ url: 'https://cdninstagram.com/feed-two.jpg', width: 1080, height: 1920 }] },
+              }],
+              more_available: false,
+            },
+          };
+        }
+      }
+      if (source.includes('pageExtractSocialState')) {
+        return {
+          url: 'https://www.instagram.com/instagram/',
+          title: 'Instagram',
+          currentAccount: 'me',
+          account: { handle: 'instagram', displayName: 'Instagram' },
+          items: [],
+          relations: [],
+          media: [],
+        };
+      }
+      if (source.includes('pageScrollToBottom')) {
+        return { before: 0, after: 0, height: 0 };
+      }
+      return null;
+    },
+    getMetrics() {
+      return {};
+    },
+    async close() {},
+  };
+
+  const result = await runSocialAction({
+    site: 'instagram',
+    action: 'full-archive',
+    account: 'instagram',
+    maxApiPages: 3,
+    maxScrolls: 0,
+    scrollWaitMs: 0,
+    timeoutMs: 1000,
+    runDir,
+  }, {
+    async resolveSiteBrowserSessionOptions() {
+      return { userDataDir: null, cleanupUserDataDirOnShutdown: true };
+    },
+    async openBrowserSession() {
+      return fakeSession;
+    },
+    async ensureAuthenticatedSession() {
+      return { loggedIn: true };
+    },
+  });
+
+  const manifest = JSON.parse(await readFile(path.join(runDir, 'manifest.json'), 'utf8'));
+  const indexCsv = await readFile(path.join(runDir, 'index.csv'), 'utf8');
+  const indexHtml = await readFile(path.join(runDir, 'index.html'), 'utf8');
+  assert.equal(result.result.archive.strategy, 'instagram-feed-user');
+  assert.equal(result.result.archive.userId, '25025320');
+  assert.equal(result.result.archive.pages, 2);
+  assert.equal(result.result.archive.complete, true);
+  assert.equal(result.result.items.length, 2);
+  assert.equal(result.result.items[0].text, '');
+  assert.equal(result.result.items[1].media[0].type, 'video');
+  assert.ok(requests.some((url) => url.includes('/api/v1/feed/user/25025320/')));
+  assert.equal(manifest.archive.strategy, 'instagram-feed-user');
+  assert.equal(manifest.completeness.apiItemCount, 2);
+  assert.match(indexCsv, /FEEDONE/u);
+  assert.match(indexHtml, /second feed item/u);
+});
+
 test('runSocialAction opens a blank page before API cursor capture navigation', async () => {
   let startupUrl = null;
   const navigations = [];
@@ -2840,15 +2973,21 @@ test('runSocialAction writes standard social archive artifacts', async (t) => {
   const state = JSON.parse(await readFile(path.join(runDir, 'state.json'), 'utf8'));
   const itemsText = await readFile(path.join(runDir, 'items.jsonl'), 'utf8');
   const report = await readFile(path.join(runDir, 'report.md'), 'utf8');
+  const indexCsv = await readFile(path.join(runDir, 'index.csv'), 'utf8');
+  const indexHtml = await readFile(path.join(runDir, 'index.html'), 'utf8');
 
   assert.equal(result.artifacts.runDir, runDir);
   assert.equal(manifest.schemaVersion, 1);
   assert.equal(manifest.counts.items, 1);
+  assert.equal(manifest.artifacts.indexCsv, path.join(runDir, 'index.csv'));
+  assert.equal(manifest.artifacts.indexHtml, path.join(runDir, 'index.html'));
   assert.equal(state.status, 'completed');
   assert.equal(state.counts.items, 1);
   assert.match(itemsText, /"kind":"item"/u);
   assert.match(itemsText, /https:\/\/x\.com\/openai\/status\/1/u);
   assert.match(report, /- Items: 1/u);
+  assert.match(indexCsv, /artifact item/u);
+  assert.match(indexHtml, /artifact item/u);
 });
 
 test('runSocialAction uses X API media variants for downloads even when apiCursor is not requested', async (t) => {
@@ -3450,6 +3589,100 @@ test('runSocialAction downloads media with bounded concurrency', async (t) => {
   assert.equal(result.download.concurrency, 2);
   const manifest = JSON.parse(await readFile(path.join(runDir, 'manifest.json'), 'utf8'));
   assert.equal(manifest.downloads.concurrency, 2);
+});
+
+test('runSocialAction lowers media download concurrency after previous failures', async (t) => {
+  const runDir = await mkdtemp(path.join(os.tmpdir(), 'bws-social-download-adaptive-concurrency-'));
+  const previousFetch = globalThis.fetch;
+  let active = 0;
+  let maxActive = 0;
+  t.after(async () => {
+    globalThis.fetch = previousFetch;
+    await rm(runDir, { recursive: true, force: true });
+  });
+  await writeFile(path.join(runDir, 'media-queue.json'), JSON.stringify({
+    schemaVersion: 1,
+    queue: [
+      { key: 'image:https://pbs.twimg.com/media/one.jpg', status: 'failed', result: { ok: false } },
+      { key: 'image:https://pbs.twimg.com/media/two.jpg', status: 'failed', result: { ok: false } },
+      { key: 'image:https://pbs.twimg.com/media/three.jpg', status: 'done', result: { ok: true, filePath: path.join(runDir, 'missing-three.jpg') } },
+      { key: 'image:https://pbs.twimg.com/media/four.jpg', status: 'done', result: { ok: true, filePath: path.join(runDir, 'missing-four.jpg') } },
+    ],
+  }), 'utf8');
+  globalThis.fetch = async (url) => {
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    active -= 1;
+    return {
+      ok: true,
+      status: 200,
+      headers: {
+        get(name) {
+          return String(name).toLowerCase() === 'content-type' ? 'image/jpeg' : '';
+        },
+      },
+      async arrayBuffer() {
+        return new TextEncoder().encode(String(url)).buffer;
+      },
+    };
+  };
+
+  const item = {
+    id: 'post-1',
+    url: 'https://x.com/openai/status/1',
+    text: 'adaptive media item',
+    timestamp: '2026-04-26T00:00:00.000Z',
+    media: [
+      { type: 'image', url: 'https://pbs.twimg.com/media/one.jpg' },
+      { type: 'image', url: 'https://pbs.twimg.com/media/two.jpg' },
+      { type: 'image', url: 'https://pbs.twimg.com/media/three.jpg' },
+      { type: 'image', url: 'https://pbs.twimg.com/media/four.jpg' },
+    ],
+  };
+  const fakeSession = {
+    async navigateAndWait() {},
+    async evaluateValue() { return 'https://x.com/openai'; },
+    async callPageFunction(fn) {
+      const source = String(fn);
+      if (source.includes('pageExtractSocialState')) {
+        return { url: 'https://x.com/openai', title: 'OpenAI / X', currentAccount: 'me', account: { handle: 'openai' }, items: [item], relations: [], media: item.media };
+      }
+      if (source.includes('pageScrollToBottom')) {
+        return { before: 0, after: 0, height: 0 };
+      }
+      return null;
+    },
+    getMetrics() { return {}; },
+    async close() {},
+  };
+
+  const result = await runSocialAction({
+    site: 'x',
+    action: 'profile-content',
+    account: 'openai',
+    maxScrolls: 0,
+    timeoutMs: 1000,
+    downloadMedia: true,
+    mediaDownloadConcurrency: 4,
+    resume: true,
+    runDir,
+  }, {
+    async resolveSiteBrowserSessionOptions() { return { userDataDir: null, cleanupUserDataDirOnShutdown: true }; },
+    async openBrowserSession() { return fakeSession; },
+    async ensureAuthenticatedSession() { return { loggedIn: true }; },
+    async exportDownloadSessionPassthrough() { return {}; },
+  });
+
+  const manifest = JSON.parse(await readFile(path.join(runDir, 'manifest.json'), 'utf8'));
+  assert.equal(maxActive, 2);
+  assert.equal(result.download.requestedConcurrency, 4);
+  assert.equal(result.download.concurrency, 2);
+  assert.equal(result.download.adaptiveConcurrency.adjusted, true);
+  assert.equal(result.download.adaptiveConcurrency.reason, 'previous-failure-rate-high');
+  assert.equal(manifest.downloads.requestedConcurrency, 4);
+  assert.equal(manifest.downloads.concurrency, 2);
+  assert.equal(manifest.downloads.adaptiveConcurrency.previous.failed, 2);
 });
 
 test('runSocialAction resume reuses existing media downloads', async (t) => {
