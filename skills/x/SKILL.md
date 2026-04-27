@@ -26,6 +26,7 @@ Use `node src/entrypoints/sites/x-action.mjs <action> [target]` for authenticate
 - `search --query <keyword>`.
 - Add `--download-media` to download media from the current result set with browser cookie passthrough. For X `profile-content`, `search`, and `followed-posts-by-date`, media download also enables API seed capture even when cursor paging is disabled; API media is preferred over DOM posters, and video entries use the best available `video/mp4` variant before falling back to DOM/performance-visible URLs. If API capture is unavailable and only an X video poster image is visible, reports mark it as `poster-only-video-fallback` with `expectedType: "video"`.
 - Media downloads write `downloads.jsonl`, `media-queue.json`, and `media-manifest.json`; inspect `media-manifest.json` for SHA-256 hashes, small-file anomalies, content-type mismatches, and ffprobe video checks.
+- Unified runner migration: use `node src/entrypoints/sites/download.mjs --site x --input <handle> --task-type social-archive --json` for a dry-run wrapper manifest. Add `--execute` only after the plan and session state are reviewed. Current branch behavior falls back to `x-action.mjs` for social archive/media execution; do not treat the runner wrapper as proof that live auth is healthy.
 - If the default Browser-Wiki-Skill profile is not logged in, set `BWS_X_USER_DATA_DIR` or pass `--user-data-dir <Chrome user data dir>` to reuse an existing authenticated Chrome profile.
 
 ## Live Operations
@@ -35,6 +36,7 @@ Use `node src/entrypoints/sites/x-action.mjs <action> [target]` for authenticate
 - Build a local run dashboard with `node scripts/social-live-dashboard.mjs --site x`; open `runs/social-live-dashboard/social-live-dashboard.html` to review recent health, rate-limit, download quality, and drift signals.
 - Preview a scheduled health watcher with `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\install-social-health-watch-task.ps1 -Site x`; add `-Execute` only after reviewing the generated `schtasks.exe` command.
 - Action manifests can include `recoveryRunbook.commands`; prefer those exact next commands after login wall, challenge, rate-limit, API drift, or media-download failures.
+- Unified runner manifests under `runs/downloads/x/...` can include normalized legacy source artifact paths. For media issues, inspect the action-level `media-manifest.json` and use the action manifest's `recoveryRunbook.commands` before retrying.
 
 ## Natural Language Shortcuts
 

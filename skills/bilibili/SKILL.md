@@ -28,6 +28,7 @@ description: Instruction-only Skill for https://www.bilibili.com/. Use when Code
 - Public bilibili pages MUST use the built-in browser.
 - Authenticated bilibili pages MUST use the canonical opener: `node .\src\entrypoints\sites\bilibili-action.mjs open <bilibili-authenticated-url>`.
 - Download requests MUST use the canonical downloader router: `node .\src\entrypoints\sites\bilibili-action.mjs download <url-or-bv>...`.
+- Unified runner migration: for plan-first operations use `node .\src\entrypoints\sites\download.mjs --site bilibili --input <url-or-bv> --json`; add `--execute` only after reviewing the dry-run. Current branch behavior wraps the run artifacts and falls back to the bilibili action router when no native resources are resolved.
 - Login bootstrap MUST run through the canonical helper path: `node .\src\entrypoints\sites\bilibili-action.mjs login https://www.bilibili.com/`.
 - The built-in browser NEVER carries bilibili login state.
 - If an authenticated bilibili page needs a reusable local session, the router MUST trigger the local login helper before continuing.
@@ -43,6 +44,12 @@ description: Instruction-only Skill for https://www.bilibili.com/. Use when Code
   - `node .\src\entrypoints\sites\bilibili-action.mjs open <url>`
 - Download one or more bilibili videos:
   - `node .\src\entrypoints\sites\bilibili-action.mjs download <url-or-bv>...`
+- Download runner dry-run / execute:
+  - `node .\src\entrypoints\sites\download.mjs --site bilibili --input <url-or-bv> --json`
+  - `node .\src\entrypoints\sites\download.mjs --site bilibili --input <url-or-bv> --execute --json`
+- Resume or retry a runner run:
+  - `node .\src\entrypoints\sites\download.mjs --site bilibili --input <url-or-bv> --execute --run-dir <run-dir> --resume`
+  - `node .\src\entrypoints\sites\download.mjs --site bilibili --input <url-or-bv> --execute --run-dir <run-dir> --retry-failed`
 - Run explicit login bootstrap:
   - `node .\src\entrypoints\sites\bilibili-action.mjs login https://www.bilibili.com/`
 - Legacy helpers remain available when needed:

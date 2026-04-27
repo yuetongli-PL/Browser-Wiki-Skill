@@ -26,6 +26,7 @@ Use `node src/entrypoints/sites/instagram-action.mjs <action> [target]` for auth
 - Add `--download-media` to save visible image/video URLs with browser cookie passthrough.
 - Media downloads write `downloads.jsonl`, `media-queue.json`, and `media-manifest.json`; inspect `media-manifest.json` for SHA-256 hashes, small-file anomalies, content-type mismatches, and ffprobe video checks.
 - Full archive and media download runs are resumable from the run directory/manifest. Reuse completed files, retry failed media queue entries, and verify the manifest before declaring the archive complete.
+- Unified runner migration: use `node src/entrypoints/sites/download.mjs --site instagram --input <handle> --task-type social-archive --json` for a dry-run wrapper manifest. Add `--execute` only after the plan and session state are reviewed. Current branch behavior falls back to `instagram-action.mjs` for social archive/media execution; the runner docs do not claim that live auth is currently healthy.
 - Full archive output should include machine-readable JSON/JSONL artifacts plus CSV and HTML indexes for local review.
 - API parsing treats `api/v1/feed/user/<userId>/` as the formal Instagram profile-content/full-archive pagination path. GraphQL, generic `/api/v1/feed/user/`, and clips/reels-shaped payloads are compatibility fallbacks; DOM remains the final fallback when live payloads are unavailable.
 - If the default Browser-Wiki-Skill profile is not logged in, set `BWS_INSTAGRAM_USER_DATA_DIR` or pass `--user-data-dir <Chrome user data dir>` to reuse an existing authenticated browser profile.
@@ -37,6 +38,7 @@ Use `node src/entrypoints/sites/instagram-action.mjs <action> [target]` for auth
 - Build a local run dashboard with `node scripts/social-live-dashboard.mjs --site instagram`; open `runs/social-live-dashboard/social-live-dashboard.html` to review recent health, rate-limit, download quality, and drift signals.
 - Preview a scheduled health watcher with `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\install-social-health-watch-task.ps1 -Site instagram`; add `-Execute` only after reviewing the generated `schtasks.exe` command.
 - Action manifests can include `recoveryRunbook.commands`; prefer those exact next commands after login wall, challenge, rate-limit, API drift, or media-download failures.
+- Unified runner manifests under `runs/downloads/instagram/...` can include normalized legacy source artifact paths. For media issues, inspect the action-level `media-manifest.json` and use the action manifest's `recoveryRunbook.commands` before retrying.
 
 ## Natural Language Shortcuts
 

@@ -12,6 +12,7 @@ description: Instruction-only Skill for https://www.22biqu.com/. Use when Codex 
 - Safe actions: `download-book`, `navigate`, `search-submit`
 - Supported tasks: search books, open book directories, open author pages, open chapter pages, and download full public novels.
 - Download entrypoint: `pypy3 src/sites/chapter-content/download/python/book.py`.
+- Unified runner migration: use `node src/entrypoints/sites/download.mjs --site 22biqu --input "<book-title-or-url>" --json` for a dry-run manifest. Add `--execute` only after the plan is reviewed. Normal title/book-url downloads currently fall back to the legacy Python book downloader; native runner execution applies only when concrete chapter/resource entries are already resolved.
 
 ## Reading order
 
@@ -28,6 +29,7 @@ description: Instruction-only Skill for https://www.22biqu.com/. Use when Codex 
 - Login or register pages may be opened, but credential submission is out of scope.
 - Prefer returning a local full-book TXT if one already exists.
 - If no valid local artifact exists, reuse or generate the host crawler and download again.
+- For interrupted runner runs, prefer the generated `resumeCommand` in `runs/downloads/22biqu/.../manifest.json`; use `--retry-failed` only when the previous `queue.json` contains failed entries.
 - For author/latest chapter/update-time questions, verify against the live `/biqu.../` directory page; do not trust search-engine snippets or older paginated pages as the final source of truth.
 
 ## Do not do
