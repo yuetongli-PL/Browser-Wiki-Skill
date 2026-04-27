@@ -44,6 +44,15 @@ const REQUIRED_RESOURCE_KEYS = [
   'metadata',
 ];
 
+const REQUIRED_TASK_KEYS_SORTED = [...REQUIRED_TASK_KEYS].sort();
+const REQUIRED_RESOURCE_KEYS_SORTED = [...REQUIRED_RESOURCE_KEYS].sort();
+const REQUIRED_COMPLETENESS_KEYS_SORTED = [
+  'complete',
+  'expectedCount',
+  'reason',
+  'resolvedCount',
+].sort();
+
 const SITE_FIXTURES = [
   {
     site: 'bilibili',
@@ -157,6 +166,59 @@ function sortedKeys(value) {
   return Object.keys(value).sort();
 }
 
+function assertResolvedTaskSchema(resolved, fixture, {
+  expectedCount = resolved.resources.length,
+  resolvedCount = resolved.resources.length,
+  complete = true,
+  reason = fixture.options.completeReason,
+} = {}) {
+  assert.deepEqual(sortedKeys(resolved), REQUIRED_TASK_KEYS_SORTED);
+  assert.equal(Array.isArray(resolved.resources), true);
+  assert.equal(Array.isArray(resolved.groups), true);
+  assert.deepEqual(sortedKeys(resolved.completeness), REQUIRED_COMPLETENESS_KEYS_SORTED);
+  assert.equal(resolved.metadata.resolver.method, fixture.options.method);
+  assert.equal(resolved.completeness.expectedCount, expectedCount);
+  assert.equal(resolved.completeness.resolvedCount, resolvedCount);
+  assert.equal(resolved.completeness.complete, complete);
+  assert.equal(resolved.completeness.reason, reason);
+}
+
+function assertResourceSchema(resource, fixture, {
+  id,
+  url,
+  method = 'GET',
+  headers = {},
+  fileName,
+  mediaType,
+  sourceUrl,
+  referer,
+  expectedBytes,
+  expectedHash,
+  priority,
+  groupId,
+  metadata = {},
+} = {}) {
+  assert.deepEqual(sortedKeys(resource), REQUIRED_RESOURCE_KEYS_SORTED);
+  assert.equal(resource.id, id);
+  assert.equal(resource.url, url);
+  assert.equal(resource.method, method);
+  assert.equal(resource.fileName, fileName);
+  assert.equal(resource.mediaType, mediaType);
+  assert.equal(resource.sourceUrl, sourceUrl);
+  assert.equal(resource.referer, referer);
+  assert.equal(resource.expectedBytes, expectedBytes);
+  assert.equal(resource.expectedHash, expectedHash);
+  assert.equal(resource.priority, priority);
+  assert.equal(resource.groupId, groupId);
+  assert.equal(typeof resource.headers, 'object');
+  assert.equal(typeof resource.metadata, 'object');
+  assert.deepEqual(resource.headers, headers);
+  assert.deepEqual(resource.metadata, {
+    ...metadata,
+    siteResolver: fixture.site,
+  });
+}
+
 test('native seed resolver options expose the same contract knobs for all three sites', () => {
   const shapes = SITE_FIXTURES.map((fixture) => sortedKeys(fixture.options));
   assert.deepEqual(shapes[0], ['completeReason', 'defaultMediaType', 'incompleteReason', 'method']);
@@ -174,20 +236,34 @@ test('native seed resolvers return the same resolved task and resource schema', 
     const { resolved } = await resolveFixture(fixture);
     const resource = resolved.resources[0];
 
-    assert.deepEqual(sortedKeys(resolved), REQUIRED_TASK_KEYS.sort());
-    assert.deepEqual(sortedKeys(resource), REQUIRED_RESOURCE_KEYS.sort());
+    assertResolvedTaskSchema(resolved, fixture, {
+      expectedCount: 1,
+      resolvedCount: 1,
+      complete: true,
+      reason: fixture.options.completeReason,
+    });
     assert.equal(resolved.resources.length, 1);
-    assert.equal(resource.headers['Accept-Language'], 'zh-CN');
-    assert.equal(resource.headers[fixture.expectedResource.headerName], fixture.expectedResource.headerValue);
-    assert.equal(resource.fileName, fixture.expectedResource.fileName);
-    assert.equal(resource.mediaType, fixture.expectedResource.mediaType);
-    assert.equal(resource.metadata[fixture.expectedResource.metadataName], fixture.expectedResource.metadataValue);
-    assert.equal(resource.metadata.siteResolver, fixture.site);
-    assert.equal(resolved.metadata.resolver.method, fixture.options.method);
-    assert.equal(resolved.completeness.complete, true);
-    assert.equal(resolved.completeness.expectedCount, 1);
-    assert.equal(resolved.completeness.resolvedCount, 1);
-    assert.equal(resolved.completeness.reason, fixture.options.completeReason);
+    assertResourceSchema(resource, fixture, {
+      id: resource.id,
+      url: resource.url,
+      headers: {
+        'Accept-Language': 'zh-CN',
+        [fixture.expectedResource.headerName]: fixture.expectedResource.headerValue,
+      },
+      fileName: fixture.expectedResource.fileName,
+      mediaType: fixture.expectedResource.mediaType,
+      sourceUrl: fixture.input,
+      referer: fixture.input,
+      expectedBytes: undefined,
+      expectedHash: undefined,
+      priority: 0,
+      groupId: fixture.request.title,
+      metadata: {
+        [fixture.expectedResource.metadataName]: fixture.expectedResource.metadataValue,
+        title: fixture.request.title,
+        sourceTitle: fixture.request.title,
+      },
+    });
     resolvedTasks.push(resolved);
   }
 
@@ -196,6 +272,247 @@ test('native seed resolvers return the same resolved task and resource schema', 
   for (const resolved of resolvedTasks.slice(1)) {
     assert.deepEqual(sortedKeys(resolved), taskShape);
     assert.deepEqual(sortedKeys(resolved.resources[0]), resourceShape);
+  }
+});
+
+test('native seed resolvers keep multi-resource arrays and per-resource fields aligned', async () => {
+  const sessionLease = {
+    siteKey: 'schema-test',
+    status: 'ready',
+    headers: {
+      'Accept-Language': 'zh-CN',
+      'User-Agent': 'native-schema-test',
+    },
+  };
+  const cases = [
+    {
+      site: 'bilibili',
+      request: {
+        site: 'bilibili',
+        input: 'https://www.bilibili.com/video/BV1nativeSchemaMulti/',
+        title: 'Bilibili Multi Schema',
+        headers: { 'X-Request-Trace': 'bilibili-request' },
+        downloadHeaders: { 'X-Download-Trace': 'bilibili-download' },
+        resources: [
+          {
+            id: 'bili-video',
+            url: 'https://upos.example.test/schema/multi-video.m4s',
+            fileName: 'bilibili-video.m4s',
+            mediaType: 'video',
+            headers: { Range: 'bytes=0-' },
+            metadata: { stream: 'video' },
+            expectedBytes: '2048',
+            expectedHash: 'sha256-video',
+          },
+          {
+            id: 'bili-audio',
+            url: 'https://upos.example.test/schema/multi-audio.m4s',
+            contentType: 'audio/mpeg',
+            headers: { Range: 'bytes=10-' },
+            metadata: { stream: 'audio' },
+            priority: 9,
+          },
+        ],
+        dryRun: true,
+      },
+      expectedResources: [
+        {
+          id: 'bili-video',
+          url: 'https://upos.example.test/schema/multi-video.m4s',
+          fileName: 'bilibili-video.m4s',
+          mediaType: 'video',
+          headers: { Range: 'bytes=0-' },
+          expectedBytes: 2048,
+          expectedHash: 'sha256-video',
+          priority: 0,
+          groupId: 'Bilibili Multi Schema',
+          metadata: {
+            stream: 'video',
+            title: 'Bilibili Multi Schema',
+            sourceTitle: 'Bilibili Multi Schema',
+          },
+        },
+        {
+          id: 'bili-audio',
+          url: 'https://upos.example.test/schema/multi-audio.m4s',
+          fileName: '0002-Bilibili Multi Schema.mp3',
+          mediaType: 'audio',
+          headers: { Range: 'bytes=10-' },
+          expectedBytes: undefined,
+          expectedHash: undefined,
+          priority: 9,
+          groupId: 'Bilibili Multi Schema',
+          metadata: {
+            stream: 'audio',
+            title: 'Bilibili Multi Schema',
+            sourceTitle: 'Bilibili Multi Schema',
+          },
+        },
+      ],
+    },
+    {
+      site: 'douyin',
+      request: {
+        site: 'douyin',
+        input: 'https://www.douyin.com/video/7321000000000000001',
+        title: 'Douyin Multi Schema',
+        headers: { 'X-Request-Trace': 'douyin-request' },
+        downloadHeaders: { 'X-Download-Trace': 'douyin-download' },
+        metadata: {
+          directMedia: [
+            {
+              id: 'douyin-video',
+              resolvedMediaUrl: 'https://v3-web.example.test/schema/multi-play.mp4',
+              fileName: 'douyin-video.mp4',
+              headers: { Cookie: 'session=1' },
+              metadata: { stream: 'play' },
+            },
+            {
+              id: 'douyin-cover',
+              url: 'https://v3-web.example.test/schema/multi-cover.webp',
+              contentType: 'image/webp',
+              headers: { Accept: 'image/webp' },
+              metadata: { stream: 'cover' },
+            },
+          ],
+        },
+        dryRun: true,
+      },
+      expectedResources: [
+        {
+          id: 'douyin-video',
+          url: 'https://v3-web.example.test/schema/multi-play.mp4',
+          fileName: 'douyin-video.mp4',
+          mediaType: 'video',
+          headers: { Cookie: 'session=1' },
+          expectedBytes: undefined,
+          expectedHash: undefined,
+          priority: 0,
+          groupId: 'Douyin Multi Schema',
+          metadata: {
+            stream: 'play',
+            title: 'Douyin Multi Schema',
+            sourceTitle: 'Douyin Multi Schema',
+          },
+        },
+        {
+          id: 'douyin-cover',
+          url: 'https://v3-web.example.test/schema/multi-cover.webp',
+          fileName: '0002-Douyin Multi Schema.webp',
+          mediaType: 'image',
+          headers: { Accept: 'image/webp' },
+          expectedBytes: undefined,
+          expectedHash: undefined,
+          priority: 1,
+          groupId: 'Douyin Multi Schema',
+          metadata: {
+            stream: 'cover',
+            title: 'Douyin Multi Schema',
+            sourceTitle: 'Douyin Multi Schema',
+          },
+        },
+      ],
+    },
+    {
+      site: 'xiaohongshu',
+      request: {
+        site: 'xiaohongshu',
+        input: 'https://www.xiaohongshu.com/explore/662233445566778899aabbcd',
+        title: 'Xiaohongshu Multi Schema',
+        headers: { 'X-Request-Trace': 'xiaohongshu-request' },
+        downloadHeaders: { 'X-Download-Trace': 'xiaohongshu-download' },
+        metadata: {
+          downloadBundle: {
+            title: 'Xiaohongshu Bundle Schema',
+            headers: { 'X-Bundle': 'note-assets' },
+            assets: [
+              {
+                id: 'xhs-image-1',
+                url: 'https://ci.xiaohongshu.example.test/schema/multi-image-1.jpg',
+                fileName: 'xiaohongshu-image-1.jpg',
+                headers: { Accept: 'image/avif,image/webp,*/*' },
+                metadata: { asset: 'image-1' },
+              },
+              {
+                id: 'xhs-image-2',
+                src: '//ci.xiaohongshu.example.test/schema/multi-image-2.png',
+                contentType: 'image/png',
+                metadata: { asset: 'image-2' },
+              },
+            ],
+          },
+        },
+        dryRun: true,
+      },
+      expectedResources: [
+        {
+          id: 'xhs-image-1',
+          url: 'https://ci.xiaohongshu.example.test/schema/multi-image-1.jpg',
+          fileName: 'xiaohongshu-image-1.jpg',
+          mediaType: 'image',
+          headers: {
+            'X-Bundle': 'note-assets',
+            Accept: 'image/avif,image/webp,*/*',
+          },
+          expectedBytes: undefined,
+          expectedHash: undefined,
+          priority: 0,
+          groupId: 'Xiaohongshu Multi Schema',
+          metadata: {
+            asset: 'image-1',
+            title: 'Xiaohongshu Bundle Schema',
+            sourceTitle: 'Xiaohongshu Multi Schema',
+          },
+        },
+        {
+          id: 'xhs-image-2',
+          url: 'https://ci.xiaohongshu.example.test/schema/multi-image-2.png',
+          fileName: '0002-Xiaohongshu Bundle Schema.png',
+          mediaType: 'image',
+          headers: { 'X-Bundle': 'note-assets' },
+          expectedBytes: undefined,
+          expectedHash: undefined,
+          priority: 1,
+          groupId: 'Xiaohongshu Multi Schema',
+          metadata: {
+            asset: 'image-2',
+            title: 'Xiaohongshu Bundle Schema',
+            sourceTitle: 'Xiaohongshu Multi Schema',
+          },
+        },
+      ],
+    },
+  ];
+
+  for (const entry of cases) {
+    const fixture = SITE_FIXTURES.find((candidate) => candidate.site === entry.site);
+    assert.ok(fixture, `Missing native seed fixture for ${entry.site}`);
+    const { resolved } = await resolveFixture(fixture, entry.request, {
+      ...sessionLease,
+      siteKey: entry.site,
+    });
+
+    assertResolvedTaskSchema(resolved, fixture, {
+      expectedCount: 2,
+      resolvedCount: 2,
+      complete: true,
+      reason: fixture.options.completeReason,
+    });
+    assert.equal(resolved.resources.length, 2);
+    for (const [index, expected] of entry.expectedResources.entries()) {
+      assertResourceSchema(resolved.resources[index], fixture, {
+        ...expected,
+        headers: {
+          'Accept-Language': 'zh-CN',
+          'User-Agent': 'native-schema-test',
+          'X-Request-Trace': `${entry.site}-request`,
+          'X-Download-Trace': `${entry.site}-download`,
+          ...expected.headers,
+        },
+        sourceUrl: entry.request.input,
+        referer: entry.request.input,
+      });
+    }
   }
 });
 
@@ -220,10 +537,15 @@ test('ordinary native-site inputs still use legacy fallback when no seed is pre-
 
   for (const request of fallbackRequests) {
     const fixture = SITE_FIXTURES.find((entry) => entry.site === request.site);
+    assert.ok(fixture, `Missing native seed fixture for ${request.site}`);
     const { resolved } = await resolveFixture(fixture, request, null);
+    assert.deepEqual(sortedKeys(resolved), REQUIRED_TASK_KEYS_SORTED);
+    assert.deepEqual(sortedKeys(resolved.completeness), REQUIRED_COMPLETENESS_KEYS_SORTED);
     assert.equal(resolved.siteKey, request.site);
     assert.equal(resolved.resources.length, 0);
     assert.equal(resolved.completeness.complete, false);
+    assert.equal(resolved.completeness.expectedCount, 0);
+    assert.equal(resolved.completeness.resolvedCount, 0);
     assert.equal(resolved.completeness.reason, 'legacy-downloader-required');
   }
 });

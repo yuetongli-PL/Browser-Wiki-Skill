@@ -20,6 +20,67 @@ import { runDownloadTask } from '../../src/sites/downloads/runner.mjs';
 const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(TEST_DIR, '..', '..');
 
+const NATIVE_22BIQU_CHAPTERS = [
+  { chapterIndex: 1, href: '1.html', title: 'Chapter One' },
+  { chapterIndex: 2, href: '2.html', title: 'Chapter Two' },
+];
+
+function native22BiquRequest(overrides = {}) {
+  return {
+    site: '22biqu',
+    input: 'https://www.22biqu.com/biqu123/',
+    chapters: NATIVE_22BIQU_CHAPTERS,
+    retries: 0,
+    retryBackoffMs: 0,
+    ...overrides,
+  };
+}
+
+function native22BiquSessionLease(purpose = 'download:book') {
+  return {
+    siteKey: '22biqu',
+    host: 'www.22biqu.com',
+    mode: 'anonymous',
+    status: 'ready',
+    riskSignals: [],
+    purpose,
+  };
+}
+
+async function readJsonLinesFile(filePath) {
+  const text = await readFile(filePath, 'utf8');
+  return text.trim()
+    ? text.trimEnd().split(/\r?\n/u).map((line) => JSON.parse(line))
+    : [];
+}
+
+async function assertDownloadRunArtifactBundle(manifest) {
+  const runDir = path.dirname(manifest.artifacts.manifest);
+  const paths = {
+    manifest: manifest.artifacts.manifest,
+    queue: manifest.artifacts.queue,
+    downloadsJsonl: manifest.artifacts.downloadsJsonl,
+    reportMarkdown: manifest.artifacts.reportMarkdown,
+    plan: manifest.artifacts.plan ?? path.join(runDir, 'plan.json'),
+    resolvedTask: manifest.artifacts.resolvedTask ?? path.join(runDir, 'resolved-task.json'),
+  };
+
+  for (const [name, filePath] of Object.entries(paths)) {
+    assert.equal(Boolean(filePath), true, `${name} artifact path is present`);
+    await readFile(filePath, 'utf8');
+  }
+
+  return {
+    paths,
+    persistedManifest: await readJsonFile(paths.manifest),
+    plan: await readJsonFile(paths.plan),
+    resolvedTask: await readJsonFile(paths.resolvedTask),
+    queue: await readJsonFile(paths.queue),
+    downloads: await readJsonLinesFile(paths.downloadsJsonl),
+    report: await readFile(paths.reportMarkdown, 'utf8'),
+  };
+}
+
 test('download run manifest schema shape is stable', () => {
   const manifest = normalizeDownloadRunManifest({
     runId: 'run-1',
@@ -779,6 +840,127 @@ test('download runner dry-run does not execute legacy adapters', async (t) => {
   assert.equal(result.manifest.status, 'skipped');
   assert.equal(result.manifest.reason, 'dry-run');
   assert.equal(result.manifest.legacy, undefined);
+});
+
+test('download runner dry-run routes native resolved resources through the generic executor', async (t) => {
+  const runRoot = await mkdtemp(path.join(os.tmpdir(), 'bwk-download-runner-native-dry-'));
+  t.after(() => rm(runRoot, { recursive: true, force: true }));
+
+  let genericExecutorInvoked = false;
+  let legacyInvoked = false;
+  let fetchInvoked = false;
+  const result = await runDownloadTask(native22BiquRequest({ dryRun: true }), {
+    workspaceRoot: REPO_ROOT,
+    runRoot,
+  }, {
+    acquireSessionLease: async (_siteKey, purpose) => native22BiquSessionLease(purpose),
+    releaseSessionLease: async () => {},
+    executeResolvedDownloadTask: async (resolvedTask, plan, sessionLease, options, executorDeps) => {
+      genericExecutorInvoked = true;
+      return await executeResolvedDownloadTask(resolvedTask, plan, sessionLease, options, executorDeps);
+    },
+    executeLegacyDownloadTask: async () => {
+      legacyInvoked = true;
+      throw new Error('legacy adapter should not execute when native resources are resolved');
+    },
+    spawnJsonCommand: async () => {
+      legacyInvoked = true;
+      throw new Error('legacy spawn should not run when native resources are resolved');
+    },
+    fetchImpl: async () => {
+      fetchInvoked = true;
+      throw new Error('dry-run should not fetch native resources');
+    },
+  });
+
+  assert.equal(genericExecutorInvoked, true);
+  assert.equal(legacyInvoked, false);
+  assert.equal(fetchInvoked, false);
+  assert.equal(result.plan.legacy.entrypoint.endsWith(path.join('src', 'sites', 'chapter-content', 'download', 'python', 'book.py')), true);
+  assert.equal(result.resolvedTask.metadata.resolver.method, 'native-22biqu-chapters');
+  assert.equal(result.resolvedTask.resources.length, 2);
+  assert.equal(result.manifest.status, 'skipped');
+  assert.equal(result.manifest.reason, 'dry-run');
+  assert.equal(result.manifest.legacy, undefined);
+
+  const artifacts = await assertDownloadRunArtifactBundle(result.manifest);
+  assert.equal(artifacts.persistedManifest.planId, result.plan.id);
+  assert.equal(artifacts.plan.id, result.plan.id);
+  assert.equal(artifacts.resolvedTask.planId, result.plan.id);
+  assert.equal(artifacts.resolvedTask.resources.length, 2);
+  assert.deepEqual(artifacts.queue.map((entry) => entry.status), ['pending', 'pending']);
+  assert.deepEqual(artifacts.downloads, []);
+  assert.match(artifacts.report, /Status: skipped/u);
+  assert.match(artifacts.report, /Reason: dry-run/u);
+});
+
+test('download runner execute downloads native resolved resources through the generic executor', async (t) => {
+  const runRoot = await mkdtemp(path.join(os.tmpdir(), 'bwk-download-runner-native-exec-'));
+  t.after(() => rm(runRoot, { recursive: true, force: true }));
+
+  let genericExecutorInvoked = false;
+  let legacyInvoked = false;
+  const fetchedUrls = [];
+  const result = await runDownloadTask(native22BiquRequest({ dryRun: false }), {
+    workspaceRoot: REPO_ROOT,
+    runRoot,
+  }, {
+    acquireSessionLease: async (_siteKey, purpose) => native22BiquSessionLease(purpose),
+    releaseSessionLease: async () => {},
+    executeResolvedDownloadTask: async (resolvedTask, plan, sessionLease, options, executorDeps) => {
+      genericExecutorInvoked = true;
+      return await executeResolvedDownloadTask(resolvedTask, plan, sessionLease, options, executorDeps);
+    },
+    executeLegacyDownloadTask: async () => {
+      legacyInvoked = true;
+      throw new Error('legacy adapter should not execute when native resources are resolved');
+    },
+    spawnJsonCommand: async () => {
+      legacyInvoked = true;
+      throw new Error('legacy spawn should not run when native resources are resolved');
+    },
+    fetchImpl: async (url) => {
+      fetchedUrls.push(String(url));
+      const payload = Buffer.from(`chapter body for ${url}`, 'utf8');
+      return {
+        ok: true,
+        status: 200,
+        async arrayBuffer() {
+          return payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength);
+        },
+      };
+    },
+  });
+
+  assert.equal(genericExecutorInvoked, true);
+  assert.equal(legacyInvoked, false);
+  assert.deepEqual(fetchedUrls.sort(), [
+    'https://www.22biqu.com/biqu123/1.html',
+    'https://www.22biqu.com/biqu123/2.html',
+  ]);
+  assert.equal(result.plan.legacy.entrypoint.endsWith(path.join('src', 'sites', 'chapter-content', 'download', 'python', 'book.py')), true);
+  assert.equal(result.resolvedTask.metadata.resolver.method, 'native-22biqu-chapters');
+  assert.equal(result.manifest.status, 'passed');
+  assert.equal(result.manifest.reason, undefined);
+  assert.equal(result.manifest.counts.expected, 2);
+  assert.equal(result.manifest.counts.downloaded, 2);
+  assert.equal(result.manifest.counts.failed, 0);
+  assert.equal(result.manifest.legacy, undefined);
+  assert.equal(result.manifest.files.length, 2);
+  assert.match(await readFile(result.manifest.files[0].filePath, 'utf8'), /chapter body for/u);
+
+  const artifacts = await assertDownloadRunArtifactBundle(result.manifest);
+  assert.equal(artifacts.persistedManifest.planId, result.plan.id);
+  assert.equal(artifacts.plan.id, result.plan.id);
+  assert.equal(artifacts.plan.policy.dryRun, false);
+  assert.equal(artifacts.resolvedTask.resources.length, 2);
+  assert.deepEqual(artifacts.queue.map((entry) => entry.status), ['downloaded', 'downloaded']);
+  assert.equal(artifacts.downloads.length, 2);
+  assert.equal(artifacts.downloads.every((entry) => entry.ok === true), true);
+  assert.match(artifacts.report, /Status: passed/u);
+  assert.match(artifacts.report, /Manifest:/u);
+  assert.match(artifacts.report, /Queue:/u);
+  assert.match(artifacts.report, /Downloads JSONL:/u);
 });
 
 test('download executor consumes resolved resources without site-specific logic', async (t) => {
