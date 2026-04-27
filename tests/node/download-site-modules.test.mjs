@@ -356,6 +356,73 @@ test('download site modules build legacy argv per site', async () => {
   assert.equal(book.args.includes('https://www.22biqu.com/biqu1/123/'), true);
 });
 
+test('social download module maps request fields to legacy action argv', async () => {
+  const runDir = path.join(os.tmpdir(), 'bwk-download-social-module-run');
+  const layout = { runDir };
+  const lease = {
+    browserProfileRoot: path.join(os.tmpdir(), 'profiles'),
+    userDataDir: path.join(os.tmpdir(), 'user-data'),
+  };
+  const xDefinition = await resolveDownloadSiteDefinition({ site: 'x' }, { workspaceRoot: REPO_ROOT });
+  const instagramDefinition = await resolveDownloadSiteDefinition({ site: 'instagram' }, { workspaceRoot: REPO_ROOT });
+
+  const defaultPlan = await createDownloadPlan({
+    site: 'x',
+    input: 'openai',
+    dryRun: false,
+  }, { workspaceRoot: REPO_ROOT, definition: xDefinition });
+  const defaultArchive = buildLegacyDownloadCommand(defaultPlan, lease, { input: 'openai' }, { workspaceRoot: REPO_ROOT, layout });
+  assert.equal(defaultArchive.args[1], 'full-archive');
+  assert.equal(defaultArchive.args[2], 'openai');
+  assert.equal(defaultArchive.args.includes('--query'), false);
+
+  const searchPlan = await createDownloadPlan({
+    site: 'x',
+    input: 'https://x.com/search?q=codex',
+    dryRun: false,
+  }, { workspaceRoot: REPO_ROOT, definition: xDefinition });
+  const search = buildLegacyDownloadCommand(searchPlan, lease, {
+    input: 'https://x.com/search?q=codex',
+    date: '2026-04-26',
+    maxItems: 5,
+  }, { workspaceRoot: REPO_ROOT, layout });
+  assert.equal(search.args[1], 'search');
+  assert.equal(search.args.includes('--query'), true);
+  assert.equal(search.args[search.args.indexOf('--query') + 1], 'codex');
+  assert.equal(search.args[search.args.indexOf('--date') + 1], '2026-04-26');
+  assert.equal(search.args[search.args.indexOf('--max-items') + 1], '5');
+
+  const relationPlan = await createDownloadPlan({
+    site: 'instagram',
+    input: 'https://www.instagram.com/openai/followers/',
+    dryRun: false,
+  }, { workspaceRoot: REPO_ROOT, definition: instagramDefinition });
+  const relation = buildLegacyDownloadCommand(relationPlan, lease, {
+    input: 'https://www.instagram.com/openai/followers/',
+    relation: 'followers',
+    maxUsers: 25,
+  }, { workspaceRoot: REPO_ROOT, layout });
+  assert.equal(relation.args[1], 'profile-followers');
+  assert.equal(relation.args[2], 'openai');
+  assert.equal(relation.args[relation.args.indexOf('--max-users') + 1], '25');
+
+  const mediaPlan = await createDownloadPlan({
+    site: 'x',
+    input: 'https://x.com/openai',
+    taskType: 'media-bundle',
+    dryRun: false,
+  }, { workspaceRoot: REPO_ROOT, definition: xDefinition });
+  const media = buildLegacyDownloadCommand(mediaPlan, lease, {
+    input: 'https://x.com/openai',
+    maxMediaDownloads: 3,
+  }, { workspaceRoot: REPO_ROOT, layout });
+  assert.equal(media.args[1], 'profile-content');
+  assert.equal(media.args[2], 'openai');
+  assert.equal(media.args[media.args.indexOf('--content-type') + 1], 'media');
+  assert.equal(media.args.includes('--download-media'), true);
+  assert.equal(media.args[media.args.indexOf('--max-media-downloads') + 1], '3');
+});
+
 test('site registry points download planner and resolver at modules', async () => {
   const registry = await readJsonFile(path.join(REPO_ROOT, 'config', 'site-registry.json'));
   for (const host of ['www.22biqu.com', 'www.bilibili.com', 'www.douyin.com', 'www.xiaohongshu.com', 'x.com', 'www.instagram.com']) {

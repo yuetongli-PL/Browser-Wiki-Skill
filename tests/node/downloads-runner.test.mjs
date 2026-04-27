@@ -612,6 +612,85 @@ test('download runner executes bilibili legacy adapter when no resources are res
   assert.equal(result.manifest.legacy.entrypoint.endsWith(path.join('src', 'entrypoints', 'sites', 'bilibili-action.mjs')), true);
 });
 
+test('download runner maps social requests to legacy action argv and source artifacts', async (t) => {
+  const runRoot = await mkdtemp(path.join(os.tmpdir(), 'bwk-download-runner-social-'));
+  t.after(() => rm(runRoot, { recursive: true, force: true }));
+
+  const legacyRunDir = path.join(runRoot, 'legacy-social-search');
+  let capturedCommand = null;
+  let capturedArgs = null;
+  const result = await runDownloadTask({
+    site: 'x',
+    input: 'https://x.com/search?q=codex',
+    dryRun: false,
+    date: '2026-04-26',
+    maxItems: 4,
+    downloadMedia: true,
+  }, {
+    workspaceRoot: REPO_ROOT,
+    runRoot,
+  }, {
+    inspectSessionHealth: async () => ({
+      siteKey: 'x',
+      host: 'x.com',
+      status: 'ready',
+      mode: 'reusable-profile',
+      riskSignals: [],
+    }),
+    acquireSessionLease: async () => ({
+      siteKey: 'x',
+      host: 'x.com',
+      status: 'ready',
+      mode: 'reusable-profile',
+      riskSignals: [],
+    }),
+    releaseSessionLease: async () => {},
+    spawnJsonCommand: async (command, args) => {
+      capturedCommand = command;
+      capturedArgs = args;
+      return {
+        code: 0,
+        stderr: '',
+        stdout: JSON.stringify({
+          ok: true,
+          status: 'complete',
+          artifacts: {
+            runDir: legacyRunDir,
+            manifestPath: path.join(legacyRunDir, 'manifest.json'),
+            itemsJsonlPath: path.join(legacyRunDir, 'items.jsonl'),
+            downloadsJsonlPath: path.join(legacyRunDir, 'downloads.jsonl'),
+            mediaQueuePath: path.join(legacyRunDir, 'media-queue.json'),
+            mediaHashManifestPath: path.join(legacyRunDir, 'media-manifest.json'),
+          },
+          counts: {
+            rows: 1,
+            failed: 0,
+            skipped: 0,
+          },
+        }),
+      };
+    },
+  });
+
+  assert.equal(capturedCommand, process.execPath);
+  assert.equal(capturedArgs.includes(path.join(REPO_ROOT, 'src', 'entrypoints', 'sites', 'x-action.mjs')), true);
+  assert.equal(capturedArgs[1], 'search');
+  assert.equal(capturedArgs[capturedArgs.indexOf('--query') + 1], 'codex');
+  assert.equal(capturedArgs[capturedArgs.indexOf('--date') + 1], '2026-04-26');
+  assert.equal(capturedArgs[capturedArgs.indexOf('--max-items') + 1], '4');
+  assert.equal(capturedArgs.includes('--download-media'), true);
+  assert.equal(result.manifest.status, 'passed');
+  assert.deepEqual(result.manifest.artifacts.source, {
+    runDir: legacyRunDir,
+    manifest: path.join(legacyRunDir, 'manifest.json'),
+    itemsJsonl: path.join(legacyRunDir, 'items.jsonl'),
+    downloadsJsonl: path.join(legacyRunDir, 'downloads.jsonl'),
+    mediaManifest: path.join(legacyRunDir, 'media-manifest.json'),
+    mediaQueue: path.join(legacyRunDir, 'media-queue.json'),
+  });
+  assert.deepEqual(result.manifest.legacy.artifacts, result.manifest.artifacts.source);
+});
+
 test('download runner dry-run does not execute legacy adapters', async (t) => {
   const runRoot = await mkdtemp(path.join(os.tmpdir(), 'bwk-download-runner-legacy-dry-'));
   t.after(() => rm(runRoot, { recursive: true, force: true }));
