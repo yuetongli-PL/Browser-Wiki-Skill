@@ -999,6 +999,227 @@ test('download executor retry-failed only reattempts previous failures', async (
   assert.equal(retryManifest.files.find((entry) => entry.resourceId === 'pending').skipped, true);
 });
 
+test('download executor retry-failed recognizes media queue state', async (t) => {
+  const runDir = await mkdtemp(path.join(os.tmpdir(), 'bwk-download-media-queue-retry-'));
+  t.after(() => rm(runDir, { recursive: true, force: true }));
+
+  const mediaDir = path.join(runDir, 'media');
+  await mkdir(mediaDir, { recursive: true });
+  const donePath = path.join(mediaDir, 'done.jpg');
+  await writeFile(donePath, 'done-media', 'utf8');
+
+  const plan = normalizeDownloadTaskPlan({
+    siteKey: 'x',
+    host: 'x.com',
+    taskType: 'media-bundle',
+    source: { input: 'https://x.com/openai/status/1' },
+    policy: { dryRun: false, retries: 0, retryBackoffMs: 0 },
+    output: { runDir },
+  });
+  const resolvedTask = {
+    planId: plan.id,
+    siteKey: plan.siteKey,
+    taskType: plan.taskType,
+    resources: [
+      {
+        id: 'done-media',
+        url: 'https://pbs.twimg.com/media/done.jpg',
+        fileName: 'done.jpg',
+        mediaType: 'image',
+      },
+      {
+        id: 'failed-media',
+        url: 'https://pbs.twimg.com/media/failed.jpg',
+        fileName: 'failed.jpg',
+        mediaType: 'image',
+      },
+    ],
+  };
+
+  await writeJsonFile(path.join(runDir, 'media-queue.json'), {
+    schemaVersion: 1,
+    queue: [
+      {
+        key: 'image:https://pbs.twimg.com/media/done.jpg',
+        status: 'done',
+        url: 'https://pbs.twimg.com/media/done.jpg',
+        type: 'image',
+        result: {
+          ok: true,
+          url: 'https://pbs.twimg.com/media/done.jpg',
+          filePath: donePath,
+          bytes: 'done-media'.length,
+          type: 'image',
+        },
+      },
+      {
+        key: 'image:https://pbs.twimg.com/media/failed.jpg',
+        status: 'failed',
+        url: 'https://pbs.twimg.com/media/failed.jpg',
+        type: 'image',
+        result: {
+          ok: false,
+          url: 'https://pbs.twimg.com/media/failed.jpg',
+          reason: 'http-503',
+        },
+      },
+    ],
+  });
+
+  const retriedUrls = [];
+  const manifest = await executeResolvedDownloadTask(resolvedTask, plan, null, {
+    workspaceRoot: REPO_ROOT,
+    runDir,
+    dryRun: false,
+    retryFailedOnly: true,
+  }, {
+    fetchImpl: async (url) => {
+      retriedUrls.push(String(url));
+      if (String(url).includes('done.jpg')) {
+        throw new Error('completed media should be reused from media-queue.json');
+      }
+      const payload = Buffer.from('retried-media', 'utf8');
+      return {
+        ok: true,
+        status: 200,
+        async arrayBuffer() {
+          return payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength);
+        },
+      };
+    },
+  });
+
+  assert.deepEqual(retriedUrls, ['https://pbs.twimg.com/media/failed.jpg']);
+  assert.equal(manifest.status, 'passed');
+  assert.equal(manifest.counts.downloaded, 1);
+  assert.equal(manifest.counts.skipped, 1);
+  assert.equal(manifest.files.find((entry) => entry.resourceId === 'done-media').skipped, true);
+});
+
+test('legacy executor returns stable recovery reason for missing source media queue', async (t) => {
+  const runDir = await mkdtemp(path.join(os.tmpdir(), 'bwk-download-legacy-source-missing-'));
+  t.after(() => rm(runDir, { recursive: true, force: true }));
+
+  const sourceRunDir = path.join(runDir, 'source-action-run');
+  const missingMediaQueue = path.join(sourceRunDir, 'media-queue.json');
+  await writeJsonFile(path.join(runDir, 'manifest.json'), {
+    runId: 'old-legacy-run',
+    planId: 'old-plan',
+    siteKey: 'x',
+    status: 'partial',
+    counts: {
+      expected: 1,
+      attempted: 1,
+      downloaded: 0,
+      skipped: 0,
+      failed: 1,
+    },
+    files: [],
+    failedResources: [],
+    artifacts: {
+      source: {
+        runDir: sourceRunDir,
+        mediaQueue: missingMediaQueue,
+      },
+    },
+  });
+
+  const plan = normalizeDownloadTaskPlan({
+    siteKey: 'x',
+    host: 'x.com',
+    taskType: 'social-archive',
+    source: { input: 'openai' },
+    policy: { dryRun: false },
+    output: { runDir },
+    legacy: {
+      entrypoint: 'src/entrypoints/sites/x-action.mjs',
+      executorKind: 'node',
+    },
+  });
+  let spawned = false;
+  const manifest = await executeLegacyDownloadTask(plan, null, {
+    input: 'openai',
+    retryFailedOnly: true,
+  }, {
+    workspaceRoot: REPO_ROOT,
+    runDir,
+    retryFailedOnly: true,
+  }, {
+    spawnJsonCommand: async () => {
+      spawned = true;
+      throw new Error('legacy command should not spawn when source recovery artifacts are missing');
+    },
+  });
+
+  assert.equal(spawned, false);
+  assert.equal(manifest.status, 'failed');
+  assert.equal(manifest.reason, 'source-media-queue-missing');
+  assert.equal(manifest.legacy.recovery.problems[0].reason, 'source-media-queue-missing');
+});
+
+test('download recovery reports missing and corrupt artifacts without fetching', async (t) => {
+  const missingRunDir = await mkdtemp(path.join(os.tmpdir(), 'bwk-download-recovery-missing-'));
+  const corruptRunDir = await mkdtemp(path.join(os.tmpdir(), 'bwk-download-recovery-corrupt-'));
+  t.after(async () => {
+    await rm(missingRunDir, { recursive: true, force: true });
+    await rm(corruptRunDir, { recursive: true, force: true });
+  });
+
+  const missingPlan = normalizeDownloadTaskPlan({
+    siteKey: 'example',
+    host: 'example.com',
+    taskType: 'generic-resource',
+    source: { input: 'https://example.com/missing-state' },
+    policy: { dryRun: false, retries: 0, retryBackoffMs: 0 },
+    output: { runDir: missingRunDir },
+  });
+  const resolvedTask = {
+    planId: missingPlan.id,
+    siteKey: missingPlan.siteKey,
+    taskType: missingPlan.taskType,
+    resources: [{
+      id: 'resource-1',
+      url: 'https://example.com/resource-1.txt',
+      fileName: 'resource-1.txt',
+      mediaType: 'text',
+    }],
+  };
+
+  const missingManifest = await executeResolvedDownloadTask(resolvedTask, missingPlan, null, {
+    workspaceRoot: REPO_ROOT,
+    runDir: missingRunDir,
+    dryRun: false,
+    retryFailedOnly: true,
+  }, {
+    fetchImpl: async () => {
+      throw new Error('missing retry state should not fetch');
+    },
+  });
+  assert.equal(missingManifest.status, 'skipped');
+  assert.equal(missingManifest.reason, 'retry-state-missing');
+
+  const corruptPlan = normalizeDownloadTaskPlan({
+    ...missingPlan,
+    output: { runDir: corruptRunDir },
+  });
+  await writeFile(path.join(corruptRunDir, 'media-queue.json'), '{not json', 'utf8');
+  const corruptManifest = await executeResolvedDownloadTask({
+    ...resolvedTask,
+    planId: corruptPlan.id,
+  }, corruptPlan, null, {
+    workspaceRoot: REPO_ROOT,
+    runDir: corruptRunDir,
+    dryRun: false,
+    retryFailedOnly: true,
+  }, {
+    fetchImpl: async () => {
+      throw new Error('corrupt retry state should not fetch');
+    },
+  });
+  assert.equal(corruptManifest.status, 'failed');
+  assert.equal(corruptManifest.reason, 'media-queue-invalid-json');
+});
+
 test('download executor stays independent from concrete site routers', async () => {
   const source = await readFile(path.join(REPO_ROOT, 'src', 'sites', 'downloads', 'executor.mjs'), 'utf8');
   assert.equal(/src\/sites\/(?:bilibili|douyin|xiaohongshu|social)\//u.test(source), false);
