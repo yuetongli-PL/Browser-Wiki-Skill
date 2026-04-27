@@ -2912,6 +2912,305 @@ async function collectSocialApiArchive(session, config, plan, settings, apiCaptu
   };
 }
 
+const INSTAGRAM_WEB_APP_ID = '936619743392459';
+
+function isInstagramFeedUserArchivePlan(config, plan, settings) {
+  if (config?.siteKey !== 'instagram' || plan?.action !== 'profile-content' || !plan?.account) {
+    return false;
+  }
+  if (!settings?.fullArchive && !settings?.apiCursor) {
+    return false;
+  }
+  return ['posts', 'media', 'reels'].includes(String(plan.contentType || 'posts'));
+}
+
+function instagramApiV1Headers() {
+  return {
+    accept: 'application/json, text/plain, */*',
+    'x-ig-app-id': INSTAGRAM_WEB_APP_ID,
+    'x-requested-with': 'XMLHttpRequest',
+  };
+}
+
+function instagramWebProfileInfoUrl(account) {
+  const url = new URL('https://www.instagram.com/api/v1/users/web_profile_info/');
+  url.searchParams.set('username', account);
+  return url.toString();
+}
+
+function instagramFeedUserPageUrl(userId) {
+  const url = new URL(`https://www.instagram.com/api/v1/feed/user/${encodeURIComponent(userId)}/`);
+  url.searchParams.set('count', '12');
+  return url.toString();
+}
+
+function extractInstagramProfileInfoUser(json, requestedAccount = null) {
+  const user = json?.data?.user || json?.user || null;
+  if (!user || typeof user !== 'object') {
+    return null;
+  }
+  const id = user.id ?? user.pk ?? user.pk_id ?? null;
+  const handle = cleanText(user.username || user.handle || requestedAccount || '');
+  if (!id) {
+    return null;
+  }
+  const rawPostCount = user.edge_owner_to_timeline_media?.count
+    ?? user.media_count
+    ?? user.posts_count
+    ?? null;
+  const parsedPostCount = Number(rawPostCount);
+  const postCount = rawPostCount !== null && rawPostCount !== undefined && Number.isFinite(parsedPostCount)
+    ? parsedPostCount
+    : null;
+  return {
+    id: String(id),
+    handle: handle || null,
+    displayName: cleanText(user.full_name || user.fullName || user.name || '') || null,
+    url: handle ? `https://www.instagram.com/${handle}/` : null,
+    postCount,
+  };
+}
+
+function instagramFeedItemMatchesPlan(item, plan) {
+  const contentType = String(plan?.contentType || 'posts').toLowerCase();
+  if (contentType === 'reels') {
+    return /\/reel\//iu.test(String(item?.url || ''))
+      || String(item?.productType || '').toLowerCase() === 'clips';
+  }
+  if (contentType === 'highlights') {
+    return false;
+  }
+  return true;
+}
+
+function filterInstagramFeedItemsForPlan(items, plan) {
+  return (Array.isArray(items) ? items : []).filter((item) => instagramFeedItemMatchesPlan(item, plan));
+}
+
+function instagramDirectArchiveCapture(profileUrl, feedUrl, events = []) {
+  return {
+    requestCount: null,
+    networkResponseCount: null,
+    responseCount: events.filter((entry) => entry?.status).length,
+    capturedBodyCount: null,
+    bodyErrorCount: null,
+    parsedResponseCount: events.filter((entry) => entry?.itemCount !== undefined).length,
+    parsedSeedCandidateCount: events.some((entry) => Number(entry?.itemCount) > 0 || entry?.nextCursor) ? 1 : 0,
+    operations: [
+      { operationName: 'instagram-web-profile-info', url: profileUrl, method: 'GET' },
+      { operationName: 'instagram-feed-user', url: feedUrl, method: 'GET' },
+    ],
+    samples: events.slice(-API_CAPTURE_SAMPLE_LIMIT),
+    driftSamples: [],
+    rawDriftSampleCount: 0,
+    rawDriftSamples: [],
+    errors: [],
+  };
+}
+
+function shouldPreferInstagramDirectArchive(currentArchive, candidateArchive) {
+  if (!candidateArchive) {
+    return false;
+  }
+  if (!currentArchive) {
+    return true;
+  }
+  const currentItems = currentArchive.items?.length ?? 0;
+  const candidateItems = candidateArchive.items?.length ?? 0;
+  if (candidateItems > currentItems) {
+    return true;
+  }
+  if (currentItems === 0 && ['no-api-seed-captured', 'no-parseable-api-seed'].includes(String(currentArchive.reason))) {
+    return true;
+  }
+  if (candidateItems === currentItems && candidateArchive.complete === true && currentArchive.complete !== true) {
+    return true;
+  }
+  return false;
+}
+
+async function collectInstagramFeedUserArchive(session, config, plan, settings, checkpoint = null) {
+  if (!isInstagramFeedUserArchivePlan(config, plan, settings)) {
+    return null;
+  }
+  const previousArchive = settings.resume ? checkpoint?.previousState?.archive : null;
+  const previousItems = settings.resume ? (checkpoint?.previousItems || []) : [];
+  const headers = instagramApiV1Headers();
+  const profileUrl = instagramWebProfileInfoUrl(plan.account);
+  const profileResult = await fetchCursorReplayJson(session, {
+    url: profileUrl,
+    method: 'GET',
+    headers,
+  }, settings);
+  const profileUser = profileResult.ok ? extractInstagramProfileInfoUser(profileResult.json, plan.account) : null;
+  const fallbackUserId = previousArchive?.strategy === 'instagram-feed-user' ? previousArchive.userId : null;
+  const userId = profileUser?.id || fallbackUserId || null;
+  const feedUrl = userId ? instagramFeedUserPageUrl(userId) : null;
+  const riskSignals = [...(profileResult.riskSignals ?? [])];
+  const riskEvents = (profileResult.attempts || []).map((attempt) => ({
+    ...attempt,
+    url: profileUrl,
+  }));
+  if (!userId || !feedUrl) {
+    const reason = profileResult.ok ? 'instagram-profile-user-id-missing' : profileResult.reason || 'instagram-profile-info-fetch-failed';
+    const items = filterInstagramFeedItemsForPlan(
+      mergeByKey(previousItems, (entry) => entry.id || entry.url || entry.text, settings.maxItems),
+      plan,
+    );
+    return {
+      strategy: 'instagram-feed-user',
+      complete: false,
+      reason,
+      pages: 0,
+      userId,
+      expectedItemCount: profileUser?.postCount ?? previousArchive?.expectedItemCount ?? null,
+      items,
+      media: mergeByKey(items.flatMap((item) => item.media || []), (entry) => `${entry.type}:${entry.url}`, settings.maxItems * 5),
+      nextCursor: null,
+      seedUrl: feedUrl,
+      requestTemplate: feedUrl ? sanitizeSocialApiRequestTemplate({ url: feedUrl, method: 'GET', headers }) : null,
+      capture: instagramDirectArchiveCapture(profileUrl, feedUrl, []),
+      riskSignals: dedupeSortedStrings(riskSignals),
+      riskEvents,
+      boundarySignals: dedupeSortedStrings(riskSignals),
+      resumed: Boolean(previousItems.length || previousArchive?.nextCursor),
+    };
+  }
+
+  const maxPages = Math.max(0, Number(settings.maxApiPages) || 0);
+  const requestTemplate = sanitizeSocialApiRequestTemplate({ url: feedUrl, method: 'GET', headers });
+  let allItems = filterInstagramFeedItemsForPlan(
+    mergeByKey(previousItems, (entry) => entry.id || entry.url || entry.text, settings.maxItems),
+    plan,
+  );
+  let cursor = null;
+  let pages = 0;
+  let reason = maxPages < 1 ? 'max-api-pages' : 'max-api-pages';
+  let lastUrl = feedUrl;
+  const samples = [];
+  while (pages < maxPages && allItems.length < settings.maxItems) {
+    const request = cursor
+      ? buildCursorReplayRequest({ url: feedUrl, method: 'GET', headers }, cursor)
+      : { url: feedUrl, method: 'GET', headers };
+    lastUrl = request.url;
+    const fetchResult = await fetchCursorReplayJson(session, request, settings);
+    riskEvents.push(...(fetchResult.attempts || []).map((attempt) => ({
+      ...attempt,
+      url: request.url,
+    })));
+    riskSignals.push(...(fetchResult.riskSignals ?? []));
+    if (!fetchResult.ok) {
+      reason = fetchResult.reason || 'instagram-feed-user-fetch-failed';
+      await checkpoint?.write?.({
+        status: riskSignals.includes('rate-limited') ? 'paused' : 'running',
+        archive: {
+          strategy: 'instagram-feed-user',
+          complete: false,
+          reason,
+          pages,
+          userId,
+          expectedItemCount: profileUser?.postCount ?? previousArchive?.expectedItemCount ?? null,
+          nextCursor: cursor || null,
+          seedUrl: feedUrl,
+          requestTemplate,
+          riskSignals: dedupeSortedStrings(riskSignals),
+          riskEvents,
+        },
+        counts: {
+          items: allItems.length,
+          media: allItems.flatMap((item) => item.media || []).length,
+        },
+      });
+      break;
+    }
+    const parsed = parseSocialApiPayload(config.siteKey, fetchResult.json);
+    riskSignals.push(...(parsed.riskSignals ?? []));
+    pages += 1;
+    samples.push({
+      url: request.url,
+      status: fetchResult.status,
+      itemCount: parsed.items.length,
+      mediaCount: parsed.items.flatMap((item) => item.media || []).length,
+      nextCursor: parsed.nextCursor ?? null,
+    });
+    allItems = filterInstagramFeedItemsForPlan(mergeByKey([
+      ...allItems,
+      ...annotateApiArchiveItems(parsed.items, plan),
+    ], (entry) => entry.id || entry.url || entry.text, settings.maxItems), plan);
+    cursor = parsed.nextCursor;
+    if (parsed.riskSignals?.length) {
+      reason = apiRiskReasonFromSignals(parsed.riskSignals) || 'api-risk-signal';
+      break;
+    }
+    if (allItems.length >= settings.maxItems) {
+      reason = 'max-items';
+      break;
+    }
+    const expectedCount = profileUser?.postCount ?? previousArchive?.expectedItemCount ?? null;
+    if (expectedCount !== null && allItems.length >= expectedCount) {
+      cursor = null;
+      reason = null;
+      break;
+    }
+    if (!cursor) {
+      reason = null;
+      break;
+    }
+    await checkpoint?.write?.({
+      status: 'running',
+      archive: {
+        strategy: 'instagram-feed-user',
+        complete: false,
+        reason,
+        pages,
+        userId,
+        expectedItemCount: expectedCount,
+        nextCursor: cursor || null,
+        seedUrl: feedUrl,
+        requestTemplate,
+        riskSignals: dedupeSortedStrings(riskSignals),
+        riskEvents,
+      },
+      counts: {
+        items: allItems.length,
+        media: allItems.flatMap((item) => item.media || []).length,
+      },
+    });
+  }
+
+  if (cursor && reason === 'max-api-pages' && pages < maxPages) {
+    reason = 'cursor-stopped';
+  }
+  const windowedItems = (plan.date || plan.fromDate || plan.toDate)
+    ? allItems.filter((entry) => itemMatchesDateWindow(entry, plan))
+    : allItems;
+  const items = mergeByKey(windowedItems, (entry) => entry.id || entry.url || entry.text, settings.maxItems);
+  const boundedBy = boundedReasonFromArchiveReason(reason);
+  const complete = reason === null;
+  return {
+    strategy: 'instagram-feed-user',
+    complete,
+    reason,
+    bounded: Boolean(boundedBy),
+    boundedBy,
+    pages,
+    userId,
+    profile: profileUser,
+    expectedItemCount: profileUser?.postCount ?? previousArchive?.expectedItemCount ?? null,
+    items,
+    media: mergeByKey(items.flatMap((item) => item.media || []), (entry) => `${entry.type}:${entry.url}`, settings.maxItems * 5),
+    nextCursor: complete ? null : cursor || null,
+    seedUrl: feedUrl,
+    lastUrl,
+    requestTemplate,
+    capture: instagramDirectArchiveCapture(profileUrl, feedUrl, samples),
+    riskSignals: dedupeSortedStrings(riskSignals),
+    riskEvents,
+    boundarySignals: dedupeSortedStrings(riskSignals),
+    resumed: Boolean(previousItems.length || previousArchive?.nextCursor),
+  };
+}
+
 function xRelationOperationNameForAction(action) {
   return action === 'profile-followers' ? 'followers' : 'following';
 }
@@ -3699,6 +3998,169 @@ function renderMarkdownReport(result) {
   return lines.join('\n').trimEnd() + '\n';
 }
 
+function csvCell(value) {
+  const text = Array.isArray(value) ? value.join('|') : String(value ?? '');
+  return `"${text.replace(/"/gu, '""')}"`;
+}
+
+function htmlEscape(value) {
+  return String(value ?? '')
+    .replace(/&/gu, '&amp;')
+    .replace(/</gu, '&lt;')
+    .replace(/>/gu, '&gt;')
+    .replace(/"/gu, '&quot;')
+    .replace(/'/gu, '&#39;');
+}
+
+function relativeIndexHref(filePath, layout) {
+  if (!filePath) {
+    return '';
+  }
+  const relative = path.relative(layout.runDir, filePath);
+  const parts = relative.split(path.sep).filter(Boolean).map((part) => encodeURIComponent(part));
+  return parts.join('/');
+}
+
+function collectDownloadsForIndex(downloads = []) {
+  const byKey = new Map();
+  const add = (key, entry) => {
+    if (!key) {
+      return;
+    }
+    const normalized = String(key);
+    if (!byKey.has(normalized)) {
+      byKey.set(normalized, []);
+    }
+    byKey.get(normalized).push(entry);
+  };
+  for (const download of Array.isArray(downloads) ? downloads : []) {
+    if (download?.ok !== true) {
+      continue;
+    }
+    add(download.itemId, download);
+    add(download.pageUrl, download);
+    for (const reference of download.references || []) {
+      add(reference.itemId, download);
+      add(reference.pageUrl, download);
+    }
+  }
+  return byKey;
+}
+
+function socialIndexRows(result, layout) {
+  const items = Array.isArray(result?.result?.items) ? result.result.items : [];
+  const downloadsByKey = collectDownloadsForIndex(result?.download?.downloads || []);
+  return items.map((item, index) => {
+    const media = Array.isArray(item.media) ? item.media : [];
+    const keys = [item.id, item.url].filter(Boolean).map(String);
+    const downloads = mergeByKey(
+      keys.flatMap((key) => downloadsByKey.get(key) || []),
+      (entry) => entry.filePath || entry.url,
+      Number.MAX_SAFE_INTEGER,
+    );
+    const files = downloads.map((entry) => entry.filePath).filter(Boolean);
+    return {
+      index: index + 1,
+      id: item.id ?? '',
+      url: item.url ?? '',
+      timestamp: item.timestamp ?? '',
+      author: item.author?.handle ?? item.sourceAccount ?? '',
+      caption: item.text ?? '',
+      mediaCount: media.length,
+      imageCount: media.filter((entry) => entry.type === 'image').length,
+      videoCount: media.filter((entry) => entry.type === 'video').length,
+      downloadedCount: files.length,
+      localFiles: files,
+      localHrefs: files.map((filePath) => relativeIndexHref(filePath, layout)),
+    };
+  });
+}
+
+function renderSocialIndexCsv(result, layout) {
+  const header = [
+    'index',
+    'id',
+    'url',
+    'timestamp',
+    'author',
+    'caption',
+    'media_count',
+    'image_count',
+    'video_count',
+    'downloaded_count',
+    'local_files',
+  ];
+  const rows = socialIndexRows(result, layout).map((row) => [
+    row.index,
+    row.id,
+    row.url,
+    row.timestamp,
+    row.author,
+    row.caption,
+    row.mediaCount,
+    row.imageCount,
+    row.videoCount,
+    row.downloadedCount,
+    row.localFiles,
+  ].map(csvCell).join(','));
+  return `${header.map(csvCell).join(',')}\n${rows.join('\n')}${rows.length ? '\n' : ''}`;
+}
+
+function renderSocialIndexHtml(result, layout) {
+  const rows = socialIndexRows(result, layout);
+  const title = `${result.siteKey} ${result.plan?.account || result.plan?.query || result.plan?.action || 'archive'}`;
+  const bodyRows = rows.map((row) => {
+    const links = row.localFiles.length
+      ? row.localFiles.map((filePath, index) => {
+        const href = row.localHrefs[index];
+        return `<a href="${htmlEscape(href)}">${htmlEscape(path.basename(filePath))}</a>`;
+      }).join('<br>')
+      : '';
+    return `<tr>
+      <td>${row.index}</td>
+      <td><a href="${htmlEscape(row.url)}">${htmlEscape(row.url || row.id)}</a></td>
+      <td>${htmlEscape(row.timestamp)}</td>
+      <td>${htmlEscape(row.author)}</td>
+      <td class="caption">${htmlEscape(row.caption)}</td>
+      <td>${row.mediaCount}</td>
+      <td>${row.imageCount}</td>
+      <td>${row.videoCount}</td>
+      <td>${row.downloadedCount}</td>
+      <td class="files">${links}</td>
+    </tr>`;
+  }).join('\n');
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${htmlEscape(title)}</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, sans-serif; margin: 24px; color: #1f2933; background: #f8fafc; }
+    h1 { font-size: 22px; margin: 0 0 16px; }
+    table { width: 100%; border-collapse: collapse; background: white; }
+    th, td { border: 1px solid #d9e2ec; padding: 8px; font-size: 13px; vertical-align: top; }
+    th { text-align: left; background: #eef2f6; position: sticky; top: 0; }
+    .caption { max-width: 420px; white-space: pre-wrap; }
+    .files { min-width: 180px; }
+    a { color: #1d4ed8; }
+  </style>
+</head>
+<body>
+  <h1>${htmlEscape(title)}</h1>
+  <table>
+    <thead>
+      <tr><th>#</th><th>Post</th><th>Time</th><th>Author</th><th>Caption</th><th>Media</th><th>Images</th><th>Videos</th><th>Downloaded</th><th>Files</th></tr>
+    </thead>
+    <tbody>
+${bodyRows}
+    </tbody>
+  </table>
+</body>
+</html>
+`;
+}
+
 function createArtifactSlug(plan) {
   return compactSlug([
     plan.action,
@@ -3721,6 +4183,8 @@ function artifactPathSummary(layout) {
     downloads: layout.downloadsJsonlPath,
     mediaManifest: layout.mediaHashManifestPath,
     mediaQueue: layout.mediaQueuePath,
+    indexCsv: layout.indexCsvPath,
+    indexHtml: layout.indexHtmlPath,
   };
 }
 
@@ -3740,6 +4204,8 @@ function buildSocialArtifactLayout(plan, settings) {
     downloadsJsonlPath: path.join(runDir, 'downloads.jsonl'),
     mediaHashManifestPath: path.join(runDir, 'media-manifest.json'),
     mediaQueuePath: path.join(runDir, 'media-queue.json'),
+    indexCsvPath: path.join(runDir, 'index.csv'),
+    indexHtmlPath: path.join(runDir, 'index.html'),
   };
 }
 
@@ -4452,6 +4918,8 @@ async function writeSocialArtifacts(finalResult, layout, checkpointWriter) {
     await writeJsonFile(layout.mediaHashManifestPath, mediaValidation);
   }
   await writeTextFile(layout.reportPath, finalResult.markdown || renderMarkdownReport(finalResult));
+  await writeTextFile(layout.indexCsvPath, renderSocialIndexCsv(finalResult, layout));
+  await writeTextFile(layout.indexHtmlPath, renderSocialIndexHtml(finalResult, layout));
   if (finalResult.result?.archive?.capture) {
     await writeJsonFile(layout.apiCapturePath, {
       schemaVersion: ARTIFACT_SCHEMA_VERSION,
@@ -4517,6 +4985,8 @@ async function writeSocialArtifacts(finalResult, layout, checkpointWriter) {
       skippedPhysicalCandidates: finalResult.download.skippedDownloadCandidates ?? 0,
       maxMediaDownloads: finalResult.download.maxMediaDownloads ?? null,
       concurrency: finalResult.download.concurrency ?? null,
+      requestedConcurrency: finalResult.download.requestedConcurrency ?? null,
+      adaptiveConcurrency: finalResult.download.adaptiveConcurrency ?? null,
       retries: finalResult.download.retries ?? null,
       retryBackoffMs: finalResult.download.retryBackoffMs ?? null,
       skippedExisting: finalResult.download.downloads?.filter((entry) => entry.skipped).length ?? 0,
@@ -4889,11 +5359,17 @@ export async function runSocialAction(options = {}, deps = {}) {
         : settings;
       const domPageResult = await collectSocialPage(session, config, executionPlan, domPageSettings);
       const shouldCollectContentApiArchive = !(config.siteKey === 'instagram' && isSocialRelationAction(executionPlan.action));
-      const apiArchive = shouldCollectContentApiArchive
+      let apiArchive = shouldCollectContentApiArchive
         ? await collectSocialApiArchive(session, config, executionPlan, settings, apiCapture, checkpoint, {
           seedOnly: !settings.apiCursor && settings.downloadMedia && config.siteKey === 'x',
         })
         : null;
+      if (shouldCollectContentApiArchive && isInstagramFeedUserArchivePlan(config, executionPlan, settings)) {
+        const instagramFeedArchive = await collectInstagramFeedUserArchive(session, config, executionPlan, settings, checkpoint);
+        if (shouldPreferInstagramDirectArchive(apiArchive, instagramFeedArchive)) {
+          apiArchive = instagramFeedArchive;
+        }
+      }
       pageResult = mergePageResultWithArchive(domPageResult, apiArchive, settings);
       if (config.siteKey === 'x' && isSocialRelationAction(executionPlan.action)) {
         const relationApi = await collectXRelationApiUsers(session, executionPlan, settings, apiCapture);
@@ -4983,6 +5459,8 @@ export async function runSocialAction(options = {}, deps = {}) {
         bounded: downloadResult.skippedMedia > 0 || downloadResult.skippedCandidates > 0,
         boundedBy: downloadResult.skippedMedia > 0 || downloadResult.skippedCandidates > 0 ? 'max-media-downloads' : null,
         concurrency: downloadResult.concurrency,
+        requestedConcurrency: downloadResult.requestedConcurrency,
+        adaptiveConcurrency: downloadResult.adaptiveConcurrency,
         retries: downloadResult.retries,
         retryBackoffMs: downloadResult.retryBackoffMs,
         passthrough,
