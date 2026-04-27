@@ -225,6 +225,23 @@ function buildMediaDownloadFileName(entry, index, { siteKey, account, contentTyp
   const itemSlug = compactSlug(String(itemSlugSource).replace(/^https?:\/\//iu, ''), 'item').slice(0, 48);
   const mediaIndex = firstReference.mediaIndex ?? entry.mediaIndex ?? index;
   const ext = extensionFromUrlOrContentType(entry.url, contentType, entry.type === 'video' ? 'mp4' : 'jpg');
+  if (siteKey === 'instagram') {
+    let instagramItemSlug = itemSlug;
+    try {
+      const parsed = new URL(String(firstReference.pageUrl || ''));
+      const segments = parsed.pathname.split('/').filter(Boolean);
+      instagramItemSlug = compactSlug(segments[1] || segments[0] || itemSlug, 'item').slice(0, 64);
+    } catch {
+      instagramItemSlug = itemSlug;
+    }
+    const mediaOrdinal = Number.isFinite(Number(mediaIndex)) ? Number(mediaIndex) + 1 : index + 1;
+    const mediaStem = compactSlug([
+      `m${String(mediaOrdinal).padStart(2, '0')}`,
+      entry.type || 'media',
+      entry.urlHash || shortHash(entry.url),
+    ].filter(Boolean).join('-'), 'media');
+    return path.join(instagramItemSlug, `${mediaStem}.${ext}`);
+  }
   const stem = compactSlug([
     String(index + 1).padStart(4, '0'),
     siteKey,
@@ -258,17 +275,40 @@ async function uniqueFilePath(filePath) {
   return path.join(parsed.dir, `${parsed.name}-${Date.now()}${parsed.ext}`);
 }
 
-async function findExistingMediaFile(outDir, fileName) {
-  const stem = path.parse(fileName).name;
+async function fileExists(filePath) {
   try {
-    const names = await readdir(outDir);
-    const candidate = names
-      .filter((name) => name === fileName || name.startsWith(`${stem}.`) || name.startsWith(`${stem}-`))
-      .sort()[0];
-    return candidate ? path.join(outDir, candidate) : null;
+    await stat(filePath);
+    return true;
   } catch {
-    return null;
+    return false;
   }
+}
+
+async function findExistingMediaFile(outDir, fileName) {
+  const directPath = path.join(outDir, fileName);
+  if (await fileExists(directPath)) {
+    return directPath;
+  }
+  const baseName = path.basename(fileName);
+  const stem = path.parse(baseName).name;
+  const relativeDir = path.dirname(fileName);
+  const searchDirs = relativeDir && relativeDir !== '.'
+    ? [path.join(outDir, relativeDir), outDir]
+    : [outDir];
+  for (const dir of searchDirs) {
+    try {
+      const names = await readdir(dir);
+      const candidate = names
+        .filter((name) => name === baseName || name.startsWith(`${stem}.`) || name.startsWith(`${stem}-`))
+        .sort()[0];
+      if (candidate) {
+        return path.join(dir, candidate);
+      }
+    } catch {
+      // Try the next search directory.
+    }
+  }
+  return null;
 }
 
 async function existingDownloadEntryForCandidate(candidate, previousDownloads = []) {
@@ -356,6 +396,7 @@ async function downloadOneMediaCandidate({
   const maxAttempts = Math.max(1, Number(retries ?? 0) + 1);
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const fallbackFilePath = await uniqueFilePath(path.join(outDir, fallbackFileName));
+    await ensureDir(path.dirname(fallbackFilePath));
     try {
       const response = await fetchImpl(entry.url, {
         headers,
@@ -366,6 +407,7 @@ async function downloadOneMediaCandidate({
           url: entry.url,
           headers,
           filePath: fallbackFilePath,
+          retries,
         });
         if (curlResult.ok) {
           const fileStat = await stat(fallbackFilePath);
@@ -416,6 +458,7 @@ async function downloadOneMediaCandidate({
         };
       }
       filePath = await uniqueFilePath(path.join(outDir, fileName));
+      await ensureDir(path.dirname(filePath));
       const bytes = Buffer.from(await response.arrayBuffer());
       const contentHash = createHash('sha256').update(bytes).digest('hex');
       const duplicate = contentHashIndex.get(contentHash);
@@ -443,6 +486,7 @@ async function downloadOneMediaCandidate({
         url: entry.url,
         headers,
         filePath: fallbackFilePath,
+        retries,
       });
       if (curlResult.ok) {
         const fileStat = await stat(fallbackFilePath);
@@ -490,6 +534,56 @@ async function mapWithConcurrency(items, concurrency, worker) {
   return results;
 }
 
+function summarizePreviousDownloadFailureRate(previousQueue = [], previousDownloads = []) {
+  const outcomes = [];
+  for (const entry of Array.isArray(previousQueue) ? previousQueue : []) {
+    if (entry?.status === 'failed') {
+      outcomes.push(false);
+    } else if (['done', 'skipped'].includes(entry?.status)) {
+      outcomes.push(true);
+    } else if (entry?.result?.ok === false) {
+      outcomes.push(false);
+    } else if (entry?.result?.ok === true) {
+      outcomes.push(true);
+    }
+  }
+  for (const entry of Array.isArray(previousDownloads) ? previousDownloads : []) {
+    if (entry?.ok === true) {
+      outcomes.push(true);
+    } else if (entry?.ok === false) {
+      outcomes.push(false);
+    }
+  }
+  const total = outcomes.length;
+  const failed = outcomes.filter((ok) => ok === false).length;
+  return {
+    total,
+    failed,
+    failureRate: total ? Math.round((failed / total) * 1000) / 1000 : 0,
+  };
+}
+
+function adaptiveMediaDownloadConcurrency(requestedConcurrency, previousQueue = [], previousDownloads = []) {
+  const requested = Math.max(1, Math.floor(Number(requestedConcurrency) || 1));
+  const previous = summarizePreviousDownloadFailureRate(previousQueue, previousDownloads);
+  let concurrency = requested;
+  let reason = null;
+  if (previous.total >= 2 && previous.failureRate >= 0.5) {
+    concurrency = Math.max(1, Math.ceil(requested / 2));
+    reason = 'previous-failure-rate-high';
+  } else if (previous.total >= 4 && previous.failureRate >= 0.25) {
+    concurrency = Math.max(1, requested - 1);
+    reason = 'previous-failure-rate-elevated';
+  }
+  return {
+    requestedConcurrency: requested,
+    concurrency,
+    adjusted: concurrency !== requested,
+    reason,
+    previous,
+  };
+}
+
 export async function downloadMediaFiles({
   media,
   headers,
@@ -511,6 +605,8 @@ export async function downloadMediaFiles({
   const candidates = downloadPlan.candidates;
   await ensureDir(outDir);
   const queue = buildDownloadQueue(candidates, previousQueue);
+  const adaptiveConcurrency = adaptiveMediaDownloadConcurrency(concurrency, previousQueue, previousDownloads);
+  const effectiveConcurrency = Math.max(1, Math.min(candidates.length || 1, adaptiveConcurrency.concurrency));
   let queueWrite = Promise.resolve();
   const persistQueue = async () => {
     const snapshot = queue.map((entry) => ({ ...entry }));
@@ -528,7 +624,7 @@ export async function downloadMediaFiles({
       contentHashIndex.set(entry.contentHash, { filePath: entry.filePath, url: entry.url });
     }
   }
-  const downloads = await mapWithConcurrency(candidates, concurrency, async (entry, index) => {
+  const downloads = await mapWithConcurrency(candidates, effectiveConcurrency, async (entry, index) => {
     const result = await downloadOneMediaCandidate({
       entry,
       index,
@@ -562,23 +658,31 @@ export async function downloadMediaFiles({
     expectedMedia: downloadPlan.expectedMedia,
     skippedMedia: downloadPlan.skippedMedia,
     skippedCandidates: downloadPlan.skippedCandidates,
-    concurrency: Math.max(1, Math.min(candidates.length || 1, Math.floor(Number(concurrency) || 1))),
+    concurrency: effectiveConcurrency,
+    requestedConcurrency: adaptiveConcurrency.requestedConcurrency,
+    adaptiveConcurrency,
     retries: Math.max(0, Number(retries) || 0),
     retryBackoffMs: Math.max(0, Number(retryBackoffMs) || 0),
   };
 }
 
-export function runCurlDownload({ url, headers, filePath }) {
+export function runCurlDownload({ url, headers, filePath, retries = DEFAULT_MEDIA_DOWNLOAD_RETRIES }) {
   return new Promise((resolve) => {
+    const curlRetries = Math.max(3, Math.min(10, Number(retries) || 0));
     const args = [
       '-L',
       '--fail',
       '--silent',
       '--show-error',
+      '--retry',
+      String(curlRetries),
+      '--retry-all-errors',
+      '--ssl-no-revoke',
+      '--http1.1',
       '--connect-timeout',
-      '20',
+      '30',
       '--max-time',
-      '90',
+      '180',
       '--output',
       filePath,
     ];
