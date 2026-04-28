@@ -9,7 +9,7 @@ plan to execute from this worktree.
 - Phase 1 base branch: local `main` / `codex/download-runner-base`, both at
   the same commit and ahead of `origin/main` by 6 commits.
 - Phase 2 branch: `codex/download-runner-phase2`, ahead of local `main` by 22 commits.
-- Native resolver branch: `codex/download-native-resolvers`, ahead of `codex/download-runner-phase2` by 4 commits in the current local stack.
+- Native resolver branch: `codex/download-native-resolvers`, stacked on `codex/download-runner-phase2`.
 - 22biqu URL resolver follow-on branch: `codex/download-native-22biqu-url-resolver`, ahead of `codex/download-native-resolvers` by 1 commit.
 - Page seed resolver follow-on branch: `codex/download-native-page-seeds`, ahead of `codex/download-native-22biqu-url-resolver` by 1 commit.
 - Current worktree branch: `codex/download-native-resolvers`.
@@ -20,9 +20,18 @@ Stack shape:
 origin/main
   -> local main / codex/download-runner-base (+6)
   -> codex/download-runner-phase2 (+22)
-  -> codex/download-native-resolvers (+4)
+  -> codex/download-native-resolvers
   -> codex/download-native-22biqu-url-resolver (+1)
   -> codex/download-native-page-seeds (+1)
+```
+
+Re-check exact ahead counts immediately before publication instead of treating
+this document as the source of truth:
+
+```powershell
+git rev-list --left-right --count codex/download-runner-phase2...codex/download-native-resolvers
+git rev-list --left-right --count codex/download-native-resolvers...codex/download-native-22biqu-url-resolver
+git rev-list --left-right --count codex/download-native-22biqu-url-resolver...codex/download-native-page-seeds
 ```
 
 ## Publication Order
