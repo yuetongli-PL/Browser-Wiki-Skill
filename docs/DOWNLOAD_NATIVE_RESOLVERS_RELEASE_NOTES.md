@@ -10,7 +10,7 @@ open it directly against `origin/main`.
 - Implementation commit: `90909a3 feat(downloads): expand native resolver execution path`.
 - Release package commit: this document-only release note commit.
 - Local closeout commit: documents local stack release order without pushing.
-- Stack shape: `origin/main` < `codex/download-runner-base` < `codex/download-runner-phase2` < `codex/download-native-resolvers`.
+- Stack shape: `origin/main` -> local `main` / `codex/download-runner-base` (+6) -> `codex/download-runner-phase2` (+22) -> `codex/download-native-resolvers` (+3).
 - Implementation delta before release packaging: this branch was ahead of `codex/download-runner-phase2` by 1 commit and ahead of `origin/main` by 29 commits.
 - After the local stack closeout document is committed, the branch should be ahead of `codex/download-runner-phase2` by 3 commits.
 
@@ -35,7 +35,14 @@ open it directly against `origin/main`.
 1. Publish or merge `codex/download-runner-base` against `origin/main`.
 2. Publish or review `codex/download-runner-phase2` against `codex/download-runner-base`.
 3. Publish `codex/download-native-resolvers` against `codex/download-runner-phase2`.
-4. If any lower stack branch is rebased or merged first, re-check this branch before publication.
+4. Review sibling branches based on `codex/download-native-resolvers` in parallel; do not force them into a linear sibling-on-sibling stack.
+5. If any lower stack branch is rebased or merged first, re-check this branch before publication.
+
+Sibling branches currently based on `codex/download-native-resolvers`:
+
+- `codex/download-legacy-reduction`
+- `codex/download-session-governance`
+- `codex/download-live-smoke-boundaries`
 
 ## Validation
 
@@ -62,12 +69,14 @@ git -C C:\Users\lyt-p\Desktop\Browser-Wiki-Skill status --short --branch
 - Test gate: full Node and Python suites passed locally after the feature commit.
 - Live smoke gate: not run and not claimed.
 
-## Next Branch
+## Sibling Branches
 
-Do not keep adding new resolver behavior to this release branch. Recommended next feature branch:
+Do not keep adding new resolver behavior to this release branch. The follow-on
+work is split into sibling branches based on `codex/download-native-resolvers`:
 
 - `codex/download-legacy-reduction`: document the 22biqu native task shapes now covered and list the remaining legacy fallback reasons.
-
-After that, use a separate branch for:
-
 - `codex/download-session-governance`: connect runner preflight to real reusable profile governance without exposing cookies, headers, or profile material.
+- `codex/download-live-smoke-boundaries`: gate live smoke verification boundaries without claiming live coverage from local tests alone.
+
+These sibling branches can be reviewed in parallel. Do not stack them on top of
+each other unless a reviewer explicitly asks for a combined sequence.
