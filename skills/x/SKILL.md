@@ -48,7 +48,7 @@ Map these user requests directly to the existing action or verification command.
 | `X 限流冷却后继续` / `continue X after rate limit cooldown` | `resume-after-cooldown` | `node src/entrypoints/sites/x-action.mjs profile-content <handle> --content-type posts --full-archive --risk-backoff-ms <ms> --risk-retries <n>` |
 | `高速下载 X 媒体 <handle>` / `fast X media download` | `media-fast-download` | `node src/entrypoints/sites/x-action.mjs profile-content <handle> --content-type media --download-media --max-media-downloads <n>` |
 | `检查 X 登录健康` / `X health check` | `health-check` | `node scripts/social-auth-recover.mjs --execute --site x --verify` |
-| `生成 X live 验收报告` / `X live acceptance report` | `live-acceptance-report` | `node scripts/social-live-verify.mjs --execute --site x --x-account <handle>` |
+| `生成 X live 验收报告` / `X live acceptance report` | `live-acceptance-report` | `node scripts/social-live-verify.mjs --live --execute --site x --x-account <handle> --max-items <n> --max-media-downloads <n> --timeout <ms> --case-timeout <ms> --run-root <dir>` |
 | `刷新 X KB` / `X scenario KB refresh` | `kb-refresh` | `node scripts/social-kb-refresh.mjs --execute --site x --x-account <handle>` |
 
 Additional shortcuts:

@@ -313,7 +313,7 @@
         "resume-after-cooldown": "node src/entrypoints/sites/x-action.mjs profile-content <handle> --content-type posts --full-archive --risk-backoff-ms <ms> --risk-retries <n>",
         "media-fast-download": "node src/entrypoints/sites/x-action.mjs profile-content <handle> --content-type media --download-media --max-media-downloads <n>",
         "health-check": "node scripts/social-auth-recover.mjs --execute --site x --verify",
-        "live-acceptance-report": "node scripts/social-live-verify.mjs --execute --site x --x-account <handle>",
+        "live-acceptance-report": "node scripts/social-live-verify.mjs --live --execute --site x --x-account <handle> --max-items <n> --max-media-downloads <n> --timeout <ms> --case-timeout <ms> --run-root <dir>",
         "kb-refresh": "node scripts/social-kb-refresh.mjs --execute --site x --x-account <handle>"
       }
     },
