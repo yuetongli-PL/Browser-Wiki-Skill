@@ -6,16 +6,17 @@ plan to execute from this worktree.
 ## Current Local Stack
 
 - Remote base: `origin/main`.
-- Phase 1 base branch: local `main`, ahead of `origin/main` by 6 commits.
+- Phase 1 base branch: local `main` / `codex/download-runner-base`, both at
+  the same commit and ahead of `origin/main` by 6 commits.
 - Phase 2 branch: `codex/download-runner-phase2`, ahead of local `main` by 22 commits.
-- Native resolver branch: `codex/download-native-resolvers`, ahead of `codex/download-runner-phase2` by 3 commits after this local closeout document.
+- Native resolver branch: `codex/download-native-resolvers`, ahead of `codex/download-runner-phase2` by 3 commits in the current local stack.
 - Current worktree branch: `codex/download-native-resolvers`.
 
 Stack shape:
 
 ```text
 origin/main
-  -> main (+6)
+  -> local main / codex/download-runner-base (+6)
   -> codex/download-runner-phase2 (+22)
   -> codex/download-native-resolvers (+3)
 ```
@@ -34,13 +35,26 @@ review target intentionally changes.
 Expected PR bases:
 
 ```text
-base PR:              main -> origin/main
+base PR:              local main / codex/download-runner-base -> origin/main
 phase2 PR:            codex/download-runner-phase2 -> main
 native resolvers PR:  codex/download-native-resolvers -> codex/download-runner-phase2
 ```
 
 If a lower stack branch is rebased, merged, or renamed before publication,
 re-check the three ahead counts before opening the next PR.
+
+## Parallel Sibling Branches
+
+These sibling branches are based on `codex/download-native-resolvers` and can
+be reviewed in parallel after the native resolver stack is available:
+
+- `codex/download-legacy-reduction`
+- `codex/download-session-governance`
+- `codex/download-live-smoke-boundaries`
+
+Do not force these sibling branches into a linear sequence on top of each other
+unless review feedback or conflict resolution explicitly requires that. Their
+default review base is `codex/download-native-resolvers`, not another sibling.
 
 ## Explicit Non-Actions
 
