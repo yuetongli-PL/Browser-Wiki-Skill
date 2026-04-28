@@ -34,6 +34,7 @@ Options:
   --session-optional                Prefer a reusable session lease.
   --session-none                    Use an anonymous session lease.
   --session-status <status>         Force lease status for testing: ready, blocked, manual-required, expired.
+  --resolve-network                 Allow resolvers to fetch source pages before falling back to legacy downloaders.
   --json                            Print the full runner result JSON.
   -h, --help                        Show this help.
 `;
@@ -170,6 +171,9 @@ export function parseArgs(argv) {
         index = read.nextIndex;
         break;
       }
+      case '--resolve-network':
+        options.resolveNetwork = true;
+        break;
       case '--json':
         options.json = true;
         break;
@@ -205,6 +209,7 @@ export async function main(argv) {
     skipExisting: options.skipExisting,
     verify: options.verify,
     sessionStatus: options.sessionStatus,
+    resolveNetwork: options.resolveNetwork,
   });
   if (options.json) {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);

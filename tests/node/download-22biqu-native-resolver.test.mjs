@@ -5,6 +5,7 @@ import path from 'node:path';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
+import { parseArgs } from '../../src/entrypoints/sites/download.mjs';
 import {
   createDownloadPlan,
   resolveDownloadResources,
@@ -12,6 +13,7 @@ import {
 import {
   resolveDownloadSiteDefinition,
 } from '../../src/sites/downloads/registry.mjs';
+import { runDownloadTask } from '../../src/sites/downloads/runner.mjs';
 
 const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(TEST_DIR, '..', '..');
@@ -137,6 +139,30 @@ async function resolve22Biqu(request, context = {}) {
     ...context,
   });
   return { plan, resolved };
+}
+
+function createReady22BiquLease(purpose = 'download:book') {
+  return {
+    siteKey: '22biqu',
+    host: 'www.22biqu.com',
+    mode: 'anonymous',
+    status: 'ready',
+    riskSignals: [],
+    purpose,
+    headers: {
+      Cookie: 'fixture-session=1',
+    },
+  };
+}
+
+function parseResolveNetworkArgs() {
+  return parseArgs([
+    '--site',
+    '22biqu',
+    '--input',
+    'https://www.22biqu.com/biqu456/',
+    '--resolve-network',
+  ]);
 }
 
 test('22biqu native dry-run resolves an ordinary book URL from local book-content fixture chapters', async (t) => {
@@ -308,7 +334,117 @@ test('22biqu native dry-run resolves directory HTML through injected fetch only'
   assert.equal(resolved.metadata.directory.source, 'fetchImpl');
 });
 
-test('22biqu native dry-run does not use global fetch without injected fetchImpl', async () => {
+test('22biqu native dry-run resolves directory HTML through request mockFetchImpl', async () => {
+  const fetchedUrls = [];
+  const { resolved } = await resolve22Biqu({
+    site: '22biqu',
+    input: 'https://www.22biqu.com/biqu456/',
+    dryRun: true,
+    mockFetchImpl: async (url) => {
+      fetchedUrls.push(String(url));
+      return {
+        ok: true,
+        url,
+        async text() {
+          return createDirectoryHtmlFixture();
+        },
+      };
+    },
+  });
+
+  assert.deepEqual(fetchedUrls, ['https://www.22biqu.com/biqu456/']);
+  assert.equal(resolved.resources.length, 4);
+  assert.equal(resolved.metadata.resolver.method, 'native-22biqu-directory');
+  assert.equal(resolved.metadata.directory.source, 'fetchImpl');
+});
+
+test('22biqu runner passes request mockFetchImpl into native directory resolver', async (t) => {
+  const runRoot = await mkdtemp(path.join(os.tmpdir(), 'bwk-22biqu-native-runner-fetch-'));
+  t.after(() => rm(runRoot, { recursive: true, force: true }));
+  const fetchCalls = [];
+
+  const result = await runDownloadTask({
+    site: '22biqu',
+    input: 'https://www.22biqu.com/biqu456/',
+    dryRun: true,
+    mockFetchImpl: async (url, options = {}) => {
+      fetchCalls.push({
+        url: String(url),
+        headers: options.headers ?? {},
+      });
+      return {
+        ok: true,
+        url,
+        async text() {
+          return createDirectoryHtmlFixture();
+        },
+      };
+    },
+  }, {
+    workspaceRoot: REPO_ROOT,
+    runRoot,
+  }, {
+    acquireSessionLease: async (_siteKey, purpose) => createReady22BiquLease(purpose),
+    releaseSessionLease: async () => {},
+  });
+
+  assert.deepEqual(fetchCalls.map((entry) => entry.url), ['https://www.22biqu.com/biqu456/']);
+  assert.equal(fetchCalls[0].headers.Cookie, 'fixture-session=1');
+  assert.equal(result.resolvedTask.resources.length, 4);
+  assert.deepEqual(result.resolvedTask.resources.map((resource) => resource.url), [
+    'https://www.22biqu.com/biqu456/1.html',
+    'https://www.22biqu.com/biqu456/2.html',
+    'https://www.22biqu.com/biqu456/3.html',
+    'https://www.22biqu.com/biqu456/4.html',
+  ]);
+  assert.equal(result.resolvedTask.metadata.resolver.method, 'native-22biqu-directory');
+  assert.equal(result.resolvedTask.metadata.directory.source, 'fetchImpl');
+  assert.equal(result.manifest.status, 'skipped');
+  assert.equal(result.manifest.reason, 'dry-run');
+});
+
+test('22biqu runner resolveNetwork option allows global fetch directory resolution', async (t) => {
+  const runRoot = await mkdtemp(path.join(os.tmpdir(), 'bwk-22biqu-native-runner-network-'));
+  t.after(() => rm(runRoot, { recursive: true, force: true }));
+  const originalFetch = globalThis.fetch;
+  const fetchedUrls = [];
+  globalThis.fetch = async (url) => {
+    fetchedUrls.push(String(url));
+    return {
+      ok: true,
+      url,
+      async text() {
+        return createDirectoryHtmlFixture();
+      },
+    };
+  };
+
+  try {
+    const result = await runDownloadTask({
+      site: '22biqu',
+      input: 'https://www.22biqu.com/biqu456/',
+      dryRun: true,
+    }, {
+      workspaceRoot: REPO_ROOT,
+      runRoot,
+      resolveNetwork: true,
+    }, {
+      acquireSessionLease: async (_siteKey, purpose) => createReady22BiquLease(purpose),
+      releaseSessionLease: async () => {},
+    });
+
+    assert.deepEqual(fetchedUrls, ['https://www.22biqu.com/biqu456/']);
+    assert.equal(result.resolvedTask.resources.length, 4);
+    assert.equal(result.resolvedTask.metadata.resolver.method, 'native-22biqu-directory');
+    assert.equal(result.resolvedTask.metadata.directory.source, 'network-fetch');
+    assert.equal(result.manifest.status, 'skipped');
+    assert.equal(result.manifest.reason, 'dry-run');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('22biqu ordinary book URL without resolve-network or injected fetch keeps legacy fallback and does not use global fetch', async () => {
   const originalFetch = globalThis.fetch;
   let globalFetchInvoked = false;
   globalThis.fetch = async () => {
@@ -319,6 +455,7 @@ test('22biqu native dry-run does not use global fetch without injected fetchImpl
     const { resolved } = await resolve22Biqu({
       site: '22biqu',
       input: 'https://www.22biqu.com/biqu456/',
+      resolveNetwork: false,
       dryRun: true,
     });
 
@@ -328,6 +465,11 @@ test('22biqu native dry-run does not use global fetch without injected fetchImpl
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('download CLI parser forwards --resolve-network into request options', () => {
+  const parsed = parseResolveNetworkArgs();
+  assert.equal(parsed.resolveNetwork, true);
 });
 
 test('22biqu directory HTML fixture without chapter links keeps legacy fallback', async (t) => {
