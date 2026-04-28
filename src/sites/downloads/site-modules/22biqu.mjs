@@ -762,11 +762,30 @@ function injectedFetchImpl(request = {}, context = {}) {
     context.fetchImpl,
     context.mockFetchImpl,
     context.deps?.fetchImpl,
+    context.deps?.mockFetchImpl,
     context.options?.fetchImpl,
+    context.options?.mockFetchImpl,
   ]) {
     if (typeof candidate === 'function') {
       return candidate;
     }
+  }
+  return null;
+}
+
+function directoryFetchImpl(request = {}, context = {}) {
+  const fetchImpl = injectedFetchImpl(request, context);
+  if (fetchImpl) {
+    return {
+      fetchImpl,
+      source: 'fetchImpl',
+    };
+  }
+  if (context.allowNetworkResolve === true && typeof globalThis.fetch === 'function') {
+    return {
+      fetchImpl: globalThis.fetch,
+      source: 'network-fetch',
+    };
   }
   return null;
 }
@@ -785,13 +804,13 @@ async function responseToText(response) {
 }
 
 async function directoryHtmlPayloadFromFetch(request = {}, plan = {}, context = {}, sessionLease = null) {
-  const fetchImpl = injectedFetchImpl(request, context);
+  const fetchState = directoryFetchImpl(request, context);
   const finalUrl = requestedBookUrl(request, plan);
-  if (!fetchImpl || !finalUrl || !is22BiquBookDirectoryUrl(finalUrl)) {
+  if (!fetchState || !finalUrl || !is22BiquBookDirectoryUrl(finalUrl)) {
     return null;
   }
   try {
-    const response = await fetchImpl(finalUrl, {
+    const response = await fetchState.fetchImpl(finalUrl, {
       method: 'GET',
       headers: {
         ...(sessionLease?.headers ?? {}),
@@ -806,7 +825,7 @@ async function directoryHtmlPayloadFromFetch(request = {}, plan = {}, context = 
     return {
       html,
       finalUrl: normalizeUrlNoFragment(firstText(response?.url, finalUrl)),
-      source: 'fetchImpl',
+      source: fetchState.source,
     };
   } catch {
     return null;

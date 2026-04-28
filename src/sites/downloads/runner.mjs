@@ -65,6 +65,13 @@ function marksAuthRequired(request = {}, plan = {}) {
     || request.sessionRequirement === 'required';
 }
 
+function allowNetworkResolve(request = {}, options = {}) {
+  return options.allowNetworkResolve === true
+    || options.resolveNetwork === true
+    || request.allowNetworkResolve === true
+    || request.resolveNetwork === true;
+}
+
 function sessionStatus(value = {}) {
   return String(value?.status ?? 'ready').trim() || 'ready';
 }
@@ -314,6 +321,9 @@ export async function runDownloadTask(request = {}, options = {}, deps = {}) {
       definition,
       workspaceRoot,
       siteMetadataOptions,
+      allowNetworkResolve: allowNetworkResolve(request, options),
+      fetchImpl: options.resolverFetchImpl ?? deps.resolverFetchImpl,
+      mockFetchImpl: options.mockResolverFetchImpl ?? deps.mockResolverFetchImpl,
     });
     const normalizedResolvedTask = normalizeResolvedDownloadTask(resolvedTask, plan);
     const dryRun = Boolean(options.dryRun ?? plan.policy?.dryRun ?? request.dryRun);
