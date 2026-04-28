@@ -295,6 +295,42 @@ for (const fixture of [
   });
 }
 
+for (const fixture of [
+  {
+    site: 'x',
+    input: 'https://x.com/openai',
+    expectedEntrypoint: path.join('src', 'entrypoints', 'sites', 'x-action.mjs'),
+  },
+  {
+    site: 'instagram',
+    input: 'https://www.instagram.com/openai/',
+    expectedEntrypoint: path.join('src', 'entrypoints', 'sites', 'instagram-action.mjs'),
+  },
+]) {
+  test(`${fixture.site} social archive input still falls back to legacy resolution`, async () => {
+    const definition = await resolveDownloadSiteDefinition({ site: fixture.site }, { workspaceRoot: REPO_ROOT });
+    const request = {
+      site: fixture.site,
+      input: fixture.input,
+      dryRun: true,
+    };
+    const plan = await createDownloadPlan(request, {
+      workspaceRoot: REPO_ROOT,
+      definition,
+    });
+    const resolved = await resolveDownloadResources(plan, null, {
+      request,
+      workspaceRoot: REPO_ROOT,
+      definition,
+    });
+
+    assert.equal(resolved.siteKey, fixture.site);
+    assert.equal(resolved.resources.length, 0);
+    assert.equal(resolved.completeness.reason, 'legacy-downloader-required');
+    assert.equal(plan.legacy.entrypoint.endsWith(fixture.expectedEntrypoint), true);
+  });
+}
+
 test('download site modules build legacy argv per site', async () => {
   const runDir = path.join(os.tmpdir(), 'bwk-download-module-run');
   const layout = { runDir };
