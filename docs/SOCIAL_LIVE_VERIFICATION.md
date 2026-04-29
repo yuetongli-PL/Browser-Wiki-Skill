@@ -59,9 +59,9 @@ X and Instagram profiles expose these operational intents through `social.natura
 
 | User wording | Intent | Command shape |
 | --- | --- | --- |
-| `X 全量续跑 <handle>` / `IG 全量续跑 <handle>` / `resume full archive` | `resume-full-archive` | `node src/entrypoints/sites/<site>-action.mjs profile-content <handle> --content-type posts --full-archive --run-dir <previous-or-new-run>` |
-| `限流冷却后继续` / `continue after rate limit cooldown` | `resume-after-cooldown` | `node src/entrypoints/sites/<site>-action.mjs profile-content <handle> --content-type posts --full-archive --risk-backoff-ms <ms> --risk-retries <n>` |
-| `媒体高速下载` / `fast media download` | `media-fast-download` | `node src/entrypoints/sites/<site>-action.mjs profile-content <handle> --content-type media --download-media --max-media-downloads <n>` |
+| `X 全量续跑 <handle>` / `IG 全量续跑 <handle>` / `resume full archive` | `resume-full-archive` | `node src/entrypoints/sites/<site>-action.mjs profile-content <handle> --content-type posts --full-archive --run-dir <previous-or-new-run> --session-health-plan` |
+| `限流冷却后继续` / `continue after rate limit cooldown` | `resume-after-cooldown` | `node src/entrypoints/sites/<site>-action.mjs profile-content <handle> --content-type posts --full-archive --risk-backoff-ms <ms> --risk-retries <n> --session-health-plan` |
+| `媒体高速下载` / `fast media download` | `media-fast-download` | `node src/entrypoints/sites/<site>-action.mjs profile-content <handle> --content-type media --download-media --max-media-downloads <n> --session-health-plan` |
 | `健康检查` / `session health check` | `health-check` | `node scripts/social-auth-recover.mjs --execute --site x|instagram --verify` |
 | `live 验收报告` / `live acceptance report` | `live-acceptance-report` | `node scripts/social-live-verify.mjs --live --execute --site x|instagram --x-account <handle>` or `--ig-account <handle>` plus explicit limits, timeouts, and `--run-root` |
 | `KB 刷新` / `scenario KB refresh` | `kb-refresh` | `node scripts/social-kb-refresh.mjs --execute --site x|instagram --x-account <handle>` or `--ig-account <handle>` |
