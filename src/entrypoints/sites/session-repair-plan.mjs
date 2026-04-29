@@ -263,7 +263,7 @@ function render(result) {
     return result.help;
   }
   const plan = result.repairPlan ?? {};
-  return [
+  const lines = [
     'Session Repair Plan',
     `- Site: ${result.siteKey}`,
     `- Status: ${result.status ?? 'unknown'}`,
@@ -273,7 +273,16 @@ function render(result) {
     `- Suggested command: ${plan.command ?? 'none'}`,
     `- Requires approval: ${plan.requiresApproval === true}`,
     `- Execution status: ${result.execution?.status ?? 'not-run'}`,
-  ].join('\n') + '\n';
+  ];
+  if (result.audit) {
+    lines.push(
+      `- Audit manifest: ${result.audit.manifest ?? 'unknown'}`,
+      `- Audit row: ${result.audit.rowId ?? 'unknown'}`,
+      `- Audit kind: ${result.audit.kind ?? 'unknown'}`,
+      `- Audit provider: ${result.audit.provider ?? 'unknown'}`,
+    );
+  }
+  return lines.join('\n') + '\n';
 }
 
 export async function main(argv = process.argv.slice(2), deps = {}) {
