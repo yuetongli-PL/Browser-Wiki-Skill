@@ -456,9 +456,35 @@ test('authenticated release gate blocks missing session traceability', () => {
     plan: { sessionRequirement: 'required' },
     sessionProvider: 'legacy-session-provider',
   }).ok, true);
-  assert.equal(evaluateAuthenticatedSessionReleaseGate({
+  assert.deepEqual(evaluateAuthenticatedSessionReleaseGate({
     plan: { sessionRequirement: 'required' },
     sessionProvider: 'unified-session-runner',
-    sessionHealth: { artifacts: { manifest: 'runs/session/x/manifest.json' } },
-  }).ok, true);
+    sessionHealth: {
+      healthStatus: 'ready',
+      artifacts: { manifest: 'runs/session/x/manifest.json' },
+    },
+  }), {
+    ok: true,
+    status: 'passed',
+    reason: 'unified-session-health-manifest',
+    requiresAuth: true,
+    provider: 'unified-session-runner',
+    healthManifest: 'runs/session/x/manifest.json',
+  });
+  assert.deepEqual(evaluateAuthenticatedSessionReleaseGate({
+    plan: { sessionRequirement: 'required' },
+    sessionProvider: 'unified-session-runner',
+    sessionHealth: {
+      healthStatus: 'blocked',
+      reason: 'session-invalid',
+      artifacts: { manifest: 'runs/session/x/manifest.json' },
+    },
+  }), {
+    ok: false,
+    status: 'blocked',
+    reason: 'session-invalid',
+    requiresAuth: true,
+    provider: 'unified-session-runner',
+    healthManifest: 'runs/session/x/manifest.json',
+  });
 });
