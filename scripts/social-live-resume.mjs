@@ -174,12 +174,22 @@ function extractAttemptRecords(json, sourcePath) {
 }
 
 function commandForRecord(record) {
-  if (record.command) return record.command;
+  if (record.command) return ensureActionSessionTraceability(record.command);
   const account = record.account ?? '<account>';
+  let command;
   if (record.site === 'instagram') {
-    return ['node', path.join('src', 'entrypoints', 'sites', 'instagram-action.mjs'), 'full-archive', account, '--run-dir', record.artifactRoot].map(shellQuote).join(' ');
+    command = ['node', path.join('src', 'entrypoints', 'sites', 'instagram-action.mjs'), 'full-archive', account, '--run-dir', record.artifactRoot].map(shellQuote).join(' ');
+  } else {
+    command = ['node', path.join('src', 'entrypoints', 'sites', 'x-action.mjs'), 'full-archive', account, '--run-dir', record.artifactRoot].map(shellQuote).join(' ');
   }
-  return ['node', path.join('src', 'entrypoints', 'sites', 'x-action.mjs'), 'full-archive', account, '--run-dir', record.artifactRoot].map(shellQuote).join(' ');
+  return ensureActionSessionTraceability(command);
+}
+
+function ensureActionSessionTraceability(command) {
+  const text = String(command ?? '');
+  if (!/(?:x|instagram)-action\.mjs(?:\s|$)/u.test(text)) return text;
+  if (/(?:^|\s)--session-(?:health-plan|manifest)(?:\s|$)/u.test(text)) return text;
+  return `${text} --session-health-plan`;
 }
 
 function shouldResume(record) {
