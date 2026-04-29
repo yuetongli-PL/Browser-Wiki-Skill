@@ -241,7 +241,10 @@ async function requestWithInjectedEvidenceSeeds(request = {}, plan = {}, session
   const evidence = isObject(directEvidence)
     ? directEvidence
     : evidenceRequest && resolver
-      ? await resolver(evidenceRequest, {
+      ? await resolver({
+        ...evidenceRequest,
+        allowNetworkResolve: context.allowNetworkResolve === true,
+      }, {
         request,
         plan,
         sessionLease,

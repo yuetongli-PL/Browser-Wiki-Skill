@@ -129,6 +129,10 @@ Pass criteria:
 - Native social resolver coverage documents gate flags and unsupported
   legacy-only actions, because social native resolution is intentionally gated
   rather than a default replacement.
+- Network-capable resolver branches prove the gate in runner tests: default
+  resolver deps receive `allowNetworkResolve: false`, `--resolve-network`
+  flips it to `true`, and required unhealthy sessions block before resolver
+  deps or legacy adapters run.
 - Recovery or resume branches include artifact-level tests for `manifest.json`,
   `queue.json`, and `downloads.jsonl`.
 - Test failures are not waived by release notes. They must be fixed or the

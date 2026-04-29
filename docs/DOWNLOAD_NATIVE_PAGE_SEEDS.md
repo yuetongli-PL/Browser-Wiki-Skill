@@ -54,3 +54,15 @@ coverage without running live site traffic or removing legacy fallback paths.
 All new coverage is fixture-backed, request-injected, or injected-resolver
 backed. This branch does not perform real downloads, real account login, live
 page fetches, or live smoke validation.
+
+## Network Gate
+
+- Download runner defaults `allowNetworkResolve` to `false` for native resolver
+  deps and evidence providers.
+- Injected deps may be used in tests with either gate value, but they must not
+  perform live fetches unless the runner or request explicitly sets
+  `resolveNetwork` / `allowNetworkResolve`.
+- `--resolve-network` is the CLI gate that turns the runner context gate on; it
+  does not bypass session preflight.
+- Required unhealthy sessions block before native resolver deps, fetch resolvers,
+  or legacy adapters run.
