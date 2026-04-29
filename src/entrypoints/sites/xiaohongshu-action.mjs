@@ -13,6 +13,34 @@ import {
 } from '../../sites/sessions/manifest-bridge.mjs';
 import { runXiaohongshuAction } from '../../sites/xiaohongshu/actions/router.mjs';
 
+export const XIAOHONGSHU_ACTION_HELP = `Usage:
+  node src/entrypoints/sites/xiaohongshu-action.mjs download <note-url|author-url|query> [options]
+  node src/entrypoints/sites/xiaohongshu-action.mjs download --followed-users [options]
+
+Defaults to dry-run behavior unless the underlying action is explicitly
+configured to execute downloads.
+
+Options:
+  --profile-path <path>             Profile JSON source override.
+  --browser-profile-root <path>     Browser profile root for reusable sessions.
+  --user-data-dir <path>            Browser user data directory override.
+  --out-dir <dir>                   Output directory for action artifacts.
+  --timeout <ms>                    Browser/action timeout.
+  --dry-run                         Plan downloads without executing media fetches.
+  --max-items <n>                   Limit resolved note downloads.
+  --author-page-limit <n>           Limit author continuation pages.
+  --query <value>                   Add a search query. Can be repeated.
+  --followed-users                  Expand followed users into author downloads.
+  --followed-user-limit <n>         Limit followed users.
+  --author-resume-state <json|@file> Resume author pagination state.
+  --session-manifest <path>         Consume a unified runs/session health manifest.
+  --session-health-plan             Generate and consume a unified session health manifest first.
+  --no-session-health-plan          Use the legacy session provider path.
+  --format <json|markdown>          Output format. Default: json.
+  --output <full|summary|download>  Output payload shape. Default: full.
+  -h, --help                        Show this help.
+`;
+
 function normalizeStringList(value) {
   return (Array.isArray(value) ? value : value === undefined || value === null ? [] : [value])
     .flatMap((item) => String(item ?? '').split(','))
@@ -63,6 +91,10 @@ export function parseXiaohongshuActionArgs(argv = process.argv.slice(2)) {
   };
   for (let index = 0; index < args.length; index += 1) {
     const token = args[index];
+    if (token === '-h') {
+      appendFlag('help', true);
+      continue;
+    }
     if (!token.startsWith('--')) {
       positionals.push(token);
       continue;
@@ -84,6 +116,7 @@ export function parseXiaohongshuActionArgs(argv = process.argv.slice(2)) {
   const action = positionals[0] ?? 'download';
   const items = positionals.slice(1);
   return {
+    help: flags.help === true,
     action,
     items,
     profilePath: flags['profile-path'] ? String(flags['profile-path']) : null,
@@ -172,6 +205,10 @@ export async function buildXiaohongshuActionRequest(parsed) {
 export async function runXiaohongshuActionCli(argv = process.argv.slice(2)) {
   initializeCliUtf8();
   const parsed = parseXiaohongshuActionArgs(argv);
+  if (parsed.help) {
+    process.stdout.write(XIAOHONGSHU_ACTION_HELP);
+    return { help: XIAOHONGSHU_ACTION_HELP };
+  }
   const request = await buildXiaohongshuActionRequest(parsed);
   const sessionMetadata = await actionSessionMetadataFromOptions(parsed, {
     siteKey: 'xiaohongshu',
