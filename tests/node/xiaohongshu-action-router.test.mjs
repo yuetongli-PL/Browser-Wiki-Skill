@@ -7,6 +7,8 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import {
   buildXiaohongshuActionRequest,
   parseXiaohongshuActionArgs,
+  runXiaohongshuActionCli,
+  XIAOHONGSHU_ACTION_HELP,
 } from '../../src/entrypoints/sites/xiaohongshu-action.mjs';
 import { readJsonFile } from '../../src/infra/io.mjs';
 import {
@@ -217,6 +219,28 @@ test('parseXiaohongshuActionArgs accepts followed-user batch download flags', ()
   assert.equal(parsed.headless, false);
   assert.equal(parsed.reuseLoginState, true);
   assert.equal(parsed.sessionManifest, 'runs/session/xiaohongshu/manifest.json');
+});
+
+test('runXiaohongshuActionCli help exposes unified session flags without running actions', async () => {
+  let output = '';
+  const originalWrite = process.stdout.write;
+  process.stdout.write = (chunk, ...args) => {
+    output += String(chunk);
+    const callback = args.find((arg) => typeof arg === 'function');
+    callback?.();
+    return true;
+  };
+  try {
+    const result = await runXiaohongshuActionCli(['--help']);
+
+    assert.deepEqual(result, { help: XIAOHONGSHU_ACTION_HELP });
+    assert.match(output, /--session-manifest <path>/u);
+    assert.match(output, /--session-health-plan/u);
+    assert.match(output, /--no-session-health-plan/u);
+    assert.match(output, /--followed-users/u);
+  } finally {
+    process.stdout.write = originalWrite;
+  }
 });
 
 test('buildXiaohongshuActionRequest carries unified session manifest options into router request', async () => {
