@@ -405,6 +405,22 @@ test('download runner docs describe hybrid native migration without live claims'
   assert.match(runnerDoc, /live smoke, real login, and real download validation remain/u);
 });
 
+test('legacy reduction matrix preserves fallback and live-claim guardrails', async () => {
+  const matrix = await readFile(path.join(process.cwd(), 'docs', 'DOWNLOAD_LEGACY_REDUCTION_MIGRATION_MATRIX.md'), 'utf8');
+
+  assert.match(matrix, /Current policy: do not delete or bypass legacy fallback paths/u);
+  assert.match(matrix, /Bilibili .* Native .*native-bilibili-page-seeds/u);
+  assert.match(matrix, /Douyin .* Native .*native-douyin-resource-seeds/u);
+  assert.match(matrix, /Xiaohongshu .* Native .*native-xiaohongshu-resource-seeds/u);
+  assert.match(matrix, /X .* Native .*native-x-social-resource-seeds/u);
+  assert.match(matrix, /Instagram .* Native .*native-instagram-social-resource-seeds/u);
+  assert.match(matrix, /X .* Relation, followed-date, follower\/following, checkpoint, resume, or cursor discovery inputs\. \| Legacy/u);
+  assert.match(matrix, /Instagram .* Relation, follower\/following, followed-users, checkpoint, resume, or authenticated feed discovery inputs\. \| Legacy/u);
+  assert.match(matrix, /does not prove live crawling/u);
+  assert.match(matrix, /authenticated social archive capability/u);
+  assert.match(matrix, /safe fallback removal/u);
+});
+
 test('authenticated release gate blocks missing session traceability', () => {
   assert.deepEqual(evaluateAuthenticatedSessionReleaseGate({
     plan: { sessionRequirement: 'required' },
