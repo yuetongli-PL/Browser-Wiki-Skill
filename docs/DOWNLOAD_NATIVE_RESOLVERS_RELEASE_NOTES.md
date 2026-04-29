@@ -52,4 +52,6 @@ python -m unittest discover -s tests\python -p "test_*.py"
 ```
 
 Live release gate remains `not-run` until each site/case is separately
-approved with a bounded plan and auditable output directory.
+approved with a bounded plan and auditable output directory. The approval
+matrix and command templates live in
+`docs/DOWNLOAD_LIVE_VALIDATION_MATRIX.md`.

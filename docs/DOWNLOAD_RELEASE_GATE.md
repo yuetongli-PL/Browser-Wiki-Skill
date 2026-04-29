@@ -160,6 +160,9 @@ rewrite the Phase 2 release package as if it described the follow-up branch.
 Default live smoke status is `not-run`. That is acceptable only when the branch
 does not claim live authenticated behavior.
 
+Use `docs/DOWNLOAD_LIVE_VALIDATION_MATRIX.md` as the approval checklist and
+case matrix before any live run.
+
 This gate must not:
 
 - Run `--execute` against live sites.
