@@ -317,6 +317,9 @@ async function callMediaBatchResolver(context, items, request, plan, sessionLeas
     return [];
   }
   const result = await resolver(items, {
+    contractVersion: 'douyin-native-resolver-deps-v1',
+    intent: 'resolve-media-batch',
+    sourceType: 'media-batch',
     request,
     plan,
     sessionLease,
@@ -331,9 +334,13 @@ async function callAuthorEnumerator(context, request, plan, sessionLease) {
     return [];
   }
   const result = await enumerator({
+    contractVersion: 'douyin-native-resolver-deps-v1',
+    intent: 'enumerate-author-videos',
+    sourceType: 'author',
     request,
     plan,
     sessionLease,
+    allowNetworkResolve: context.allowNetworkResolve === true,
     limit: request.maxItems ?? plan.policy?.maxItems,
   });
   return resultEntries(result);
@@ -345,7 +352,9 @@ async function callFollowQuery(context, request, plan, sessionLease) {
     return [];
   }
   const result = await query({
+    contractVersion: 'douyin-native-resolver-deps-v1',
     intent: 'list-followed-updates',
+    sourceType: 'followed-updates',
     window: request.followUpdatesWindow ?? request.window,
     userFilter: request.userFilter ?? request.user ?? request.author,
     titleKeyword: request.titleKeyword ?? request.keyword,
@@ -354,6 +363,7 @@ async function callFollowQuery(context, request, plan, sessionLease) {
     request,
     plan,
     sessionLease,
+    allowNetworkResolve: context.allowNetworkResolve === true,
   });
   return resultEntries(result);
 }

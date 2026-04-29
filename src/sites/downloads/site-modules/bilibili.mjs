@@ -126,6 +126,135 @@ function listPayloadCandidates(request = {}) {
   ].filter((entry) => isObject(entry.payload));
 }
 
+function callableFromContext(context = {}, name) {
+  return [
+    context[name],
+    context.deps?.[name],
+    context.options?.[name],
+  ].find((candidate) => typeof candidate === 'function') ?? null;
+}
+
+function inputText(request = {}, plan = {}) {
+  return firstText(request.inputUrl, request.url, request.input, plan.source?.input);
+}
+
+function bilibiliUrlFromInput(request = {}, plan = {}) {
+  const input = inputText(request, plan);
+  if (!input) {
+    return null;
+  }
+  try {
+    return new URL(input);
+  } catch {
+    const bvid = bvidFromValue(input);
+    return bvid ? new URL(bilibiliVideoUrl(bvid)) : null;
+  }
+}
+
+function bilibiliEvidenceRequest(request = {}, plan = {}) {
+  const parsed = bilibiliUrlFromInput(request, plan);
+  const input = inputText(request, plan);
+  const bvid = firstText(request.bvid, bvidFromValue(input));
+  const maxItems = normalizePositiveInteger(request.maxItems ?? request.maxPlaylistItems ?? plan.policy?.maxItems, null);
+  const descriptor = {
+    siteKey,
+    contractVersion: 'bilibili-native-api-evidence-v1',
+    input,
+    allowNetworkResolve: false,
+    maxItems: maxItems || undefined,
+  };
+  if (bvid) {
+    return {
+      ...descriptor,
+      inputKind: 'video-detail',
+      bvid,
+      requiredPayloads: ['view', 'playurl'],
+    };
+  }
+  if (!parsed || !parsed.hostname.includes('bilibili.com')) {
+    return null;
+  }
+  const pathParts = parsed.pathname.split('/').filter(Boolean);
+  const collectionId = firstText(
+    request.collectionId,
+    request.sid,
+    parsed.searchParams.get('sid'),
+    parsed.searchParams.get('season_id'),
+  );
+  if (collectionId || parsed.pathname.includes('collectiondetail')) {
+    return {
+      ...descriptor,
+      inputKind: 'collection',
+      collectionId,
+      requiredPayloads: ['collection', 'playurl'],
+    };
+  }
+  const seriesId = firstText(
+    request.seriesId,
+    parsed.searchParams.get('series_id'),
+    parsed.searchParams.get('sid'),
+  );
+  if (seriesId || parsed.pathname.includes('/lists/')) {
+    return {
+      ...descriptor,
+      inputKind: 'series',
+      seriesId,
+      requiredPayloads: ['series', 'playurl'],
+    };
+  }
+  const spaceMid = firstText(request.spaceMid, request.mid, parsed.hostname.startsWith('space.') ? pathParts[0] : '');
+  if (spaceMid) {
+    return {
+      ...descriptor,
+      inputKind: 'space-archives',
+      spaceMid,
+      requiredPayloads: ['space-archives', 'playurl'],
+    };
+  }
+  return null;
+}
+
+function mergeBilibiliEvidence(request = {}, evidence = {}) {
+  const metadata = metadataObject(request);
+  return {
+    ...request,
+    bilibiliViewPayload: evidence.bilibiliViewPayload ?? request.bilibiliViewPayload,
+    viewPayload: evidence.viewPayload ?? request.viewPayload,
+    bilibiliCollectionPayload: evidence.bilibiliCollectionPayload ?? request.bilibiliCollectionPayload,
+    collectionPayload: evidence.collectionPayload ?? request.collectionPayload,
+    bilibiliSeriesPayload: evidence.bilibiliSeriesPayload ?? request.bilibiliSeriesPayload,
+    seriesPayload: evidence.seriesPayload ?? request.seriesPayload,
+    bilibiliSpaceArchivesPayload: evidence.bilibiliSpaceArchivesPayload ?? request.bilibiliSpaceArchivesPayload,
+    spaceArchivesPayload: evidence.spaceArchivesPayload ?? request.spaceArchivesPayload,
+    playUrlPayloads: evidence.playUrlPayloads ?? evidence.bilibiliPlayUrlPayloads ?? request.playUrlPayloads,
+    bilibiliPlayUrlPayloads: evidence.bilibiliPlayUrlPayloads ?? request.bilibiliPlayUrlPayloads,
+    metadata: {
+      ...metadata,
+    },
+  };
+}
+
+async function requestWithInjectedEvidenceSeeds(request = {}, plan = {}, sessionLease = null, context = {}) {
+  const directEvidence = request.bilibiliApiEvidence ?? metadataObject(request).bilibiliApiEvidence;
+  const evidenceRequest = bilibiliEvidenceRequest(request, plan);
+  const resolver = callableFromContext(context, 'resolveBilibiliApiEvidence');
+  const evidence = isObject(directEvidence)
+    ? directEvidence
+    : evidenceRequest && resolver
+      ? await resolver(evidenceRequest, {
+        request,
+        plan,
+        sessionLease,
+        allowNetworkResolve: context.allowNetworkResolve === true,
+      })
+      : null;
+  if (!isObject(evidence)) {
+    return null;
+  }
+  const evidenceBackedRequest = mergeBilibiliEvidence(request, evidence);
+  return requestWithBilibiliPageSeeds(evidenceBackedRequest, plan);
+}
+
 function payloadData(payload = {}) {
   return payload.data?.data
     ?? payload.data?.result
@@ -490,12 +619,13 @@ function requestWithPayloadSeeds(request = {}, plan = {}) {
   return null;
 }
 
-export function resolveResources(plan, sessionLease = null, context = {}) {
+export async function resolveResources(plan, sessionLease = null, context = {}) {
   const resolved = resolveNativeResourceSeeds(siteKey, plan, sessionLease, context, nativeSeedResolverOptions);
   if (resolved) {
     return resolved;
   }
   const seededRequest = requestWithBilibiliPageSeeds(context.request ?? {}, plan)
+    ?? await requestWithInjectedEvidenceSeeds(context.request ?? {}, plan, sessionLease, context)
     ?? requestWithPayloadSeeds(context.request ?? {}, plan);
   if (!seededRequest) {
     return null;

@@ -36,7 +36,11 @@ test('douyin native resolver maps injected ordinary video media results to resou
     input: 'https://www.douyin.com/video/7321000000000000000',
     dryRun: true,
   }, {
-    resolveDouyinMediaBatch: async (items) => {
+    resolveDouyinMediaBatch: async (items, options) => {
+      assert.equal(options.contractVersion, 'douyin-native-resolver-deps-v1');
+      assert.equal(options.intent, 'resolve-media-batch');
+      assert.equal(options.sourceType, 'media-batch');
+      assert.equal(options.allowNetworkResolve, false);
       called.push(...items);
       return {
         results: [{
@@ -84,7 +88,11 @@ test('douyin native resolver enumerates author videos and resolves only missing 
     maxItems: 2,
     dryRun: true,
   }, {
-    enumerateDouyinAuthorVideos: async ({ limit }) => {
+    enumerateDouyinAuthorVideos: async ({ contractVersion, intent, sourceType, allowNetworkResolve, limit }) => {
+      assert.equal(contractVersion, 'douyin-native-resolver-deps-v1');
+      assert.equal(intent, 'enumerate-author-videos');
+      assert.equal(sourceType, 'author');
+      assert.equal(allowNetworkResolve, false);
       assert.equal(limit, 2);
       return {
         videos: [
@@ -102,7 +110,11 @@ test('douyin native resolver enumerates author videos and resolves only missing 
         ],
       };
     },
-    resolveDouyinMediaBatch: async (items) => {
+    resolveDouyinMediaBatch: async (items, options) => {
+      assert.equal(options.contractVersion, 'douyin-native-resolver-deps-v1');
+      assert.equal(options.intent, 'resolve-media-batch');
+      assert.equal(options.sourceType, 'media-batch');
+      assert.equal(options.allowNetworkResolve, false);
       resolvedTargets.push(...items);
       return [{
         videoId: '7321000000000000002',
@@ -137,7 +149,10 @@ test('douyin native resolver maps injected followed updates without refreshing l
   }, {
     queryDouyinFollow: async (query) => {
       queryCalled = true;
+      assert.equal(query.contractVersion, 'douyin-native-resolver-deps-v1');
       assert.equal(query.intent, 'list-followed-updates');
+      assert.equal(query.sourceType, 'followed-updates');
+      assert.equal(query.allowNetworkResolve, false);
       assert.equal(query.window, 'today');
       assert.deepEqual(query.userFilter, ['creator']);
       assert.deepEqual(query.titleKeyword, ['clip']);

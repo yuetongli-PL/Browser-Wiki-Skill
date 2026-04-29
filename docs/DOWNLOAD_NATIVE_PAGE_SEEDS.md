@@ -10,6 +10,11 @@ coverage without running live site traffic or removing legacy fallback paths.
 - Bilibili BV view payloads, multi-P `playUrlPayloads`, and collection/series or
   UP-space archive payloads can expand to native grouped resources when each
   entry has matching offline playurl evidence.
+- Bilibili ordinary BV, collection, series, and UP-space inputs can request
+  API evidence through `bilibiliApiEvidence` or injected
+  `resolveBilibiliApiEvidence`. The resolver emits a
+  `bilibili-native-api-evidence-v1` descriptor but does not fetch evidence by
+  itself.
 - Xiaohongshu `xiaohongshuNotePayload`, `pageFacts`, fixture HTML, search note
   lists, author note lists, and followed note lists can resolve to native image
   or video resources when the request provides fixture/media payloads, mock
@@ -17,18 +22,22 @@ coverage without running live site traffic or removing legacy fallback paths.
 - Douyin direct media results, `resolvedVideos`, injected
   `resolveDouyinMediaBatch`, author enumerator results, and injected followed
   update query results can resolve to native media seeds without refreshing live
-  state.
+  state. Injected deps receive `douyin-native-resolver-deps-v1` descriptors.
+- Xiaohongshu followed-user injected queries receive
+  `xiaohongshu-native-resolver-deps-v1` descriptors and remain side-effect free.
 - X and Instagram expose gated social native resolvers through
   `nativeResolver`/`nativeSocialResolver`. X supports injected media candidates
-  for `profile-content`, `full-archive`, and `search`; Instagram supports
-  `profile-content` and `full-archive`, including `instagramFeedUserPayload`.
+  for `profile-content`, `full-archive`, and `search`, including nested timeline
+  archive payloads; Instagram supports `profile-content` and `full-archive`,
+  including `instagramFeedUserPayload` and GraphQL sidecar archive payloads.
 - Existing explicit `resourceSeeds`, `resources`, and `downloadBundle` inputs
   keep their original precedence and schema.
 
 ## Still Legacy
 
 - Bilibili ordinary BV/video page, collection, or creator inputs without
-  view/list payloads and matching playurl fixtures still use the legacy action.
+  request-injected/API evidence, view/list payloads, and matching playurl
+  fixtures still use the legacy action.
 - Xiaohongshu ordinary note, search, profile, and followed-user inputs without
   payloads, page facts, fixture HTML, mock notes, or injected query results still
   use the legacy action.

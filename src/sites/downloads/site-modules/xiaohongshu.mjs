@@ -383,10 +383,13 @@ async function followedNotesFromInjectedQuery(request = {}, plan = {}, sessionLe
     return [];
   }
   const result = await query({
+    contractVersion: 'xiaohongshu-native-resolver-deps-v1',
     intent: 'list-followed-users',
+    sourceType: 'followed-users',
     request,
     plan,
     sessionLease,
+    allowNetworkResolve: context.allowNetworkResolve === true,
     limit: request.followedUserLimit ?? request.maxItems ?? plan.policy?.maxItems,
   });
   return resultNotes(result).map((note) => ({ sourceType: 'followed-users', note }));
