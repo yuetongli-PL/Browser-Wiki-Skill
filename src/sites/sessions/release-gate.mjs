@@ -26,8 +26,16 @@ function inferAuthRequirement(manifest = {}, options = {}) {
     || normalizeText(manifest.session?.requirement) === 'required';
 }
 
+function pickSessionHealth(manifest = {}, options = {}) {
+  return options.sessionHealth
+    ?? manifest.sessionHealth
+    ?? manifest.session?.health
+    ?? {};
+}
+
 export function evaluateAuthenticatedSessionReleaseGate(manifest = {}, options = {}) {
   const requiresAuth = inferAuthRequirement(manifest, options);
+  const sessionHealth = pickSessionHealth(manifest, options);
   const provider = pickFirstText(
     options.sessionProvider,
     manifest.sessionProvider,
@@ -96,6 +104,17 @@ export function evaluateAuthenticatedSessionReleaseGate(manifest = {}, options =
       requiresAuth,
       provider,
       healthManifest: null,
+    };
+  }
+  const healthStatus = pickFirstText(sessionHealth.healthStatus, sessionHealth.status);
+  if (healthStatus && healthStatus !== 'ready' && healthStatus !== 'passed') {
+    return {
+      ok: false,
+      status: 'blocked',
+      reason: pickFirstText(sessionHealth.reason, sessionHealth.riskCauseCode, healthStatus),
+      requiresAuth,
+      provider,
+      healthManifest,
     };
   }
 
