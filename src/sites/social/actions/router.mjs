@@ -3957,6 +3957,10 @@ function renderMarkdownReport(result) {
     if (result.sessionHealth?.artifacts?.manifest) {
       lines.push(`- Session health manifest: ${result.sessionHealth.artifacts.manifest}`);
     }
+    const repairCommand = buildSocialSessionRepairCommand(result, gate);
+    if (repairCommand) {
+      lines.push(`- Next session repair command: ${repairCommand}`);
+    }
   }
   if (result.result?.archive) {
     lines.push(`- Archive strategy: ${result.result.archive.strategy || 'unknown'}`);
@@ -4018,6 +4022,24 @@ function buildSocialSessionGate(result = {}, { requiresAuth = false } = {}) {
   }, {
     requiresAuth,
   });
+}
+
+function buildSocialSessionRepairCommand(result = {}, gate = {}) {
+  if (gate.status !== 'blocked') {
+    return null;
+  }
+  const site = result.siteKey ?? result.plan?.siteKey ?? result.plan?.site;
+  if (!site) {
+    return null;
+  }
+  return [
+    'node',
+    'src/entrypoints/sites/session-repair-plan.mjs',
+    '--site',
+    site,
+    '--session-gate-reason',
+    gate.reason ?? 'blocked',
+  ].map(quoteCommandArg).join(' ');
 }
 
 function csvCell(value) {

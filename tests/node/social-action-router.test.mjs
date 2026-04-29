@@ -2405,6 +2405,24 @@ test('social action dry-run consumes session manifest metadata without opening a
   assert.equal(result.sessionGate.ok, true);
   assert.match(result.markdown, /Session provider: unified-session-runner/u);
   assert.match(result.markdown, /Session traceability gate: passed \(unified-session-health-manifest\)/u);
+  assert.doesNotMatch(result.markdown, /Next session repair command/u);
+});
+
+test('social action dry-run suggests session repair command for blocked session gates', async () => {
+  const result = await runSocialAction({
+    site: 'x',
+    action: 'profile-content',
+    account: 'openai',
+    dryRun: true,
+    sessionProvider: 'unified-session-runner',
+  });
+
+  assert.equal(result.sessionGate.status, 'blocked');
+  assert.match(result.markdown, /Session traceability gate: blocked \(session-health-manifest-missing\)/u);
+  assert.match(
+    result.markdown,
+    /Next session repair command: node src\/entrypoints\/sites\/session-repair-plan\.mjs --site x --session-gate-reason session-health-manifest-missing/u,
+  );
 });
 
 test('social action CLI parser handles explicit API cursor booleans', () => {
