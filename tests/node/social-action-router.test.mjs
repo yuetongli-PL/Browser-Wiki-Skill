@@ -2402,6 +2402,9 @@ test('social action dry-run consumes session manifest metadata without opening a
   assert.equal(result.sessionProvider, 'unified-session-runner');
   assert.equal(result.sessionHealth.healthStatus, 'ready');
   assert.equal(result.sessionHealth.artifacts.manifest, sessionManifest);
+  assert.equal(result.sessionGate.ok, true);
+  assert.match(result.markdown, /Session provider: unified-session-runner/u);
+  assert.match(result.markdown, /Session traceability gate: passed \(unified-session-health-manifest\)/u);
 });
 
 test('social action CLI parser handles explicit API cursor booleans', () => {
@@ -2755,6 +2758,24 @@ test('runSocialAction marks mid-run login wall as recoverable auth failure', asy
   t.after(async () => {
     await rm(runDir, { recursive: true, force: true });
   });
+  const sessionManifest = path.join(runDir, 'session-health-manifest.json');
+  await writeFile(sessionManifest, JSON.stringify({
+    plan: {
+      siteKey: 'x',
+      host: 'x.com',
+      purpose: 'archive',
+      sessionRequirement: 'required',
+    },
+    health: {
+      status: 'ready',
+      authStatus: 'authenticated',
+      identityConfirmed: true,
+    },
+    artifacts: {
+      manifest: sessionManifest,
+      runDir,
+    },
+  }, null, 2));
   const fakeSession = {
     async navigateAndWait() {},
     async evaluateValue() {
@@ -2793,6 +2814,7 @@ test('runSocialAction marks mid-run login wall as recoverable auth failure', asy
     timeoutMs: 1000,
     riskBackoffMs: 0,
     runDir,
+    sessionManifest,
   }, {
     async resolveSiteBrowserSessionOptions() {
       return { userDataDir: null, cleanupUserDataDirOnShutdown: true };
@@ -2809,10 +2831,18 @@ test('runSocialAction marks mid-run login wall as recoverable auth failure', asy
   assert.equal(result.runtimeRisk.stopReason, 'login-wall');
   assert.equal(result.authHealth.needsRecovery, true);
   assert.equal(result.authHealth.recoveryReason, 'session-login-wall');
+  assert.equal(result.sessionGate.ok, true);
   assert.match(result.markdown, /Runtime action: refresh-login-session/u);
+  assert.match(result.markdown, /Session provider: unified-session-runner/u);
+  assert.match(result.markdown, /Session traceability gate: passed \(unified-session-health-manifest\)/u);
   const state = JSON.parse(await readFile(path.join(runDir, 'state.json'), 'utf8'));
   assert.equal(state.status, 'failed');
   assert.equal(state.runtimeRisk.stopReason, 'login-wall');
+  const manifest = JSON.parse(await readFile(path.join(runDir, 'manifest.json'), 'utf8'));
+  assert.equal(manifest.sessionProvider, 'unified-session-runner');
+  assert.equal(manifest.sessionGate.ok, true);
+  const report = await readFile(path.join(runDir, 'report.md'), 'utf8');
+  assert.match(report, /Session health manifest:/u);
 });
 
 test('runSocialAction resumes successfully after a recoverable login-wall failure', async (t) => {

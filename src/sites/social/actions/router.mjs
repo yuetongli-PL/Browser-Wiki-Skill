@@ -17,6 +17,7 @@ import { ensureDir, readJsonFile, readTextFile, writeJsonFile, writeJsonLines, w
 import { cleanText, compactSlug, normalizeText } from '../../../shared/normalize.mjs';
 import { downloadMediaFiles as executeMediaDownloads } from '../../downloads/media-executor.mjs';
 import { actionSessionMetadataFromOptions } from '../../sessions/manifest-bridge.mjs';
+import { evaluateAuthenticatedSessionReleaseGate } from '../../sessions/release-gate.mjs';
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(MODULE_DIR, '..', '..', '..', '..');
@@ -3947,6 +3948,16 @@ function renderMarkdownReport(result) {
       lines.push(`- Auth recovery: ${result.authHealth.recoveryCommand}`);
     }
   }
+  if (result.sessionProvider || result.sessionHealth || result.sessionGate) {
+    const gate = result.sessionGate ?? buildSocialSessionGate(result, {
+      requiresAuth: result.authHealth?.required === true,
+    });
+    lines.push(`- Session provider: ${result.sessionProvider ?? 'unknown'}`);
+    lines.push(`- Session traceability gate: ${gate.status} (${gate.reason})`);
+    if (result.sessionHealth?.artifacts?.manifest) {
+      lines.push(`- Session health manifest: ${result.sessionHealth.artifacts.manifest}`);
+    }
+  }
   if (result.result?.archive) {
     lines.push(`- Archive strategy: ${result.result.archive.strategy || 'unknown'}`);
     lines.push(`- Archive complete: ${formatArchiveComplete(result.result.archive.complete)}`);
@@ -3997,6 +4008,16 @@ function renderMarkdownReport(result) {
     lines.push('');
   }
   return lines.join('\n').trimEnd() + '\n';
+}
+
+function buildSocialSessionGate(result = {}, { requiresAuth = false } = {}) {
+  return evaluateAuthenticatedSessionReleaseGate({
+    authHealth: { required: requiresAuth },
+    sessionProvider: result.sessionProvider,
+    sessionHealth: result.sessionHealth,
+  }, {
+    requiresAuth,
+  });
 }
 
 function csvCell(value) {
@@ -4975,6 +4996,7 @@ async function writeSocialArtifacts(finalResult, layout, checkpointWriter) {
     authHealth: finalResult.authHealth ?? null,
     sessionProvider: finalResult.sessionProvider ?? null,
     sessionHealth: finalResult.sessionHealth ?? null,
+    sessionGate: finalResult.sessionGate ?? null,
     runtimeRisk: finalResult.runtimeRisk ?? null,
     outcome: finalResult.outcome ?? null,
     recoveryRunbook,
@@ -5182,7 +5204,7 @@ export async function runSocialAction(options = {}, deps = {}) {
     throw new Error(`${plan.action} requires --account <handle> or a profile URL.`);
   }
   if (settings.dryRun) {
-    return {
+    const dryRunResult = {
       ok: true,
       siteKey: plan.siteKey,
       dryRun: true,
@@ -5211,6 +5233,11 @@ export async function runSocialAction(options = {}, deps = {}) {
       ...sessionMetadata,
       artifacts: artifactPathSummary(artifactLayout),
     };
+    dryRunResult.sessionGate = buildSocialSessionGate(dryRunResult, {
+      requiresAuth: plan.requiresAuth === true,
+    });
+    dryRunResult.markdown = renderMarkdownReport(dryRunResult);
+    return dryRunResult;
   }
 
   const runtime = {
@@ -5498,6 +5525,9 @@ export async function runSocialAction(options = {}, deps = {}) {
     finalResult.authHealth = summarizeSocialAuthHealth(executionPlan, settings, authContext, authResult, finalResult.runtimeRisk);
     finalResult.sessionProvider = sessionMetadata.sessionProvider;
     finalResult.sessionHealth = sessionMetadata.sessionHealth ?? null;
+    finalResult.sessionGate = buildSocialSessionGate(finalResult, {
+      requiresAuth: finalResult.authHealth?.required === true,
+    });
     finalResult.completeness = summarizeCompleteness(finalResult);
     finalResult.outcome = summarizeRunOutcome(finalResult, settings);
     finalResult.ok = finalResult.outcome.ok;
