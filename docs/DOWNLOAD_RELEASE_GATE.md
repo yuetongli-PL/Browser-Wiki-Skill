@@ -240,6 +240,41 @@ Current native evidence contracts include:
 - `xiaohongshu-header-freshness-v1`
 - `social-archive-v2`
 
+## Session Manifest Gate
+
+Download, site-doctor, and social live validation entrypoints must make session
+state auditable before claiming authenticated capability.
+
+Accepted session providers:
+
+- `unified-session-runner`: a sanitized manifest exists under
+  `runs/session/.../manifest.json`, or an explicit per-run session health
+  directory such as `x-session-health/manifest.json`.
+- `legacy-session-provider`: the command is still using the older site-login,
+  site-keepalive, site-doctor, or action-layer provider and does not claim
+  unified session governance coverage.
+
+Pass criteria:
+
+- A real download or live smoke manifest either references a unified session
+  health manifest or explicitly marks the session provider as
+  `legacy-session-provider`.
+- `--session-health-plan` generates a read-only unified health manifest before
+  resource resolution or auth doctor work.
+- `--session-manifest <path>` consumes an existing unified health manifest
+  without triggering login, keepalive, profile rebuild, cookie import, or live
+  downloads.
+- `site-doctor` records a `sessionHealth` summary and `sessionProvider`.
+- Social live plans include `x-session-health` and/or
+  `instagram-session-health` before the corresponding auth doctor case.
+- Session manifests stay sanitized: no cookie values, auth headers, raw cursor
+  state, profile root, or `userDataDir` raw path.
+
+This gate is a traceability gate, not live evidence. A `ready` session health
+manifest proves only that the health layer accepted the current evidence; it
+does not prove real downloads or authenticated archive completion without the
+separate live smoke gate.
+
 ## Session Repair Execution Gate
 
 `session-repair-plan` is dry-run by default. In `--execute` mode it only builds

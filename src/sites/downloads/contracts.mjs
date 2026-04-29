@@ -472,6 +472,8 @@ export function normalizeManifestSession(value = undefined) {
     reason: session.reason,
     purpose: session.purpose,
     repairPlan: session.repairPlan,
+    provider: normalizeText(value.provider),
+    healthManifest: normalizeText(value.healthManifest),
   };
   return Object.fromEntries(Object.entries(result).filter(([, entryValue]) => entryValue !== undefined));
 }

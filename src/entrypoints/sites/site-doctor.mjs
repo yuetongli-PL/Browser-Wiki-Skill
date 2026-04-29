@@ -32,6 +32,7 @@ import {
   readSessionRunManifest,
   summarizeSessionRunManifest,
 } from '../../sites/sessions/manifest-bridge.mjs';
+import { runSessionTask } from '../../sites/sessions/runner.mjs';
 import { ensureCrawlerScript } from '../pipeline/generate-crawler-script.mjs';
 import { capture } from '../pipeline/capture.mjs';
 import { derivePageFacts, expandStates } from '../pipeline/expand-states.mjs';
@@ -63,7 +64,7 @@ const DEFAULT_OPTIONS = {
 };
 
 const HELP = `Usage:
-  node src/entrypoints/sites/site-doctor.mjs <url> [--query "<sample>"] [--profile-path <path>] [--session-manifest <path>] [--out-dir <dir>] [--crawler-scripts-dir <dir>] [--knowledge-base-dir <dir>] [--browser-path <path>] [--browser-profile-root <dir>] [--user-data-dir <dir>] [--timeout <ms>] [--headless|--no-headless] [--reuse-login-state|--no-reuse-login-state] [--auto-login|--no-auto-login] [--max-triggers <n>] [--max-captured-states <n>] [--check-download]
+  node src/entrypoints/sites/site-doctor.mjs <url> [--query "<sample>"] [--profile-path <path>] [--session-manifest <path>] [--session-health-plan] [--out-dir <dir>] [--crawler-scripts-dir <dir>] [--knowledge-base-dir <dir>] [--browser-path <path>] [--browser-profile-root <dir>] [--user-data-dir <dir>] [--timeout <ms>] [--headless|--no-headless] [--reuse-login-state|--no-reuse-login-state] [--auto-login|--no-auto-login] [--max-triggers <n>] [--max-captured-states <n>] [--check-download]
 `;
 
 const AUTH_PROBE_WAIT_POLICY = {
@@ -617,10 +618,16 @@ function buildReportMarkdown(report) {
   }
   if (report.sessionHealth) {
     lines.push('', '## Unified Session Health', '');
+    lines.push(`- Provider: ${report.sessionProvider ?? 'unknown'}`);
     lines.push(`- Manifest: ${report.sessionHealth.artifacts?.manifest ?? 'none'}`);
     lines.push(`- Status: ${report.sessionHealth.healthStatus ?? report.sessionHealth.status ?? 'unknown'}`);
     lines.push(`- Reason: ${report.sessionHealth.reason ?? 'none'}`);
     lines.push(`- Repair action: ${report.sessionHealth.repairPlan?.action ?? 'none'}`);
+  }
+  if (!report.sessionHealth && report.sessionProvider) {
+    lines.push('', '## Unified Session Health', '');
+    lines.push(`- Provider: ${report.sessionProvider}`);
+    lines.push('- Manifest: none');
   }
   if (report.riskCauseCode || report.riskAction || report.networkIdentityFingerprint || report.profileQuarantined) {
     lines.push('', '## Risk Governance', '');
@@ -1764,6 +1771,7 @@ export async function siteDoctor(inputUrl, options = {}, deps = {}) {
     runAuthenticatedKeepalivePreflight: maybeRunAuthenticatedKeepalivePreflight,
     siteKeepalive,
     siteLogin,
+    runSessionTask,
     validateProfileFile,
     resolveSite,
     ...deps,
@@ -1793,6 +1801,7 @@ export async function siteDoctor(inputUrl, options = {}, deps = {}) {
     sessionReuseWorked: null,
     authSession: null,
     sessionHealth: null,
+    sessionProvider: settings.useUnifiedSessionHealth ? 'unified-session-runner' : 'legacy-session-provider',
     antiCrawlSignals: [],
     antiCrawlReasonCode: null,
     riskCauseCode: null,
@@ -1823,7 +1832,28 @@ export async function siteDoctor(inputUrl, options = {}, deps = {}) {
     if (settings.sessionManifest) {
       const sessionManifest = await (runtime.readSessionRunManifest ?? readSessionRunManifest)(settings.sessionManifest);
       report.sessionHealth = summarizeSessionRunManifest(sessionManifest);
+      report.sessionProvider = 'unified-session-runner';
       report.warnings.push(`Loaded unified session health manifest: ${report.sessionHealth.artifacts.manifest}.`);
+    } else if (settings.useUnifiedSessionHealth) {
+      try {
+        const sessionResult = await runtime.runSessionTask({
+          action: 'health',
+          site: resolveCanonicalSiteKey({ inputUrl }),
+          host: settings.host,
+          purpose: 'doctor',
+          sessionRequirement: 'required',
+          profilePath: settings.profilePath,
+          browserProfileRoot: settings.browserProfileRoot,
+          userDataDir: settings.userDataDir,
+          runDir: path.join(reportDir, 'session-health'),
+        });
+        report.sessionHealth = summarizeSessionRunManifest(sessionResult.manifest);
+        report.sessionProvider = 'unified-session-runner';
+        report.warnings.push(`Generated unified session health manifest: ${report.sessionHealth.artifacts.manifest}.`);
+      } catch (error) {
+        report.sessionProvider = 'legacy-session-provider';
+        report.warnings.push(`Could not generate unified session health manifest; continuing with legacy session provider: ${error?.message ?? String(error)}`);
+      }
     }
 
     if (!await runtime.pathExists(settings.profilePath)) {
@@ -2419,6 +2449,9 @@ export function parseCliArgs(argv) {
         index = nextIndex;
         break;
       }
+      case '--session-health-plan':
+        options.useUnifiedSessionHealth = true;
+        break;
       case '--out-dir': {
         const { value, nextIndex } = readValue(index);
         options.outDir = value;

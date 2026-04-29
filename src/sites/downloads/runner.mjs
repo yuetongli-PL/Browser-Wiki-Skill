@@ -26,6 +26,12 @@ import {
   inspectSessionHealth,
   releaseSessionLease,
 } from './session-manager.mjs';
+import {
+  runSessionTask,
+} from '../sessions/runner.mjs';
+import {
+  sessionOptionsFromRunManifest,
+} from '../sessions/manifest-bridge.mjs';
 
 const AUTH_REQUIRED_KEYS = [
   'authRequired',
@@ -137,6 +143,48 @@ function normalizeHealthAsLease(health = {}, plan = {}, purpose = 'download') {
     host: plan.host,
     purpose,
     status: sessionStatus(health),
+  });
+}
+
+function annotateSessionLeaseProvider(lease = {}, unifiedSessionOptions = {}) {
+  if (!unifiedSessionOptions.sessionHealthManifest) {
+    return {
+      ...lease,
+      provider: lease.provider ?? 'legacy-session-provider',
+    };
+  }
+  return {
+    ...lease,
+    provider: 'unified-session-runner',
+    healthManifest: unifiedSessionOptions.sessionHealthManifest.artifacts?.manifest
+      ?? unifiedSessionOptions.sessionManifestPath,
+  };
+}
+
+async function maybeResolveUnifiedSessionHealth(plan = {}, request = {}, options = {}, deps = {}) {
+  if (!(options.useUnifiedSessionHealth === true || request.useUnifiedSessionHealth === true)) {
+    return {};
+  }
+  if (options.sessionHealthManifest || options.sessionStatus) {
+    return {};
+  }
+  const result = await (deps.runSessionTask ?? runSessionTask)({
+    action: 'health',
+    site: plan.siteKey,
+    host: plan.host,
+    purpose: 'download',
+    profilePath: request.profilePath,
+    browserProfileRoot: options.browserProfileRoot ?? request.browserProfileRoot,
+    userDataDir: options.userDataDir ?? request.userDataDir,
+    outDir: options.sessionRunRoot,
+    sessionRequirement: plan.sessionRequirement,
+    sessionRequired: marksAuthRequired(request, plan),
+  }, {
+    outDir: options.sessionRunRoot,
+  }, deps.sessionRunnerDeps ?? deps);
+  return sessionOptionsFromRunManifest(result.manifest, {
+    siteKey: plan.siteKey,
+    host: plan.host,
   });
 }
 
@@ -266,8 +314,10 @@ export async function runDownloadTask(request = {}, options = {}, deps = {}) {
   });
   const sessionPurpose = `download:${plan.taskType}`;
   const effectiveAuthRequired = marksAuthRequired(request, plan);
+  const unifiedSessionOptions = await maybeResolveUnifiedSessionHealth(plan, request, options, deps);
   const sessionOptions = {
     ...options,
+    ...unifiedSessionOptions,
     ...request.session,
     host: plan.host,
     siteContext: request.siteContext,
@@ -288,7 +338,10 @@ export async function runDownloadTask(request = {}, options = {}, deps = {}) {
     );
 
   if (health && !isSessionReady(health) && effectiveAuthRequired) {
-    const sessionLease = normalizeHealthAsLease(health, plan, sessionPurpose);
+    const sessionLease = annotateSessionLeaseProvider(
+      normalizeHealthAsLease(health, plan, sessionPurpose),
+      unifiedSessionOptions,
+    );
     const manifest = await writeTerminalManifest({
       plan,
       sessionLease,
@@ -313,6 +366,7 @@ export async function runDownloadTask(request = {}, options = {}, deps = {}) {
     sessionOptions,
     deps.sessionDeps ?? deps,
   );
+  sessionLease = annotateSessionLeaseProvider(sessionLease, unifiedSessionOptions);
 
   try {
     if (!isSessionReady(sessionLease) && effectiveAuthRequired) {
