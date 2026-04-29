@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
 import {
   assertLiveSmokeBoundary,
@@ -9,6 +12,7 @@ import {
   classifySocialActionManifest,
   evaluateLiveSmokeBoundary,
   parseArgs,
+  summarizeSocialActionArtifacts,
 } from '../../scripts/social-live-verify.mjs';
 
 function boundedArgs(extra = []) {
@@ -233,5 +237,47 @@ test('social-live-verify classifies Instagram media download skipped by login as
   }), {
     verdict: 'skipped',
     reason: 'no-reusable-session',
+  });
+});
+
+test('social-live-verify copies social action session gate into artifact summary', async (t) => {
+  const rootDir = await mkdtemp(path.join(os.tmpdir(), 'bwk-social-live-session-gate-'));
+  t.after(() => rm(rootDir, { recursive: true, force: true }));
+  const artifactRoot = path.join(rootDir, 'x-full-archive');
+  const sessionManifest = path.join(rootDir, 'session', 'manifest.json');
+  await mkdir(artifactRoot, { recursive: true });
+  await writeFile(path.join(artifactRoot, 'manifest.json'), `${JSON.stringify({
+    siteKey: 'x',
+    status: 'passed',
+    sessionProvider: 'unified-session-runner',
+    sessionHealth: {
+      healthStatus: 'ready',
+      authStatus: 'authenticated',
+      identityConfirmed: true,
+      artifacts: { manifest: sessionManifest },
+    },
+    sessionGate: {
+      ok: true,
+      status: 'passed',
+      reason: 'unified-session-health-manifest',
+      provider: 'unified-session-runner',
+      healthManifest: sessionManifest,
+    },
+  }, null, 2)}\n`, 'utf8');
+
+  const summary = await summarizeSocialActionArtifacts({
+    artifactType: 'social-action',
+    artifactRoot,
+  });
+
+  assert.equal(summary.sessionProvider, 'unified-session-runner');
+  assert.equal(summary.sessionHealth.status, 'ready');
+  assert.equal(summary.sessionHealth.manifestPath, sessionManifest);
+  assert.deepEqual(summary.sessionGate, {
+    ok: true,
+    status: 'passed',
+    reason: 'unified-session-health-manifest',
+    provider: 'unified-session-runner',
+    healthManifest: sessionManifest,
   });
 });

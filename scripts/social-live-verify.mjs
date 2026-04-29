@@ -880,7 +880,34 @@ export function classifySocialActionManifest(manifest) {
   return { verdict: manifest?.status === 'completed' ? 'passed' : 'unknown', reason: null };
 }
 
-async function summarizeSocialActionArtifacts(entry) {
+function summarizeSessionHealthForArtifact(manifest = {}) {
+  if (!manifest.sessionHealth || typeof manifest.sessionHealth !== 'object' || Array.isArray(manifest.sessionHealth)) {
+    return null;
+  }
+  return {
+    status: manifest.sessionHealth.healthStatus ?? manifest.sessionHealth.status ?? null,
+    authStatus: manifest.sessionHealth.authStatus ?? null,
+    identityConfirmed: manifest.sessionHealth.identityConfirmed === true,
+    riskCauseCode: manifest.sessionHealth.riskCauseCode ?? null,
+    riskAction: manifest.sessionHealth.riskAction ?? null,
+    manifestPath: manifest.sessionHealth.artifacts?.manifest ?? null,
+  };
+}
+
+function summarizeSessionGateForArtifact(manifest = {}) {
+  if (!manifest.sessionGate || typeof manifest.sessionGate !== 'object' || Array.isArray(manifest.sessionGate)) {
+    return null;
+  }
+  return {
+    ok: manifest.sessionGate.ok === true,
+    status: manifest.sessionGate.status ?? null,
+    reason: manifest.sessionGate.reason ?? null,
+    provider: manifest.sessionGate.provider ?? manifest.sessionProvider ?? null,
+    healthManifest: manifest.sessionGate.healthManifest ?? manifest.sessionHealth?.artifacts?.manifest ?? null,
+  };
+}
+
+export async function summarizeSocialActionArtifacts(entry) {
   const manifestPath = path.join(entry.artifactRoot, 'manifest.json');
   if (!await pathExists(manifestPath)) {
     return {
@@ -908,6 +935,9 @@ async function summarizeSocialActionArtifacts(entry) {
     } : null,
     completeness: manifest.completeness ?? null,
     downloads: manifest.downloads ?? null,
+    sessionProvider: manifest.sessionProvider ?? null,
+    sessionHealth: summarizeSessionHealthForArtifact(manifest),
+    sessionGate: summarizeSessionGateForArtifact(manifest),
     authHealth: manifest.authHealth ? {
       status: manifest.authHealth.status ?? null,
       identityConfirmed: manifest.authHealth.identityConfirmed === true,
