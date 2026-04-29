@@ -72,6 +72,25 @@ function allowNetworkResolve(request = {}, options = {}) {
     || request.resolveNetwork === true;
 }
 
+const RESOLVER_DEP_KEYS = Object.freeze([
+  'resolveBilibiliApiEvidence',
+  'resolveDouyinMediaBatch',
+  'enumerateDouyinAuthorVideos',
+  'queryDouyinFollow',
+  'queryXiaohongshuFollow',
+]);
+
+function resolverDepsFrom(options = {}, deps = {}) {
+  const result = {};
+  for (const key of RESOLVER_DEP_KEYS) {
+    const value = deps[key] ?? options[key];
+    if (typeof value === 'function') {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+
 function sessionStatus(value = {}) {
   return String(value?.status ?? 'ready').trim() || 'ready';
 }
@@ -323,6 +342,7 @@ export async function runDownloadTask(request = {}, options = {}, deps = {}) {
       workspaceRoot,
       siteMetadataOptions,
       allowNetworkResolve: allowNetworkResolve(request, options),
+      ...resolverDepsFrom(options, deps),
       fetchImpl: options.resolverFetchImpl ?? deps.resolverFetchImpl,
       mockFetchImpl: options.mockResolverFetchImpl ?? deps.mockResolverFetchImpl,
     });

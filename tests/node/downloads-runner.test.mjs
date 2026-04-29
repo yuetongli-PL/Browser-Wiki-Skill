@@ -590,6 +590,136 @@ test('download runner blocks optional downloads marked login-required when healt
   assert.equal(result.manifest.reason, 'login-required');
 });
 
+test('download runner forwards injected resolver deps with network gate disabled by default', async (t) => {
+  const runRoot = await mkdtemp(path.join(os.tmpdir(), 'bwk-download-runner-resolver-deps-off-'));
+  t.after(() => rm(runRoot, { recursive: true, force: true }));
+
+  let resolverCalled = false;
+  const result = await runDownloadTask({
+    site: 'bilibili',
+    input: 'https://www.bilibili.com/video/BV1runnerGateOff/',
+    dryRun: true,
+  }, {
+    workspaceRoot: REPO_ROOT,
+    runRoot,
+  }, {
+    acquireSessionLease: async (_siteKey, purpose) => ({
+      siteKey: 'bilibili',
+      host: 'www.bilibili.com',
+      mode: 'anonymous',
+      status: 'ready',
+      riskSignals: [],
+      purpose,
+    }),
+    releaseSessionLease: async () => {},
+    resolveBilibiliApiEvidence: async (evidenceRequest, options) => {
+      resolverCalled = true;
+      assert.equal(evidenceRequest.contractVersion, 'bilibili-native-api-evidence-v1');
+      assert.equal(evidenceRequest.bvid, 'BV1runnerGateOff');
+      assert.equal(evidenceRequest.allowNetworkResolve, false);
+      assert.equal(options.allowNetworkResolve, false);
+      return {
+        viewPayload: {
+          data: {
+            bvid: 'BV1runnerGateOff',
+            pages: [{ cid: 5101, page: 1 }],
+          },
+        },
+        playUrlPayloads: {
+          5101: { cid: 5101, data: { durl: [{ url: 'https://upos.example.test/runner/gate-off.flv' }] } },
+        },
+      };
+    },
+    executeLegacyDownloadTask: async () => {
+      throw new Error('legacy adapter should not run after injected native evidence resolves');
+    },
+  });
+
+  assert.equal(resolverCalled, true);
+  assert.equal(result.resolvedTask.resources.length, 1);
+  assert.equal(result.resolvedTask.resources[0].url, 'https://upos.example.test/runner/gate-off.flv');
+  assert.equal(result.manifest.status, 'skipped');
+  assert.equal(result.manifest.reason, 'dry-run');
+});
+
+test('download runner only enables injected resolver network gate with resolveNetwork', async (t) => {
+  const runRoot = await mkdtemp(path.join(os.tmpdir(), 'bwk-download-runner-resolver-deps-on-'));
+  t.after(() => rm(runRoot, { recursive: true, force: true }));
+
+  const result = await runDownloadTask({
+    site: 'bilibili',
+    input: 'https://www.bilibili.com/video/BV1runnerGateOn/',
+    dryRun: true,
+  }, {
+    workspaceRoot: REPO_ROOT,
+    runRoot,
+    resolveNetwork: true,
+  }, {
+    acquireSessionLease: async (_siteKey, purpose) => ({
+      siteKey: 'bilibili',
+      host: 'www.bilibili.com',
+      mode: 'anonymous',
+      status: 'ready',
+      riskSignals: [],
+      purpose,
+    }),
+    releaseSessionLease: async () => {},
+    resolveBilibiliApiEvidence: async (evidenceRequest, options) => {
+      assert.equal(evidenceRequest.bvid, 'BV1runnerGateOn');
+      assert.equal(evidenceRequest.allowNetworkResolve, true);
+      assert.equal(options.allowNetworkResolve, true);
+      return {
+        viewPayload: {
+          data: {
+            bvid: 'BV1runnerGateOn',
+            pages: [{ cid: 5201, page: 1 }],
+          },
+        },
+        playUrlPayloads: {
+          5201: { cid: 5201, data: { durl: [{ url: 'https://upos.example.test/runner/gate-on.flv' }] } },
+        },
+      };
+    },
+  });
+
+  assert.equal(result.resolvedTask.resources.length, 1);
+  assert.equal(result.resolvedTask.resources[0].url, 'https://upos.example.test/runner/gate-on.flv');
+});
+
+test('download runner blocks required unhealthy sessions before resolver deps run', async (t) => {
+  const runRoot = await mkdtemp(path.join(os.tmpdir(), 'bwk-download-runner-resolver-preflight-'));
+  t.after(() => rm(runRoot, { recursive: true, force: true }));
+
+  const result = await runDownloadTask({
+    site: 'bilibili',
+    input: 'https://www.bilibili.com/video/BV1blockedGate/',
+    dryRun: false,
+    downloadRequiresAuth: true,
+  }, {
+    workspaceRoot: REPO_ROOT,
+    runRoot,
+    resolveNetwork: true,
+  }, {
+    inspectSessionHealth: async () => ({
+      siteKey: 'bilibili',
+      host: 'www.bilibili.com',
+      status: 'manual-required',
+      reason: 'login-required',
+      riskSignals: ['not-logged-in'],
+    }),
+    resolveBilibiliApiEvidence: async () => {
+      throw new Error('resolver deps should not run before required session preflight passes');
+    },
+    executeLegacyDownloadTask: async () => {
+      throw new Error('legacy adapter should not run after failed required session preflight');
+    },
+  });
+
+  assert.equal(result.resolvedTask, null);
+  assert.equal(result.manifest.status, 'blocked');
+  assert.equal(result.manifest.reason, 'login-required');
+});
+
 test('legacy executor normalizes successful action stdout into a download manifest', async (t) => {
   const runRoot = await mkdtemp(path.join(os.tmpdir(), 'bwk-download-legacy-success-'));
   t.after(() => rm(runRoot, { recursive: true, force: true }));
