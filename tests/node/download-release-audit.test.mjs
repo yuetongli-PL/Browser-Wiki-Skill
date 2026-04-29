@@ -81,6 +81,14 @@ test('download-release-audit audits download and social matrix session gates off
   assert.equal(audit.summary.statuses.blocked, 2);
   assert.equal(audit.rows.find((row) => row.id === 'download-run').healthManifest, healthManifest);
   assert.equal(audit.rows.find((row) => row.id === 'social-run').reason, 'session-provider-missing');
+  const blockedMatrix = audit.rows.find((row) => row.id === 'x-full-archive');
+  assert.equal(blockedMatrix.repairPlan.command, 'session-repair-plan');
+  assert.equal(blockedMatrix.repairPlan.auditManifest, path.join(outDir, 'download-release-audit.json'));
+  assert.match(blockedMatrix.repairPlan.commandText, /session-repair-plan\.mjs/u);
+  assert.match(blockedMatrix.repairPlan.commandText, /--site x/u);
+  assert.equal(audit.rows.find((row) => row.id === 'download-run').repairPlan, undefined);
   assert.match(markdown, /Download Release Audit/u);
   assert.match(markdown, /session-health-manifest-missing/u);
+  assert.match(markdown, /Repair Plan/u);
+  assert.match(markdown, /session-repair-plan\.mjs/u);
 });

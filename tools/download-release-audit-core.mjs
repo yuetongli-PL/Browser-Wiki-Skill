@@ -176,6 +176,46 @@ function summarize(rows = []) {
   return summary;
 }
 
+function auditJsonPath(options = {}) {
+  return path.join(path.resolve(options.outDir ?? DEFAULT_OUT_DIR), 'download-release-audit.json');
+}
+
+function quoteCommandArg(value) {
+  const text = String(value ?? '');
+  if (!/[\s"]/u.test(text)) {
+    return text;
+  }
+  return `"${text.replace(/"/gu, '\\"')}"`;
+}
+
+function repairPlanForRow(row = {}, options = {}) {
+  if (row.status !== 'blocked' || !row.site || row.site === 'unknown') {
+    return null;
+  }
+  const manifestPath = auditJsonPath(options);
+  const argv = [
+    'node',
+    'src/entrypoints/sites/session-repair-plan.mjs',
+    '--site',
+    row.site,
+    '--audit-manifest',
+    manifestPath,
+  ];
+  return {
+    command: 'session-repair-plan',
+    argv,
+    commandText: argv.map(quoteCommandArg).join(' '),
+    auditManifest: manifestPath,
+  };
+}
+
+function addRepairGuidance(rows = [], options = {}) {
+  return rows.map((row) => {
+    const repairPlan = repairPlanForRow(row, options);
+    return repairPlan ? { ...row, repairPlan } : row;
+  });
+}
+
 export async function buildAudit(options = {}) {
   const explicit = options.manifests?.length
     ? options.manifests.map((entry) => path.resolve(entry))
@@ -189,11 +229,12 @@ export async function buildAudit(options = {}) {
       skipped.push({ manifestPath, reason: error?.message ?? String(error) });
     }
   }
+  const guidedRows = addRepairGuidance(rows, options);
   return {
     generatedAt: new Date().toISOString(),
     manifests: explicit.length,
-    summary: summarize(rows),
-    rows,
+    summary: summarize(guidedRows),
+    rows: guidedRows,
     skipped,
   };
 }
@@ -206,11 +247,11 @@ function renderMarkdown(audit = {}) {
     `Rows: ${audit.summary?.total ?? 0}`,
     `Statuses: ${JSON.stringify(audit.summary?.statuses ?? {})}`,
     '',
-    '| Site | ID | Kind | Gate | Reason | Provider | Manifest |',
-    '| --- | --- | --- | --- | --- | --- | --- |',
+    '| Site | ID | Kind | Gate | Reason | Provider | Manifest | Repair Plan |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- |',
   ];
   for (const row of audit.rows ?? []) {
-    lines.push(`| ${row.site} | ${row.id} | ${row.kind} | ${row.status} | ${row.reason ?? ''} | ${row.provider ?? ''} | ${row.manifestPath} |`);
+    lines.push(`| ${row.site} | ${row.id} | ${row.kind} | ${row.status} | ${row.reason ?? ''} | ${row.provider ?? ''} | ${row.manifestPath} | ${row.repairPlan?.commandText ?? ''} |`);
   }
   if (audit.skipped?.length) {
     lines.push('', '## Skipped');
