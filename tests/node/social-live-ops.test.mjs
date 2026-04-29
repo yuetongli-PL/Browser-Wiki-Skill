@@ -272,6 +272,7 @@ test('social-live-resume honors cooldown and max-attempts from manifests', async
   ]), new Date('2026-04-26T00:10:00.000Z'));
   assert.equal(ready.candidates[0].ready, true);
   assert.match(ready.candidates[0].resumeCommand, /full-archive openai/u);
+  assert.match(ready.candidates[0].resumeCommand, /--session-health-plan/u);
 
   const blocked = await buildResumePlan(parseResumeArgs([
     '--state',
@@ -283,4 +284,39 @@ test('social-live-resume honors cooldown and max-attempts from manifests', async
   ]), new Date('2026-04-26T00:10:00.000Z'));
   assert.equal(blocked.candidates[0].ready, false);
   assert.equal(blocked.candidates[0].blockedReason, 'max-attempts');
+});
+
+test('social-live-resume preserves explicit session manifest resume commands', async (t) => {
+  const rootDir = await mkdtemp(path.join(os.tmpdir(), 'bwk-social-resume-manifest-'));
+  t.after(() => rm(rootDir, { recursive: true, force: true }));
+  const manifestPath = path.join(rootDir, 'manifest.json');
+  await writeFile(manifestPath, `${JSON.stringify({
+    runId: 'run-1',
+    results: [{
+      id: 'instagram-full-archive',
+      site: 'instagram',
+      status: 'passed',
+      command: 'node src/entrypoints/sites/instagram-action.mjs full-archive instagram --run-dir runs/ig --session-manifest runs/session/instagram/manifest.json',
+      finishedAt: '2026-04-26T00:00:00.000Z',
+      artifactSummary: {
+        verdict: 'passed',
+        reason: 'max-items',
+        archive: { complete: false, reason: 'max-items' },
+      },
+    }],
+  }, null, 2)}\n`, 'utf8');
+
+  const plan = await buildResumePlan(parseResumeArgs([
+    '--state',
+    manifestPath,
+    '--site',
+    'instagram',
+    '--cooldown-minutes',
+    '0',
+    '--max-attempts',
+    '3',
+  ]), new Date('2026-04-26T00:10:00.000Z'));
+
+  assert.match(plan.candidates[0].resumeCommand, /--session-manifest runs\/session\/instagram\/manifest\.json/u);
+  assert.doesNotMatch(plan.candidates[0].resumeCommand, /--session-health-plan/u);
 });

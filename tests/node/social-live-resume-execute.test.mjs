@@ -83,6 +83,7 @@ test('social-live-resume execute loop waits cooldown then rereads completed mani
   assert.deepEqual(sleeps, [20 * 60_000]);
   assert.equal(commands.length, 1);
   assert.match(commands[0], /full-archive openai/u);
+  assert.match(commands[0], /--session-health-plan/u);
   assert.equal(result.stopReason, 'complete');
   assert.equal(result.attempts, 1);
   assert.equal(result.cycles, 3);
