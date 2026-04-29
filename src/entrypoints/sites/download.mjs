@@ -44,6 +44,7 @@ Options:
   --session-none                    Use an anonymous session lease.
   --session-status <status>         Force lease status for testing: ready, blocked, manual-required, expired.
   --session-manifest <path>         Consume a unified runs/session health manifest before resolving resources.
+  --session-health-plan             Generate and consume a unified session health manifest first.
   --resolve-network                 Allow resolvers to fetch source pages before falling back to legacy downloaders.
   --json                            Print the full runner result JSON.
   -h, --help                        Show this help.
@@ -212,6 +213,9 @@ export function parseArgs(argv) {
         index = read.nextIndex;
         break;
       }
+      case '--session-health-plan':
+        options.useUnifiedSessionHealth = true;
+        break;
       case '--resolve-network':
         options.resolveNetwork = true;
         break;
@@ -263,7 +267,8 @@ export async function main(argv) {
       }
       : undefined,
     ...sessionManifestOptions,
-    sessionStatus: options.sessionStatus,
+    useUnifiedSessionHealth: options.useUnifiedSessionHealth,
+    ...(options.sessionStatus ? { sessionStatus: options.sessionStatus } : {}),
     resolveNetwork: options.resolveNetwork,
   });
   if (options.json) {

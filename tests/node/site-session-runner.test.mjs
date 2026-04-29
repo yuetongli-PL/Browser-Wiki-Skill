@@ -23,6 +23,7 @@ import {
 } from '../../src/entrypoints/sites/session.mjs';
 import {
   parseCliArgs as parseSiteDoctorArgs,
+  siteDoctor,
 } from '../../src/entrypoints/sites/site-doctor.mjs';
 
 test('session CLI parser accepts health plan flags', () => {
@@ -244,4 +245,96 @@ test('site-doctor parser accepts unified session manifest input', () => {
   assert.equal(parsed.inputUrl, 'https://x.com/home');
   assert.equal(parsed.options.profilePath, 'profiles/x.com.json');
   assert.equal(parsed.options.sessionManifest, 'runs/session/x/manifest.json');
+});
+
+test('site-doctor parser accepts generated unified session health plans', () => {
+  const parsed = parseSiteDoctorArgs([
+    'https://x.com/home',
+    '--profile-path',
+    'profiles/x.com.json',
+    '--session-health-plan',
+  ]);
+
+  assert.equal(parsed.options.useUnifiedSessionHealth, true);
+});
+
+test('site-doctor can generate unified session health before legacy probes', async (t) => {
+  const runRoot = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-doctor-session-'));
+  t.after(() => rm(runRoot, { recursive: true, force: true }));
+  let sessionHealthRequested = false;
+
+  const report = await siteDoctor('https://x.com/home', {
+    outDir: runRoot,
+    profilePath: path.join(runRoot, 'x.com.json'),
+    useUnifiedSessionHealth: true,
+  }, {
+    pathExists: async () => true,
+    validateProfileFile: async (profilePath) => ({
+      filePath: profilePath,
+      schemaId: 'test-profile',
+      warnings: [],
+      profile: {
+        host: 'x.com',
+        archetype: 'navigation-catalog',
+        validationSamples: {},
+        search: { knownQueries: [] },
+      },
+    }),
+    runSessionTask: async () => {
+      sessionHealthRequested = true;
+      return {
+        manifest: normalizeSessionRunManifest({
+          plan: {
+            siteKey: 'x',
+            host: 'x.com',
+            purpose: 'doctor',
+            sessionRequirement: 'required',
+          },
+          health: {
+            status: 'manual-required',
+            reason: 'session-invalid',
+          },
+          repairPlan: {
+            action: 'site-login',
+            command: 'site-login',
+            reason: 'session-invalid',
+          },
+          artifacts: {
+            manifest: path.join(runRoot, 'session-health', 'manifest.json'),
+            runDir: path.join(runRoot, 'session-health'),
+          },
+        }),
+      };
+    },
+    resolveSite: async () => ({
+      host: 'x.com',
+      siteContext: { siteKey: 'x' },
+      adapter: { id: 'x' },
+    }),
+    ensureCrawlerScript: async () => ({
+      status: 'skipped',
+      scriptPath: null,
+      metaPath: null,
+    }),
+    capture: async () => ({
+      status: 'failed',
+      error: { message: 'offline fixture capture skipped' },
+      files: {},
+    }),
+  });
+
+  assert.equal(sessionHealthRequested, true);
+  assert.equal(report.sessionProvider, 'unified-session-runner');
+  assert.equal(report.sessionHealth.healthStatus, 'manual-required');
+  assert.equal(report.sessionHealth.repairPlan.action, 'site-login');
+});
+
+test('download release gate documents unified session manifest traceability', async () => {
+  const releaseGate = await readFile(path.join(process.cwd(), 'docs', 'DOWNLOAD_RELEASE_GATE.md'), 'utf8');
+
+  assert.match(releaseGate, /## Session Manifest Gate/u);
+  assert.match(releaseGate, /unified-session-runner/u);
+  assert.match(releaseGate, /legacy-session-provider/u);
+  assert.match(releaseGate, /--session-health-plan/u);
+  assert.match(releaseGate, /--session-manifest <path>/u);
 });

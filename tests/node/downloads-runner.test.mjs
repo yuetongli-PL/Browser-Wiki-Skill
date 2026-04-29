@@ -16,6 +16,7 @@ import { executeResolvedDownloadTask } from '../../src/sites/downloads/executor.
 import { executeLegacyDownloadTask } from '../../src/sites/downloads/legacy-executor.mjs';
 import { listDownloadSiteDefinitions } from '../../src/sites/downloads/registry.mjs';
 import { runDownloadTask } from '../../src/sites/downloads/runner.mjs';
+import { normalizeSessionRunManifest } from '../../src/sites/sessions/contracts.mjs';
 
 const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(TEST_DIR, '..', '..');
@@ -230,6 +231,20 @@ test('download CLI parser accepts unified session manifest input', () => {
 
   assert.equal(args.sessionRequirement, 'required');
   assert.equal(args.sessionManifest, manifestPath);
+});
+
+test('download CLI parser accepts generated unified session health plans', () => {
+  const args = parseArgs([
+    '--site',
+    'instagram',
+    '--input',
+    'openai',
+    '--session-required',
+    '--session-health-plan',
+  ]);
+
+  assert.equal(args.sessionRequirement, 'required');
+  assert.equal(args.useUnifiedSessionHealth, true);
 });
 
 test('download CLI parser accepts derived mux compatibility aliases', () => {
@@ -778,6 +793,75 @@ test('download runner blocks required unhealthy sessions before resolver deps ru
     requiresApproval: true,
     riskSignals: ['not-logged-in'],
   });
+});
+
+test('download runner can generate and consume unified session health before resolver work', async (t) => {
+  const runRoot = await mkdtemp(path.join(os.tmpdir(), 'bwk-download-unified-session-'));
+  t.after(() => rm(runRoot, { recursive: true, force: true }));
+  let sessionHealthRequested = false;
+  let inspectedStatus = null;
+  let resolverCalled = false;
+  const sessionManifestPath = path.join(runRoot, 'session-health', 'manifest.json');
+
+  const result = await runDownloadTask({
+    site: 'instagram',
+    input: 'openai',
+    sessionRequirement: 'required',
+    dryRun: true,
+  }, {
+    workspaceRoot: REPO_ROOT,
+    runRoot,
+    useUnifiedSessionHealth: true,
+  }, {
+    runSessionTask: async () => {
+      sessionHealthRequested = true;
+      return {
+        manifest: normalizeSessionRunManifest({
+          plan: {
+            siteKey: 'instagram',
+            host: 'www.instagram.com',
+            purpose: 'download',
+            sessionRequirement: 'required',
+          },
+          health: {
+            status: 'manual-required',
+            reason: 'session-invalid',
+            riskSignals: ['session-invalid'],
+          },
+          repairPlan: {
+            action: 'site-login',
+            command: 'site-login',
+            reason: 'session-invalid',
+          },
+          artifacts: {
+            manifest: sessionManifestPath,
+            runDir: path.dirname(sessionManifestPath),
+          },
+        }),
+      };
+    },
+    inspectSessionHealth: async (_siteKey, options) => {
+      inspectedStatus = options.sessionStatus;
+      return {
+        siteKey: 'instagram',
+        host: 'www.instagram.com',
+        status: options.sessionStatus,
+        reason: options.sessionReason,
+        riskSignals: options.riskSignals,
+      };
+    },
+    resolveDownloadResources: async () => {
+      resolverCalled = true;
+      return null;
+    },
+  });
+
+  assert.equal(sessionHealthRequested, true);
+  assert.equal(inspectedStatus, 'manual-required');
+  assert.equal(resolverCalled, false);
+  assert.equal(result.manifest.status, 'blocked');
+  assert.equal(result.manifest.session.provider, 'unified-session-runner');
+  assert.equal(result.manifest.session.healthManifest, sessionManifestPath);
 });
 
 test('legacy executor normalizes successful action stdout into a download manifest', async (t) => {
