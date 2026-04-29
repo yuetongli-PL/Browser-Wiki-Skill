@@ -310,6 +310,13 @@ function renderReport(manifest, resolvedTask, { plan = null, layout = null, reco
       lines.push(`- ${failure.resourceId}: ${failure.reason}`);
     }
   }
+  const muxFailures = manifest.failedResources.filter((failure) => String(failure.resourceId ?? '').startsWith('mux:'));
+  if (muxFailures.length) {
+    lines.push('', '## Derived Mux Diagnostics');
+    for (const failure of muxFailures) {
+      lines.push(`- ${failure.groupId ?? failure.resourceId}: ${failure.reason}`);
+    }
+  }
   return `${lines.join('\n')}\n`;
 }
 
@@ -339,6 +346,8 @@ function failedResourcesFromResults(results) {
     reason: result.reason ?? 'download-failed',
     error: result.error ?? null,
     verificationFailures: result.verificationFailures ?? [],
+    derived: result.derived === true || undefined,
+    groupId: result.groupId ?? undefined,
   }));
 }
 
@@ -462,6 +471,53 @@ function buildMuxPlans(resources = [], queue = [], results = [], layout = {}) {
       return {
         ...entry,
         outputPath: path.join(layout.filesDir, outputName),
+      };
+    });
+}
+
+function buildIncompleteMuxResults(resources = [], results = [], layout = {}) {
+  const groups = new Map();
+  for (let index = 0; index < resources.length; index += 1) {
+    const resource = resources[index];
+    if (!isMuxableStream(resource)) {
+      continue;
+    }
+    const groupId = resource.groupId;
+    const entry = groups.get(groupId) ?? {
+      groupId,
+      fileName: resource.fileName ?? groupId,
+      videoOk: false,
+      audioOk: false,
+      hasVideo: false,
+      hasAudio: false,
+    };
+    if (resource.metadata.muxRole === 'video') {
+      entry.hasVideo = true;
+      entry.videoOk = entry.videoOk || Boolean(results[index]?.ok && results[index]?.filePath);
+    }
+    if (resource.metadata.muxRole === 'audio') {
+      entry.hasAudio = true;
+      entry.audioOk = entry.audioOk || Boolean(results[index]?.ok && results[index]?.filePath);
+    }
+    groups.set(groupId, entry);
+  }
+  return [...groups.values()]
+    .filter((entry) => !(entry.videoOk && entry.audioOk))
+    .map((entry) => {
+      const missingRole = !entry.videoOk ? 'video' : 'audio';
+      return {
+        ok: false,
+        attempted: false,
+        derived: true,
+        reason: `mux-missing-${missingRole}`,
+        error: entry[`has${missingRole[0].toUpperCase()}${missingRole.slice(1)}`]
+          ? `mux ${missingRole} stream did not complete`
+          : `mux ${missingRole} stream was not resolved`,
+        resourceId: `mux:${entry.groupId}`,
+        url: `mux:${entry.groupId}`,
+        filePath: path.join(layout.filesDir, `mux-${safeFileName(entry.fileName, 'merged-media')}.mp4`),
+        mediaType: 'video',
+        groupId: entry.groupId,
       };
     });
 }
@@ -593,7 +649,7 @@ async function buildDerivedMuxResults(resources, queue, results, layout, options
     return [];
   }
   const muxPlans = buildMuxPlans(resources, queue, results, layout);
-  const muxResults = [];
+  const muxResults = buildIncompleteMuxResults(resources, results, layout);
   for (const muxPlan of muxPlans) {
     muxResults.push(await derivedMuxResult(muxPlan, options, deps));
   }

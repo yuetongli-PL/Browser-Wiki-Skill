@@ -137,7 +137,7 @@ function requestAuthorEntries(request = {}) {
     metadata.douyinAuthorVideos,
     metadata.authorVideos,
     metadata.authorItems,
-  ].flatMap(resultEntries);
+  ].filter((entry) => entry !== undefined && entry !== null);
 }
 
 function requestFollowEntries(request = {}) {
@@ -152,6 +152,20 @@ function requestFollowEntries(request = {}) {
     metadata.followedVideos,
     metadata.followUpdates,
   ].flatMap(resultEntries);
+}
+
+function requestPayloadEntries(request = {}) {
+  const metadata = metadataObject(request);
+  return [
+    request.douyinDetailPayload,
+    request.awemeDetailPayload,
+    request.douyinPostPayload,
+    request.douyinApiPayload,
+    metadata.douyinDetailPayload,
+    metadata.awemeDetailPayload,
+    metadata.douyinPostPayload,
+    metadata.douyinApiPayload,
+  ].filter((entry) => entry !== undefined && entry !== null);
 }
 
 function callableFromContext(context = {}, name) {
@@ -180,7 +194,11 @@ function mediaUrl(entry = {}) {
     entry.downloadUrl,
     entry.mediaUrl,
     entry.video?.play_addr?.url_list?.[0],
+    entry.video?.play_addr?.url_list?.find?.(Boolean),
+    entry.video?.download_addr?.url_list?.find?.(Boolean),
+    entry.video?.play_addr?.url_list?.[0],
     entry.awemeData?.video?.play_addr?.url_list?.[0],
+    entry.awemeData?.video?.download_addr?.url_list?.[0],
     format.url,
     format.downloadUrl,
     format.playUrl,
@@ -311,6 +329,146 @@ function seedsFromEntries(entries = [], overrides = {}) {
   ].filter(Boolean)));
 }
 
+function extractDouyinPayloadEntries(payload = {}) {
+  if (Array.isArray(payload)) {
+    return payload.flatMap(extractDouyinPayloadEntries);
+  }
+  if (!isObject(payload)) {
+    return [];
+  }
+  return [
+    payload.aweme_detail,
+    payload.awemeDetail,
+    payload.aweme,
+    payload.item,
+    payload.video,
+    payload.data?.aweme_detail,
+    payload.data?.awemeDetail,
+    payload.data?.aweme,
+    payload.data?.item,
+    payload.data?.video,
+    payload.aweme_list,
+    payload.awemeList,
+    payload.item_list,
+    payload.itemList,
+    payload.data?.aweme_list,
+    payload.data?.awemeList,
+    payload.data?.item_list,
+    payload.data?.itemList,
+    resultEntries(payload),
+  ].flatMap((entry) => {
+    if (Array.isArray(entry)) {
+      return entry.flatMap(extractDouyinPayloadEntries);
+    }
+    return isObject(entry) ? [entry] : [];
+  });
+}
+
+function parseJsonPayload(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function payloadEntriesFromHtml(html = '') {
+  const text = normalizeText(html);
+  if (!text) {
+    return [];
+  }
+  const entries = [];
+  const scriptPattern = /<script\b[^>]*>([\s\S]*?)<\/script>/giu;
+  for (const match of text.matchAll(scriptPattern)) {
+    const body = match[1].trim();
+    const parsed = parseJsonPayload(body);
+    if (parsed) {
+      entries.push(...extractDouyinPayloadEntries(parsed));
+      continue;
+    }
+    const jsonMatch = body.match(/(\{[\s\S]*"(?:aweme_detail|aweme_list|item_list)"[\s\S]*\})/u);
+    const nested = jsonMatch ? parseJsonPayload(jsonMatch[1]) : null;
+    if (nested) {
+      entries.push(...extractDouyinPayloadEntries(nested));
+    }
+  }
+  return entries;
+}
+
+async function responsePayload(response) {
+  if (!response) {
+    return null;
+  }
+  if (typeof response.json === 'function') {
+    try {
+      return await response.json();
+    } catch {
+      // Fall through to text parsing.
+    }
+  }
+  if (typeof response.text === 'function') {
+    const text = await response.text();
+    return parseJsonPayload(text) ?? { fixtureHtml: text };
+  }
+  return response;
+}
+
+async function fetchedPayloadEntries(request = {}, context = {}) {
+  const fetchImpl = callableFromContext(context, 'fetchImpl')
+    ?? callableFromContext(context, 'mockFetchImpl')
+    ?? (typeof request.mockFetchImpl === 'function' ? request.mockFetchImpl : null);
+  if (!fetchImpl) {
+    return [];
+  }
+  const url = firstText(
+    request.douyinApiUrl,
+    request.apiUrl,
+    request.detailApiUrl,
+    request.fetchUrl,
+  );
+  if (!url) {
+    return [];
+  }
+  const response = await fetchImpl(url, {
+    method: 'GET',
+    headers: isObject(request.fetchHeaders) ? request.fetchHeaders : undefined,
+  });
+  const payload = await responsePayload(response);
+  if (isObject(payload) && payload.fixtureHtml) {
+    return payloadEntriesFromHtml(payload.fixtureHtml);
+  }
+  return extractDouyinPayloadEntries(payload);
+}
+
+async function requestWithFixtureSeeds(request = {}, plan = {}, context = {}) {
+  const fixtureHtml = firstText(request.fixtureHtml, request.html, metadataObject(request).fixtureHtml);
+  const entries = [
+    ...extractDouyinPayloadEntries(requestPayloadEntries(request)),
+    ...payloadEntriesFromHtml(fixtureHtml),
+    ...await fetchedPayloadEntries(request, context),
+  ];
+  const seeds = seedsFromEntries(entries, {
+    sourceType: 'fixture-api',
+    sourceUrl: firstText(request.input, request.inputUrl, request.url, plan.source?.input),
+  });
+  if (seeds.length === 0) {
+    return null;
+  }
+  return {
+    ...request,
+    metadata: {
+      ...metadataObject(request),
+      resourceSeeds: seeds,
+      resolution: {
+        siteResolver: siteKey,
+        sourceType: 'fixture-api',
+        expectedVideos: entries.length,
+        resolvedSeeds: seeds.length,
+      },
+    },
+  };
+}
+
 async function callMediaBatchResolver(context, items, request, plan, sessionLease) {
   const resolver = callableFromContext(context, 'resolveDouyinMediaBatch');
   if (!resolver || items.length === 0) {
@@ -379,6 +537,11 @@ function ordinaryVideoTargets(request = {}, plan = {}) {
 }
 
 async function requestWithInjectedSeeds(request = {}, plan = {}, sessionLease = null, context = {}) {
+  const fixtureSeeded = await requestWithFixtureSeeds(request, plan, context);
+  if (fixtureSeeded) {
+    return fixtureSeeded;
+  }
+
   const directSeeds = seedsFromEntries(requestMediaEntries(request), { sourceType: 'media-results' });
   if (directSeeds.length > 0) {
     return {

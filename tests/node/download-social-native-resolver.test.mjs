@@ -347,6 +347,56 @@ test('social native resolver consumes local archive artifacts without live repla
   assert.equal(resolved.completeness.reason, 'x-social-resource-seeds-provided');
 });
 
+test('social native resolver recognizes replay state schema v1 without executing cursors', async (t) => {
+  const runDir = await mkdtemp(path.join(os.tmpdir(), 'bwk-social-native-schema-'));
+  t.after(() => rm(runDir, { recursive: true, force: true }));
+
+  const itemsPath = path.join(runDir, 'items.jsonl');
+  const statePath = path.join(runDir, 'state.json');
+  await writeFile(itemsPath, JSON.stringify({
+    kind: 'item',
+    id: 'schema-post-1',
+    media: [{
+      id: 'schema-media-1',
+      type: 'photo',
+      media_url_https: 'https://pbs.twimg.example.test/schema/photo.jpg',
+    }],
+  }), 'utf8');
+  await writeFile(statePath, JSON.stringify({
+    schemaVersion: 1,
+    siteKey: 'x',
+    action: 'full-archive',
+    cursor: {
+      nextCursor: 'schema-cursor-secret',
+      requestTemplate: {
+        url: 'https://x.com/i/api/graphql/schema/UserTweets',
+      },
+      capturedAt: '2026-04-29T00:00:00.000Z',
+      source: 'captured-api',
+    },
+  }), 'utf8');
+
+  const { resolved } = await resolveSocial('x', {
+    input: 'https://x.com/openai',
+    nativeResolver: true,
+    fullArchive: true,
+    sourceArtifacts: {
+      runDir,
+      itemsJsonl: itemsPath,
+      state: statePath,
+    },
+    dryRun: true,
+  });
+
+  assert.equal(resolved.resources.length, 1);
+  assert.equal(resolved.resources[0].url, 'https://pbs.twimg.example.test/schema/photo.jpg');
+  assert.equal(resolved.metadata.resolution.cursorReplayAvailable, true);
+  assert.equal(resolved.metadata.resolution.nextCursorAvailable, true);
+  assert.equal(resolved.metadata.resolution.requestTemplateAvailable, true);
+  assert.equal(resolved.metadata.resolution.nextCursor, undefined);
+  assert.equal(resolved.metadata.resolution.requestTemplate, undefined);
+});
+
 test('instagram native resolver maps GraphQL sidecar archive media', async () => {
   const { resolved } = await resolveSocial('instagram', {
     input: 'https://www.instagram.com/openai/',

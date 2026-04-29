@@ -175,6 +175,94 @@ test('douyin native resolver maps injected followed updates without refreshing l
   assert.equal(resolved.metadata.resolution.sourceType, 'followed-updates');
 });
 
+test('douyin native resolver maps fixture API detail payload without live signing', async () => {
+  const { resolved } = await resolveDouyin({
+    site: 'douyin',
+    input: 'https://www.douyin.com/video/7321000000000000100',
+    awemeDetailPayload: {
+      aweme_detail: {
+        aweme_id: '7321000000000000100',
+        desc: 'Fixture API Clip',
+        video: {
+          play_addr: {
+            url_list: ['https://v3-web.example.test/fixture/detail.mp4'],
+          },
+          cover: {
+            url_list: ['https://p3.example.test/fixture/detail.jpg'],
+          },
+        },
+        author: { nickname: 'fixture creator' },
+      },
+    },
+    dryRun: true,
+  });
+
+  assert.equal(resolved.resources.length, 2);
+  assert.equal(resolved.resources[0].url, 'https://v3-web.example.test/fixture/detail.mp4');
+  assert.equal(resolved.resources[0].metadata.videoId, '7321000000000000100');
+  assert.equal(resolved.resources[0].metadata.sourceType, 'fixture-api');
+  assert.equal(resolved.resources[1].mediaType, 'image');
+  assert.equal(resolved.metadata.resolution.sourceType, 'fixture-api');
+});
+
+test('douyin native resolver consumes injected fetch API payload without global network', async () => {
+  const fetchCalls = [];
+  const { resolved } = await resolveDouyin({
+    site: 'douyin',
+    input: 'https://www.douyin.com/video/7321000000000000101',
+    douyinApiUrl: 'https://www.douyin.com/aweme/v1/web/aweme/detail/?aweme_id=7321000000000000101',
+    dryRun: true,
+  }, {
+    fetchImpl: async (url) => {
+      fetchCalls.push(url);
+      return {
+        ok: true,
+        async json() {
+          return {
+            aweme_detail: {
+              aweme_id: '7321000000000000101',
+              desc: 'Injected Fetch Clip',
+              video: {
+                download_addr: {
+                  url_list: ['https://v3-web.example.test/injected/detail.mp4'],
+                },
+              },
+            },
+          };
+        },
+      };
+    },
+  });
+
+  assert.deepEqual(fetchCalls, ['https://www.douyin.com/aweme/v1/web/aweme/detail/?aweme_id=7321000000000000101']);
+  assert.equal(resolved.resources.length, 1);
+  assert.equal(resolved.resources[0].url, 'https://v3-web.example.test/injected/detail.mp4');
+  assert.equal(resolved.metadata.resolution.sourceType, 'fixture-api');
+});
+
+test('douyin native resolver maps fixture HTML JSON payloads without page navigation', async () => {
+  const { resolved } = await resolveDouyin({
+    site: 'douyin',
+    input: 'https://www.douyin.com/video/7321000000000000102',
+    fixtureHtml: `<html><body><script type="application/json">${JSON.stringify({
+      aweme_detail: {
+        aweme_id: '7321000000000000102',
+        desc: 'Fixture HTML Clip',
+        video: {
+          play_addr: {
+            url_list: ['https://v3-web.example.test/html/detail.mp4'],
+          },
+        },
+      },
+    })}</script></body></html>`,
+    dryRun: true,
+  });
+
+  assert.equal(resolved.resources.length, 1);
+  assert.equal(resolved.resources[0].url, 'https://v3-web.example.test/html/detail.mp4');
+  assert.equal(resolved.metadata.resolution.sourceType, 'fixture-api');
+});
+
 test('douyin ordinary inputs still fall back when no fixture or injected resolver is available', async () => {
   const { resolved } = await resolveDouyin({
     site: 'douyin',

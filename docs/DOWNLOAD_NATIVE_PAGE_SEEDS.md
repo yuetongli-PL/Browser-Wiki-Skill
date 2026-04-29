@@ -97,14 +97,19 @@ page fetches, or live smoke validation.
   hook). DASH audio and video streams with the same `groupId` can be muxed after
   both stream resources complete. Tests use an injected mux hook; live
   ffmpeg/download validation remains not-run.
-- Douyin signing, page/API parsing, cache refresh, and profile side effects
-  remain in the existing action/query layer. Native resolution only consumes
-  direct media evidence or injected resolver/enumerator/query results.
+- Douyin signing, live API discovery, cache refresh, and profile side effects
+  remain in the existing action/query layer. Native resolution can consume
+  fixture/API detail payloads, fixture HTML JSON payloads, injected fetch JSON,
+  direct media evidence, or injected resolver/enumerator/query results.
 - Xiaohongshu API calls, header refresh, and session side effects remain in the
   existing action/query layer. Native HTML fetch is side-effect free and
   fixture/injected-fetch testable.
 - Social cursor/API replay execution, relation pagination, followed-date
   selection, checkpoint/resume continuation, and authenticated feed discovery
   remain in the social legacy action. Native resolution only consumes captured
-  replay results or local artifacts.
+  replay results or local artifacts, including sanitized replay state schema v1
+  presence metadata without raw cursor/request-template values.
+- Session repair ops are exposed as a dry-run `session-repair-plan` entrypoint.
+  It prints sanitized operator guidance and rejects `--execute`; login,
+  keepalive, and profile rebuild still need a separately approved path.
 - Live smoke and real download verification remain `not-run`.
