@@ -124,6 +124,42 @@ test('session repair plan maps blocked audit rows without executing ops', async 
   assert.equal(result.execution.status, 'not-run');
 });
 
+test('session repair plan text output includes audit source', async (t) => {
+  const runRoot = await mkdtemp(path.join(os.tmpdir(), 'bwk-session-repair-audit-render-'));
+  t.after(() => rm(runRoot, { recursive: true, force: true }));
+  const auditManifest = path.join(runRoot, 'download-release-audit.json');
+  await writeFile(auditManifest, `${JSON.stringify({
+    rows: [
+      {
+        site: 'x',
+        id: 'x-blocked',
+        kind: 'social-live-matrix',
+        status: 'blocked',
+        reason: 'session-provider-missing',
+        provider: 'unified-session-runner',
+      },
+    ],
+  }, null, 2)}\n`, 'utf8');
+
+  let output = '';
+  await main([
+    '--site', 'x',
+    '--host', 'x.com',
+    '--audit-manifest', auditManifest,
+  ], {
+    stdout: {
+      write(chunk) {
+        output += chunk;
+      },
+    },
+  });
+
+  assert.match(output, /Audit manifest: /);
+  assert.match(output, /Audit row: x-blocked/);
+  assert.match(output, /Audit kind: social-live-matrix/);
+  assert.match(output, /Audit provider: unified-session-runner/);
+});
+
 test('session repair plan main prints JSON and does not spawn child commands', async () => {
   let output = '';
   const result = await main([
