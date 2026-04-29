@@ -113,6 +113,41 @@ test('social-live-report classifies live smoke rows from artifact verdicts, not 
   assert.equal(report.summary.instagram.statuses.unknown, 1);
 });
 
+test('social-live-report surfaces social action session gate summaries', async (t) => {
+  const rootDir = await mkdtemp(path.join(os.tmpdir(), 'bwk-social-report-session-gate-'));
+  t.after(() => rm(rootDir, { recursive: true, force: true }));
+
+  const runDir = path.join(rootDir, 'x-action-run');
+  await mkdir(runDir, { recursive: true });
+  await writeFile(path.join(runDir, 'manifest.json'), `${JSON.stringify({
+    runId: 'x-action-run',
+    siteKey: 'x',
+    status: 'passed',
+    reason: 'completed',
+    sessionProvider: 'unified-session-runner',
+    sessionGate: {
+      ok: true,
+      status: 'passed',
+      reason: 'unified-session-health-manifest',
+      provider: 'unified-session-runner',
+      healthManifest: path.join(rootDir, 'session', 'manifest.json'),
+    },
+    generatedAt: '2026-04-26T00:00:00.000Z',
+  }, null, 2)}\n`, 'utf8');
+
+  const outDir = path.join(rootDir, 'report');
+  const report = await buildReport(parseReportArgs(['--runs-root', rootDir, '--out-dir', outDir]));
+  const outputs = await writeReport(parseReportArgs(['--runs-root', rootDir, '--out-dir', outDir]), report);
+  const markdown = await readFile(outputs.markdownPath, 'utf8');
+
+  assert.equal(report.totalRows, 1);
+  assert.equal(report.rows[0].sessionGate.status, 'passed');
+  assert.equal(report.rows[0].sessionGate.reason, 'unified-session-health-manifest');
+  assert.equal(report.summary.x.sessionGates.passed, 1);
+  assert.match(markdown, /Session Gate/u);
+  assert.match(markdown, /passed \(unified-session-health-manifest\)/u);
+});
+
 test('social-live-report surfaces state-only started runs as stale when no process owns them', async (t) => {
   const rootDir = await mkdtemp(path.join(os.tmpdir(), 'bwk-social-report-stale-'));
   t.after(() => rm(rootDir, { recursive: true, force: true }));
