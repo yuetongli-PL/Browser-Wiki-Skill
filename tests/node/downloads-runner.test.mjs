@@ -1439,6 +1439,57 @@ test('download executor muxes completed audio and video resources as a derived a
   assert.equal(artifacts.downloads[2].derived, true);
 });
 
+test('download executor reports incomplete mux groups as derived failures', async (t) => {
+  const runRoot = await mkdtemp(path.join(os.tmpdir(), 'bwk-download-executor-mux-missing-'));
+  t.after(() => rm(runRoot, { recursive: true, force: true }));
+
+  const plan = normalizeDownloadTaskPlan({
+    siteKey: 'bilibili',
+    host: 'www.bilibili.com',
+    taskType: 'video',
+    source: { input: 'https://www.bilibili.com/video/BV1muxMissing/' },
+    policy: { dryRun: false, concurrency: 1, retries: 0, retryBackoffMs: 0 },
+    output: { root: runRoot },
+  });
+  const manifest = await executeResolvedDownloadTask({
+    planId: plan.id,
+    siteKey: 'bilibili',
+    taskType: 'video',
+    resources: [{
+      id: 'dash-video-only',
+      url: 'https://upos.example.test/mux/video-only.m4s',
+      fileName: 'dash-video-only.m4s',
+      mediaType: 'video',
+      groupId: 'bilibili:BV1muxMissing:p1',
+      metadata: {
+        muxRole: 'video',
+        muxKind: 'dash-audio-video',
+      },
+    }],
+  }, plan, null, {
+    runRoot,
+    dryRun: false,
+    enableDerivedMux: true,
+  }, {
+    fetchImpl: async () => ({
+      ok: true,
+      async arrayBuffer() {
+        return Buffer.from('video stream').buffer;
+      },
+    }),
+  });
+
+  assert.equal(manifest.status, 'partial');
+  assert.equal(manifest.counts.downloaded, 1);
+  assert.equal(manifest.counts.failed, 1);
+  assert.equal(manifest.failedResources[0].resourceId, 'mux:bilibili:BV1muxMissing:p1');
+  assert.equal(manifest.failedResources[0].reason, 'mux-missing-audio');
+  assert.equal(manifest.failedResources[0].derived, true);
+  const report = await readFile(manifest.artifacts.reportMarkdown, 'utf8');
+  assert.match(report, /Derived Mux Diagnostics/u);
+  assert.match(report, /mux-missing-audio/u);
+});
+
 test('download executor treats retries zero as a single attempt', async (t) => {
   const runRoot = await mkdtemp(path.join(os.tmpdir(), 'bwk-download-retries-zero-'));
   t.after(() => rm(runRoot, { recursive: true, force: true }));

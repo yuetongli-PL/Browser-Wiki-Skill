@@ -429,6 +429,9 @@ function firstCursor(value = {}) {
     return '';
   }
   return firstText(
+    value.cursor?.nextCursor,
+    value.cursor?.next_cursor,
+    value.cursor?.cursor,
     value.nextCursor,
     value.next_cursor,
     value.cursor,
@@ -452,6 +455,8 @@ function firstRequestTemplate(value = {}) {
     return '';
   }
   return firstText(
+    value.cursor?.requestTemplate?.url,
+    value.cursor?.requestTemplate?.endpoint,
     value.requestTemplate?.url,
     value.requestTemplate?.endpoint,
     value.archive?.requestTemplate?.url,

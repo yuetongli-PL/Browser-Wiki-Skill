@@ -55,7 +55,7 @@ The following task shapes intentionally remain on legacy fallback:
 | 22biqu | Live ordinary book URL or title with no local fixture, no KB root match, and no injected fetch/mock. | `legacy-downloader-required` | The native resolver does not perform real network crawling. Live book crawl remains in the Python downloader. |
 | 22biqu | Local fixture or directory HTML exists but yields no chapter links. | `legacy-downloader-required` | Empty or unparseable local evidence is not enough to build a complete native resource queue. |
 | Bilibili | Ordinary BV, video page, creator page, collection, or series input without request-injected/API evidence, injected/mock fetch, explicit network-gated fetch, and matching playurl evidence. | `legacy-downloader-required` | Unsupported API shapes, incomplete payloads, WBI/signature requirements, DASH mux, and live media verification still require fallback. |
-| Douyin | Ordinary video, author, search, or feed input without direct media entries, mock media results, injected resolver output, author enumeration, or followed query results. | `legacy-downloader-required` | Auth/session-aware discovery, signing, cache refresh, and direct media freshness still live in the legacy site action. |
+| Douyin | Ordinary video, author, search, or feed input without fixture/API detail payloads, fixture HTML JSON, injected fetch JSON, direct media entries, mock media results, injected resolver output, author enumeration, or followed query results. | `legacy-downloader-required` | Auth/session-aware discovery, signing, cache refresh, and direct media freshness still live in the legacy site action. |
 | Xiaohongshu | Ordinary note, search, profile, or followed-user input without fixture/API payload, page facts, fixture HTML, injected/mock fetched HTML, mock note list, or injected query result. | `legacy-downloader-required` | Browser/API discovery, header freshness, session side effects, and bundle construction still live in the legacy site action. |
 | X | Native gate off, no media candidates, relation/followed-date/follower/following/followed-users, checkpoint, resume, or cursor discovery input. | `legacy-downloader-required` plus native unsupported metadata when gated | Social cursor discovery, archive state, relation handling, auth recovery, and media queue creation still live in the social legacy action. |
 | Instagram | Native gate off, no feed-user/archive media candidates, relation/follower/following/followed-users, checkpoint, resume, or authenticated feed discovery input. | `legacy-downloader-required` plus native unsupported metadata when gated | Social cursor discovery, relation pagination, auth recovery, and media queue creation still live in the social legacy action. |
@@ -65,7 +65,7 @@ The following task shapes intentionally remain on legacy fallback:
 Focused gate for this branch:
 
 ```powershell
-node --test tests\node\download-22biqu-native-resolver.test.mjs tests\node\download-bilibili-page-seed-resolver.test.mjs tests\node\download-xiaohongshu-page-seed-resolver.test.mjs tests\node\download-douyin-native-resolver.test.mjs tests\node\download-social-native-resolver.test.mjs tests\node\download-site-modules.test.mjs tests\node\download-native-seed-schema.test.mjs tests\node\downloads-runner.test.mjs tests\node\download-media-executor.test.mjs
+node --test tests\node\download-22biqu-native-resolver.test.mjs tests\node\download-bilibili-page-seed-resolver.test.mjs tests\node\download-xiaohongshu-page-seed-resolver.test.mjs tests\node\download-douyin-native-resolver.test.mjs tests\node\download-social-native-resolver.test.mjs tests\node\download-site-modules.test.mjs tests\node\download-native-seed-schema.test.mjs tests\node\downloads-runner.test.mjs tests\node\download-media-executor.test.mjs tests\node\site-session-governance.test.mjs tests\node\session-repair-plan.test.mjs
 ```
 
 Passing this gate proves only fixture-backed, request-injected, or
@@ -78,7 +78,9 @@ authenticated social archive capability, or safe fallback removal.
 - Bilibili DASH audio/video streams can be muxed as an explicit opt-in derived
   artifact after both stream resources complete. The queue still tracks the
   original resources; the mux output is appended to manifest files and downloads
-  JSONL as `derived: true`.
+  JSONL as `derived: true`. Missing audio/video streams and mux failures are
+  reported as derived failures in the manifest and report.
 - Session governance health can attach a sanitized `repairPlan` to blocked
   download manifests. This is operator guidance only; download runner does not
-  perform login, keepalive, profile rebuild, or live recovery by itself.
+  perform login, keepalive, profile rebuild, or live recovery by itself. The
+  `session-repair-plan` entrypoint is dry-run by default and rejects execution.
