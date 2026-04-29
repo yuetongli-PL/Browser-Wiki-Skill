@@ -16,6 +16,7 @@ import {
   sessionOptionsFromRunManifest,
   summarizeSessionRunManifest,
 } from '../../src/sites/sessions/manifest-bridge.mjs';
+import { evaluateAuthenticatedSessionReleaseGate } from '../../src/sites/sessions/release-gate.mjs';
 import { runSessionTask } from '../../src/sites/sessions/runner.mjs';
 import {
   main,
@@ -258,6 +259,23 @@ test('site-doctor parser accepts generated unified session health plans', () => 
   assert.equal(parsed.options.useUnifiedSessionHealth, true);
 });
 
+test('site-doctor parser defaults to unified session health and keeps legacy opt-out', () => {
+  const defaultParsed = parseSiteDoctorArgs([
+    'https://x.com/home',
+    '--profile-path',
+    'profiles/x.com.json',
+  ]);
+  const legacyParsed = parseSiteDoctorArgs([
+    'https://x.com/home',
+    '--profile-path',
+    'profiles/x.com.json',
+    '--no-session-health-plan',
+  ]);
+
+  assert.equal(defaultParsed.options.useUnifiedSessionHealth, true);
+  assert.equal(legacyParsed.options.useUnifiedSessionHealth, false);
+});
+
 test('site-doctor can generate unified session health before legacy probes', async (t) => {
   const runRoot = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-doctor-session-'));
   t.after(() => rm(runRoot, { recursive: true, force: true }));
@@ -337,4 +355,31 @@ test('download release gate documents unified session manifest traceability', as
   assert.match(releaseGate, /legacy-session-provider/u);
   assert.match(releaseGate, /--session-health-plan/u);
   assert.match(releaseGate, /--session-manifest <path>/u);
+});
+
+test('authenticated release gate blocks missing session traceability', () => {
+  assert.deepEqual(evaluateAuthenticatedSessionReleaseGate({
+    plan: { sessionRequirement: 'required' },
+  }), {
+    ok: false,
+    status: 'blocked',
+    reason: 'session-provider-missing',
+    requiresAuth: true,
+    provider: null,
+    healthManifest: null,
+  });
+
+  assert.equal(evaluateAuthenticatedSessionReleaseGate({
+    plan: { sessionRequirement: 'required' },
+    sessionProvider: 'unified-session-runner',
+  }).reason, 'session-health-manifest-missing');
+  assert.equal(evaluateAuthenticatedSessionReleaseGate({
+    plan: { sessionRequirement: 'required' },
+    sessionProvider: 'legacy-session-provider',
+  }).ok, true);
+  assert.equal(evaluateAuthenticatedSessionReleaseGate({
+    plan: { sessionRequirement: 'required' },
+    sessionProvider: 'unified-session-runner',
+    sessionHealth: { artifacts: { manifest: 'runs/session/x/manifest.json' } },
+  }).ok, true);
 });

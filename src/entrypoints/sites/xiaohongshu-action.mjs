@@ -6,6 +6,7 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 import { initializeCliUtf8, writeJsonStdout } from '../../infra/cli.mjs';
+import { actionSessionMetadataFromOptions } from '../../sites/sessions/manifest-bridge.mjs';
 import { runXiaohongshuAction } from '../../sites/xiaohongshu/actions/router.mjs';
 
 function normalizeStringList(value) {
@@ -91,6 +92,13 @@ export function parseXiaohongshuActionArgs(argv = process.argv.slice(2)) {
     headless: flags.headless === true ? true : flags['no-headless'] === true ? false : undefined,
     reuseLoginState: flags['no-reuse-login-state'] === true ? false : flags['reuse-login-state'] === true ? true : undefined,
     autoLogin: flags['no-auto-login'] === true ? false : flags['auto-login'] === true ? true : undefined,
+    sessionManifest: flags['session-manifest'] ? String(flags['session-manifest']) : undefined,
+    sessionProvider: flags['session-provider'] ? String(flags['session-provider']) : undefined,
+    useUnifiedSessionHealth: flags['no-session-health-plan'] === true
+      ? false
+      : flags['session-health-plan'] === true
+        ? true
+        : undefined,
     output: flags.output ? String(flags.output) : 'full',
     outputFormat: flags.format ? String(flags.format) : 'json',
     followedUsers: flags['followed-users'] === true,
@@ -111,7 +119,13 @@ function selectCliPayload(result, outputMode) {
     return result?.actionSummary || result;
   }
   if (mode === 'download') {
-    return result?.download ?? result;
+    return result?.download
+      ? {
+        ...result.download,
+        sessionProvider: result.sessionProvider,
+        sessionHealth: result.sessionHealth ?? null,
+      }
+      : result;
   }
   return result;
 }
@@ -120,7 +134,12 @@ export async function runXiaohongshuActionCli(argv = process.argv.slice(2)) {
   initializeCliUtf8();
   const parsed = parseXiaohongshuActionArgs(argv);
   const items = [...parsed.items, ...parsed.queries];
-  const result = await runXiaohongshuAction({
+  const sessionMetadata = await actionSessionMetadataFromOptions(parsed, {
+    siteKey: 'xiaohongshu',
+    host: 'www.xiaohongshu.com',
+  });
+  const result = {
+    ...await runXiaohongshuAction({
     action: parsed.action,
     items,
     profilePath: parsed.profilePath,
@@ -137,7 +156,9 @@ export async function runXiaohongshuActionCli(argv = process.argv.slice(2)) {
     followedUserLimit: parsed.followedUserLimit,
     download: parsed.download,
     authorResumeState: parsed.authorResumeState,
-  });
+  }),
+    ...sessionMetadata,
+  };
   const outputFormat = String(parsed.outputFormat || 'json').trim().toLowerCase();
   if (outputFormat === 'markdown') {
     process.stdout.write(result?.download?.reportMarkdown || result?.markdown || '');

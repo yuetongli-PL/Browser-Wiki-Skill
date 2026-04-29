@@ -86,3 +86,21 @@ export function sessionOptionsFromRunManifest(manifest = {}, expected = {}) {
     sessionManifestPath: summary.artifacts.manifest,
   };
 }
+
+export async function actionSessionMetadataFromOptions(options = {}, expected = {}) {
+  if (options.sessionManifest) {
+    const summary = assertSessionManifestMatches(
+      await readSessionRunManifest(path.resolve(String(options.sessionManifest))),
+      expected,
+    );
+    return {
+      sessionProvider: 'unified-session-runner',
+      sessionHealth: summary,
+    };
+  }
+
+  return {
+    sessionProvider: normalizeText(options.sessionProvider)
+      || (options.useUnifiedSessionHealth === true ? 'unified-session-runner' : 'legacy-session-provider'),
+  };
+}

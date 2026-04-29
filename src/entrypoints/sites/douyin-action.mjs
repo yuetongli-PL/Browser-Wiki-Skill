@@ -5,6 +5,7 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 import { initializeCliUtf8, writeJsonStdout } from '../../infra/cli.mjs';
+import { actionSessionMetadataFromOptions } from '../../sites/sessions/manifest-bridge.mjs';
 import { runDouyinAction } from '../../sites/douyin/actions/router.mjs';
 
 function normalizeStringList(value) {
@@ -14,7 +15,7 @@ function normalizeStringList(value) {
     .filter(Boolean);
 }
 
-function parseArgs(argv = process.argv.slice(2)) {
+export function parseDouyinActionArgs(argv = process.argv.slice(2)) {
   const args = [...argv];
   const positionals = [];
   const flags = {};
@@ -65,6 +66,13 @@ function parseArgs(argv = process.argv.slice(2)) {
     headless: flags.headless === true ? true : flags['no-headless'] === true ? false : undefined,
     reuseLoginState: flags['no-reuse-login-state'] === true ? false : true,
     allowAutoLoginBootstrap: flags['no-auto-login-bootstrap'] === true ? false : true,
+    sessionManifest: flags['session-manifest'] ? String(flags['session-manifest']) : undefined,
+    sessionProvider: flags['session-provider'] ? String(flags['session-provider']) : undefined,
+    useUnifiedSessionHealth: flags['no-session-health-plan'] === true
+      ? false
+      : flags['session-health-plan'] === true
+        ? true
+        : undefined,
     followUpdatesWindow: flags.window ? String(flags.window) : null,
     userFilter: normalizeStringList(flags.user ?? flags.author ?? flags['user-filter'] ?? []),
     titleKeyword: normalizeStringList(flags.keyword ?? flags['title-keyword'] ?? []),
@@ -88,15 +96,28 @@ function selectCliPayload(result, output) {
     return result?.actionSummary || result?.download?.summaryView || result?.download?.summary || result;
   }
   if (mode === 'download') {
-    return result?.download ?? result;
+    return result?.download
+      ? {
+        ...result.download,
+        sessionProvider: result.sessionProvider,
+        sessionHealth: result.sessionHealth ?? null,
+      }
+      : result;
   }
   return result;
 }
 
 export async function runDouyinActionCli(argv = process.argv.slice(2)) {
   initializeCliUtf8();
-  const parsed = parseArgs(argv);
-  const result = await runDouyinAction(parsed);
+  const parsed = parseDouyinActionArgs(argv);
+  const sessionMetadata = await actionSessionMetadataFromOptions(parsed, {
+    siteKey: 'douyin',
+    host: 'www.douyin.com',
+  });
+  const result = {
+    ...await runDouyinAction(parsed),
+    ...sessionMetadata,
+  };
   const outputFormat = String(parsed.outputFormat || 'json').trim().toLowerCase();
   if (outputFormat === 'markdown') {
     const markdown = parsed.output === 'summary'
