@@ -247,6 +247,27 @@ test('download CLI parser accepts generated unified session health plans', () =>
   assert.equal(args.useUnifiedSessionHealth, true);
 });
 
+test('download CLI parser defaults required sessions to unified health plans and keeps legacy opt-out', () => {
+  const requiredArgs = parseArgs([
+    '--site',
+    'instagram',
+    '--input',
+    'openai',
+    '--session-required',
+  ]);
+  const legacyArgs = parseArgs([
+    '--site',
+    'instagram',
+    '--input',
+    'openai',
+    '--session-required',
+    '--no-session-health-plan',
+  ]);
+
+  assert.equal(requiredArgs.useUnifiedSessionHealth, true);
+  assert.equal(legacyArgs.useUnifiedSessionHealth, false);
+});
+
 test('download CLI parser accepts derived mux compatibility aliases', () => {
   assert.equal(parseArgs(['--site', 'bilibili', '--input', 'BV1mux', '--mux-derived-media']).enableDerivedMux, true);
   assert.equal(parseArgs(['--site', 'bilibili', '--input', 'BV1mux', '--dash-mux']).enableDerivedMux, true);

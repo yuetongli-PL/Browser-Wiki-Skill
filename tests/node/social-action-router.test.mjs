@@ -2327,6 +2327,8 @@ test('social action CLI parser keeps site defaults and maps common flags', () =>
     '--download-media',
     '--run-dir',
     'runs/social/manual',
+    '--session-manifest',
+    'runs/session/x/manifest.json',
     '--resume',
     '--dry-run',
   ], { site: 'x' });
@@ -2345,6 +2347,7 @@ test('social action CLI parser keeps site defaults and maps common flags', () =>
   assert.equal(parsed.mediaDownloadBackoffMs, '1500');
   assert.equal(parsed.downloadMedia, true);
   assert.equal(parsed.runDir, 'runs/social/manual');
+  assert.equal(parsed.sessionManifest, 'runs/session/x/manifest.json');
   assert.equal(parsed.resume, true);
   assert.equal(parsed.dryRun, true);
 
@@ -2364,6 +2367,41 @@ test('social action CLI parser keeps site defaults and maps common flags', () =>
   assert.equal(aliasParsed.mediaDownloadConcurrency, '4');
   assert.equal(aliasParsed.mediaDownloadRetries, '6');
   assert.equal(aliasParsed.mediaDownloadBackoffMs, '1500');
+});
+
+test('social action dry-run consumes session manifest metadata without opening a browser', async (t) => {
+  const runRoot = await mkdtemp(path.join(os.tmpdir(), 'bwk-social-session-'));
+  t.after(() => rm(runRoot, { recursive: true, force: true }));
+  const sessionManifest = path.join(runRoot, 'manifest.json');
+  await writeFile(sessionManifest, JSON.stringify({
+    plan: {
+      siteKey: 'x',
+      host: 'x.com',
+      purpose: 'archive',
+      sessionRequirement: 'required',
+    },
+    health: {
+      status: 'ready',
+      authStatus: 'authenticated',
+      identityConfirmed: true,
+    },
+    artifacts: {
+      manifest: sessionManifest,
+      runDir: runRoot,
+    },
+  }, null, 2));
+
+  const result = await runSocialAction({
+    site: 'x',
+    action: 'profile-content',
+    account: 'openai',
+    dryRun: true,
+    sessionManifest,
+  });
+
+  assert.equal(result.sessionProvider, 'unified-session-runner');
+  assert.equal(result.sessionHealth.healthStatus, 'ready');
+  assert.equal(result.sessionHealth.artifacts.manifest, sessionManifest);
 });
 
 test('social action CLI parser handles explicit API cursor booleans', () => {

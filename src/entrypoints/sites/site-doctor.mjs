@@ -64,7 +64,7 @@ const DEFAULT_OPTIONS = {
 };
 
 const HELP = `Usage:
-  node src/entrypoints/sites/site-doctor.mjs <url> [--query "<sample>"] [--profile-path <path>] [--session-manifest <path>] [--session-health-plan] [--out-dir <dir>] [--crawler-scripts-dir <dir>] [--knowledge-base-dir <dir>] [--browser-path <path>] [--browser-profile-root <dir>] [--user-data-dir <dir>] [--timeout <ms>] [--headless|--no-headless] [--reuse-login-state|--no-reuse-login-state] [--auto-login|--no-auto-login] [--max-triggers <n>] [--max-captured-states <n>] [--check-download]
+  node src/entrypoints/sites/site-doctor.mjs <url> [--query "<sample>"] [--profile-path <path>] [--session-manifest <path>] [--session-health-plan|--no-session-health-plan] [--out-dir <dir>] [--crawler-scripts-dir <dir>] [--knowledge-base-dir <dir>] [--browser-path <path>] [--browser-profile-root <dir>] [--user-data-dir <dir>] [--timeout <ms>] [--headless|--no-headless] [--reuse-login-state|--no-reuse-login-state] [--auto-login|--no-auto-login] [--max-triggers <n>] [--max-captured-states <n>] [--check-download]
 `;
 
 const AUTH_PROBE_WAIT_POLICY = {
@@ -2452,6 +2452,9 @@ export function parseCliArgs(argv) {
       case '--session-health-plan':
         options.useUnifiedSessionHealth = true;
         break;
+      case '--no-session-health-plan':
+        options.useUnifiedSessionHealth = false;
+        break;
       case '--out-dir': {
         const { value, nextIndex } = readValue(index);
         options.outDir = value;
@@ -2530,6 +2533,10 @@ export function parseCliArgs(argv) {
       default:
         throw new Error(`Unknown option: ${token}`);
     }
+  }
+
+  if (options.useUnifiedSessionHealth !== false && !options.sessionManifest) {
+    options.useUnifiedSessionHealth = true;
   }
 
   return {

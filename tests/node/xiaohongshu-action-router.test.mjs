@@ -201,6 +201,7 @@ test('parseXiaohongshuActionArgs accepts followed-user batch download flags', ()
     '--author-page-limit', '5',
     '--no-headless',
     '--reuse-login-state',
+    '--session-manifest', 'runs/session/xiaohongshu/manifest.json',
   ]);
 
   assert.equal(parsed.action, 'download');
@@ -211,6 +212,7 @@ test('parseXiaohongshuActionArgs accepts followed-user batch download flags', ()
   assert.equal(parsed.download.authorPageLimit, 5);
   assert.equal(parsed.headless, false);
   assert.equal(parsed.reuseLoginState, true);
+  assert.equal(parsed.sessionManifest, 'runs/session/xiaohongshu/manifest.json');
 });
 
 test('runXiaohongshuAction resolves a search query into image-note bundles and scans past video candidates', async () => {

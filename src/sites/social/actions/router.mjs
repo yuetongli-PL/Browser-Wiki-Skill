@@ -16,6 +16,7 @@ import {
 import { ensureDir, readJsonFile, readTextFile, writeJsonFile, writeJsonLines, writeTextFile } from '../../../infra/io.mjs';
 import { cleanText, compactSlug, normalizeText } from '../../../shared/normalize.mjs';
 import { downloadMediaFiles as executeMediaDownloads } from '../../downloads/media-executor.mjs';
+import { actionSessionMetadataFromOptions } from '../../sessions/manifest-bridge.mjs';
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(MODULE_DIR, '..', '..', '..', '..');
@@ -4972,6 +4973,8 @@ async function writeSocialArtifacts(finalResult, layout, checkpointWriter) {
     completeness: finalResult.completeness ?? null,
     archive: finalResult.result?.archive ?? null,
     authHealth: finalResult.authHealth ?? null,
+    sessionProvider: finalResult.sessionProvider ?? null,
+    sessionHealth: finalResult.sessionHealth ?? null,
     runtimeRisk: finalResult.runtimeRisk ?? null,
     outcome: finalResult.outcome ?? null,
     recoveryRunbook,
@@ -5160,6 +5163,9 @@ function normalizeRunSettings(plan, options = {}) {
     resume: toBoolean(options.resume, false),
     reportPath: options.reportPath ? path.resolve(options.reportPath) : null,
     profilePath: options.profilePath || SOCIAL_SITES[plan.siteKey].defaultProfilePath,
+    sessionManifest: options.sessionManifest ? path.resolve(String(options.sessionManifest)) : null,
+    sessionProvider: options.sessionProvider,
+    useUnifiedSessionHealth: options.useUnifiedSessionHealth,
   };
 }
 
@@ -5168,6 +5174,10 @@ export async function runSocialAction(options = {}, deps = {}) {
   const config = resolveSocialSiteConfig(plan.siteKey);
   const settings = normalizeRunSettings(plan, options);
   const artifactLayout = buildSocialArtifactLayout(plan, settings);
+  const sessionMetadata = await actionSessionMetadataFromOptions(settings, {
+    siteKey: plan.siteKey,
+    host: config.host,
+  });
   if (plan.requiresAccount && !plan.account && !plan.canRunWithoutAccount) {
     throw new Error(`${plan.action} requires --account <handle> or a profile URL.`);
   }
@@ -5198,6 +5208,7 @@ export async function runSocialAction(options = {}, deps = {}) {
         runDir: artifactLayout.runDir,
         resume: settings.resume,
       },
+      ...sessionMetadata,
       artifacts: artifactPathSummary(artifactLayout),
     };
   }
@@ -5485,6 +5496,8 @@ export async function runSocialAction(options = {}, deps = {}) {
     };
     finalResult.runtimeRisk = summarizeRuntimeRisk(resultPayload, settings);
     finalResult.authHealth = summarizeSocialAuthHealth(executionPlan, settings, authContext, authResult, finalResult.runtimeRisk);
+    finalResult.sessionProvider = sessionMetadata.sessionProvider;
+    finalResult.sessionHealth = sessionMetadata.sessionHealth ?? null;
     finalResult.completeness = summarizeCompleteness(finalResult);
     finalResult.outcome = summarizeRunOutcome(finalResult, settings);
     finalResult.ok = finalResult.outcome.ok;
@@ -5581,6 +5594,13 @@ export function parseSocialActionArgs(argv = process.argv.slice(2), defaults = {
     browserPath: lastFlagValue(flags, 'browser-path'),
     browserProfileRoot: lastFlagValue(flags, 'browser-profile-root'),
     userDataDir: lastFlagValue(flags, 'user-data-dir'),
+    sessionManifest: lastFlagValue(flags, 'session-manifest'),
+    sessionProvider: lastFlagValue(flags, 'session-provider'),
+    useUnifiedSessionHealth: flags['no-session-health-plan'] === true
+      ? false
+      : flags['session-health-plan'] === true
+        ? true
+        : undefined,
     outDir: lastFlagValue(flags, 'out-dir'),
     runDir: lastFlagValue(flags, 'run-dir', lastFlagValue(flags, 'artifacts-dir')),
     artifactRunId: lastFlagValue(flags, 'artifact-run-id', lastFlagValue(flags, 'run-id')),

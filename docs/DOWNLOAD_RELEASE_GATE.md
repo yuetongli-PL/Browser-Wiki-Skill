@@ -259,12 +259,17 @@ Pass criteria:
 - A real download or live smoke manifest either references a unified session
   health manifest or explicitly marks the session provider as
   `legacy-session-provider`.
-- `--session-health-plan` generates a read-only unified health manifest before
-  resource resolution or auth doctor work.
+- Required-session download and site-doctor CLI runs default to a read-only
+  unified health plan. `--session-health-plan` remains an explicit form of the
+  same behavior.
+- `--no-session-health-plan` is the explicit escape hatch for legacy provider
+  runs; those runs must write `legacy-session-provider` before they can pass
+  this traceability gate.
 - `--session-manifest <path>` consumes an existing unified health manifest
   without triggering login, keepalive, profile rebuild, cookie import, or live
   downloads.
-- `site-doctor` records a `sessionHealth` summary and `sessionProvider`.
+- `site-doctor` and site action manifests record a `sessionHealth` summary and
+  `sessionProvider`.
 - Social live plans include `x-session-health` and/or
   `instagram-session-health` before the corresponding auth doctor case.
 - Session manifests stay sanitized: no cookie values, auth headers, raw cursor

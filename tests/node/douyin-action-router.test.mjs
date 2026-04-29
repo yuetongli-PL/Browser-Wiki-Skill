@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
+import { parseDouyinActionArgs } from '../../src/entrypoints/sites/douyin-action.mjs';
 import {
   classifyDouyinDownloadInput,
   planDouyinAction,
@@ -15,6 +16,22 @@ test('classifyDouyinDownloadInput recognizes video ids, detail urls, and author 
     classifyDouyinDownloadInput('https://www.douyin.com/user/MS4wLjABAAAA-example?showTab=post').inputKind,
     'author-video-list',
   );
+});
+
+test('parseDouyinActionArgs accepts unified session traceability flags', () => {
+  const parsed = parseDouyinActionArgs([
+    'download',
+    'https://www.douyin.com/video/7487317288315258152',
+    '--session-manifest', 'runs/session/douyin/manifest.json',
+    '--session-provider', 'unified-session-runner',
+    '--no-session-health-plan',
+  ]);
+
+  assert.equal(parsed.action, 'download');
+  assert.deepEqual(parsed.items, ['https://www.douyin.com/video/7487317288315258152']);
+  assert.equal(parsed.sessionManifest, 'runs/session/douyin/manifest.json');
+  assert.equal(parsed.sessionProvider, 'unified-session-runner');
+  assert.equal(parsed.useUnifiedSessionHealth, false);
 });
 
 test('planDouyinAction routes downloads through login bootstrap when reusable auth is missing', async () => {
