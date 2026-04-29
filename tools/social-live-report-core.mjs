@@ -140,19 +140,40 @@ function normalizeArtifactVerdict(value) {
   return 'unknown';
 }
 
+function normalizeSessionGate(value = null) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  const status = String(value.status ?? '').trim().toLowerCase();
+  const reason = String(value.reason ?? '').trim();
+  return {
+    ok: value.ok === true,
+    status: ['passed', 'blocked', 'unknown'].includes(status) ? status : 'unknown',
+    reason: reason || null,
+    provider: value.provider ?? null,
+    healthManifest: value.healthManifest ?? null,
+  };
+}
+
+function sessionGateFromSummary(summary = {}, manifest = {}) {
+  return normalizeSessionGate(summary?.sessionGate ?? manifest?.sessionGate);
+}
+
 function resultRowsFromManifest(manifest, manifestPath, mtimeMs) {
   const rows = [];
   if (Array.isArray(manifest?.results)) {
     for (const result of manifest.results) {
+      const artifactSummary = result.artifactSummary ?? {};
       rows.push({
         site: normalizeSite(result.site ?? manifest?.options?.site),
         id: result.id ?? manifest.runId ?? path.basename(path.dirname(manifestPath)),
         category: result.category ?? null,
-        status: normalizeArtifactVerdict(result.artifactSummary?.verdict),
-        reason: result.artifactSummary?.reason ?? result.reason ?? null,
+        status: normalizeArtifactVerdict(artifactSummary.verdict),
+        reason: artifactSummary.reason ?? result.reason ?? null,
         commandStatus: result.status ?? null,
         manifestPath,
-        artifactManifestPath: result.artifactSummary?.manifestPath ?? null,
+        artifactManifestPath: artifactSummary.manifestPath ?? null,
+        sessionGate: sessionGateFromSummary(artifactSummary),
         runId: manifest.runId ?? null,
         finishedAt: result.finishedAt ?? manifest.finishedAt ?? manifest.startedAt ?? new Date(mtimeMs).toISOString(),
       });
@@ -167,6 +188,7 @@ function resultRowsFromManifest(manifest, manifestPath, mtimeMs) {
       commandStatus: null,
       manifestPath,
       artifactManifestPath: manifestPath,
+      sessionGate: sessionGateFromSummary(manifest),
       runId: manifest?.runId ?? null,
       finishedAt: manifest?.finishedAt ?? manifest?.startedAt ?? manifest?.generatedAt ?? new Date(mtimeMs).toISOString(),
     });
@@ -223,9 +245,12 @@ function summarize(rows) {
   const bySite = {};
   for (const row of rows) {
     const site = row.site || 'unknown';
-    bySite[site] ??= { total: 0, statuses: {}, latestFinishedAt: null };
+    bySite[site] ??= { total: 0, statuses: {}, sessionGates: {}, latestFinishedAt: null };
     bySite[site].total += 1;
     bySite[site].statuses[row.status] = (bySite[site].statuses[row.status] ?? 0) + 1;
+    if (row.sessionGate?.status) {
+      bySite[site].sessionGates[row.sessionGate.status] = (bySite[site].sessionGates[row.sessionGate.status] ?? 0) + 1;
+    }
     if (!bySite[site].latestFinishedAt || String(row.finishedAt) > bySite[site].latestFinishedAt) {
       bySite[site].latestFinishedAt = row.finishedAt;
     }
@@ -277,11 +302,14 @@ export async function buildReport(options) {
 function markdownReport(report) {
   const lines = ['# Social Live Matrix Report', '', `Generated: ${report.generatedAt}`, '', '## Summary', ''];
   for (const [site, summary] of Object.entries(report.summary)) {
-    lines.push(`- ${site}: ${summary.total} row(s), latest ${summary.latestFinishedAt}, statuses ${JSON.stringify(summary.statuses)}`);
+    lines.push(`- ${site}: ${summary.total} row(s), latest ${summary.latestFinishedAt}, statuses ${JSON.stringify(summary.statuses)}, session gates ${JSON.stringify(summary.sessionGates)}`);
   }
-  lines.push('', '## Rows', '', '| Site | Case | Status | Reason | Finished | Manifest |', '| --- | --- | --- | --- | --- | --- |');
+  lines.push('', '## Rows', '', '| Site | Case | Status | Reason | Session Gate | Finished | Manifest |', '| --- | --- | --- | --- | --- | --- | --- |');
   for (const row of report.rows) {
-    lines.push(`| ${row.site} | ${row.id} | ${row.status} | ${row.reason ?? ''} | ${row.finishedAt ?? ''} | ${row.manifestPath} |`);
+    const sessionGate = row.sessionGate
+      ? `${row.sessionGate.status}${row.sessionGate.reason ? ` (${row.sessionGate.reason})` : ''}`
+      : '';
+    lines.push(`| ${row.site} | ${row.id} | ${row.status} | ${row.reason ?? ''} | ${sessionGate} | ${row.finishedAt ?? ''} | ${row.manifestPath} |`);
   }
   lines.push('');
   return lines.join('\n');
