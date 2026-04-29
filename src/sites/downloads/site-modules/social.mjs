@@ -396,16 +396,27 @@ function artifactSchemaSummary(manifest = {}, state = null, rows = []) {
     manifestObject.archiveContractVersion,
     schemaVersion >= 2 ? SOCIAL_ARCHIVE_CONTRACT_VERSION : '',
   );
+  const replayAvailable = Boolean(
+    firstCursor(stateObject)
+      || firstRequestTemplate(stateObject)
+      || rows.some((row) => firstCursor(row) || firstRequestTemplate(row)),
+  );
+  const rateLimitPresent = Boolean(stateObject.rateLimit ?? stateObject.rate_limit ?? stateObject.ratelimit);
+  const apiDriftPresent = Boolean(stateObject.apiDrift ?? stateObject.api_drift ?? stateObject.drift);
   return {
     archiveSchemaVersion: schemaVersion,
     archiveContractVersion: contractVersion || undefined,
     artifactRows: rows.length,
-    cursorReplayStatus: 'captured-only',
+    cursorReplayStatus: replayAvailable ? 'captured-only' : 'not-available',
+    replayPolicy: 'not-executed',
+    resumeSupported: false,
     checkpointResumeMigrated: false,
     relationMigrated: false,
     followedDateMigrated: false,
-    rateLimitEvidence: Boolean(stateObject.rateLimit ?? stateObject.rate_limit ?? stateObject.ratelimit) || undefined,
-    apiDriftEvidence: Boolean(stateObject.apiDrift ?? stateObject.api_drift ?? stateObject.drift) || undefined,
+    rateLimitEvidence: rateLimitPresent || undefined,
+    rateLimitStatus: rateLimitPresent ? 'present' : 'none',
+    apiDriftEvidence: apiDriftPresent || undefined,
+    apiDriftStatus: apiDriftPresent ? 'present' : 'none',
   };
 }
 
@@ -801,6 +812,10 @@ async function requestWithSocialNativeSeeds(siteKey, plan, request = {}, context
         expectedMedia: mediaEntries.length,
         resolvedSeeds: seeds.length,
         ...cursorMetadata(containers, artifactEvidence.state),
+        archiveCompletenessReason: cursorMetadata(containers, artifactEvidence.state).cursorReplayAvailable
+          && artifactEvidence.schema?.replayPolicy === 'not-executed'
+          ? 'cursor-replay-not-executed'
+          : undefined,
         artifactSource: artifactSourceSummary(artifactEvidence.source),
         archiveSchema: artifactEvidence.source ? artifactEvidence.schema : undefined,
       },

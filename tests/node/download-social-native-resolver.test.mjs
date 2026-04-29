@@ -349,6 +349,7 @@ test('social native resolver consumes local archive artifacts without live repla
   assert.equal(resolved.metadata.resolution.cursorReplayAvailable, true);
   assert.equal(resolved.metadata.resolution.nextCursorAvailable, true);
   assert.equal(resolved.metadata.resolution.requestTemplateAvailable, true);
+  assert.equal(resolved.metadata.resolution.archiveCompletenessReason, 'cursor-replay-not-executed');
   assert.equal(resolved.metadata.resolution.nextCursor, undefined);
   assert.equal(resolved.metadata.resolution.requestTemplate, undefined);
   assert.deepEqual(resolved.metadata.resolution.artifactSource, {
@@ -413,12 +414,17 @@ test('social native resolver recognizes replay state schema v1 without executing
     archiveContractVersion: undefined,
     artifactRows: 1,
     cursorReplayStatus: 'captured-only',
+    replayPolicy: 'not-executed',
+    resumeSupported: false,
     checkpointResumeMigrated: false,
     relationMigrated: false,
     followedDateMigrated: false,
     rateLimitEvidence: undefined,
+    rateLimitStatus: 'none',
     apiDriftEvidence: undefined,
+    apiDriftStatus: 'none',
   });
+  assert.equal(resolved.metadata.resolution.archiveCompletenessReason, 'cursor-replay-not-executed');
 });
 
 test('social native resolver records archive schema v2 metadata without leaking cursor payloads', async (t) => {
@@ -490,12 +496,17 @@ test('social native resolver records archive schema v2 metadata without leaking 
     archiveContractVersion: 'social-archive-v2',
     artifactRows: 2,
     cursorReplayStatus: 'captured-only',
+    replayPolicy: 'not-executed',
+    resumeSupported: false,
     checkpointResumeMigrated: false,
     relationMigrated: false,
     followedDateMigrated: false,
     rateLimitEvidence: true,
+    rateLimitStatus: 'present',
     apiDriftEvidence: true,
+    apiDriftStatus: 'present',
   });
+  assert.equal(resolved.metadata.resolution.archiveCompletenessReason, 'cursor-replay-not-executed');
   assert.equal(JSON.stringify(resolved.metadata.resolution).includes('secret-cursor-v2'), false);
   assert.equal(JSON.stringify(resolved.metadata.resolution).includes('/secret/'), false);
 });
