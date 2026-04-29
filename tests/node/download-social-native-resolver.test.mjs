@@ -148,3 +148,107 @@ test('x native resolver maps media candidates and preserves poster-only fallback
   assert.equal(resolved.metadata.resolver.method, 'native-x-social-resource-seeds');
   assert.equal(resolved.completeness.reason, 'x-social-resource-seeds-provided');
 });
+
+test('x native resolver maps nested timeline archive payload media variants', async () => {
+  const { resolved } = await resolveSocial('x', {
+    input: 'https://x.com/openai',
+    nativeResolver: true,
+    xTimelinePayload: {
+      data: {
+        user: {
+          result: {
+            timeline_v2: {
+              timeline: {
+                instructions: [{
+                  entries: [{
+                    content: {
+                      itemContent: {
+                        tweet_results: {
+                          result: {
+                            rest_id: 'tweet-archive-1',
+                            legacy: {
+                              id_str: 'tweet-archive-1',
+                              full_text: 'Nested archive tweet',
+                              extended_entities: {
+                                media: [{
+                                  id_str: 'media-archive-1',
+                                  type: 'video',
+                                  video_info: {
+                                    variants: [
+                                      { content_type: 'application/x-mpegURL', url: 'https://video.twimg.example.test/archive/master.m3u8' },
+                                      { content_type: 'video/mp4', bitrate: 832000, url: 'https://video.twimg.example.test/archive/low.mp4' },
+                                      { content_type: 'video/mp4', bitrate: 2176000, url: 'https://video.twimg.example.test/archive/high.mp4' },
+                                    ],
+                                  },
+                                }],
+                              },
+                            },
+                          },
+                        },
+                      },
+                    },
+                  }],
+                }],
+              },
+            },
+          },
+        },
+      },
+    },
+    dryRun: true,
+  });
+
+  assert.equal(resolved.resources.length, 1);
+  assert.equal(resolved.resources[0].url, 'https://video.twimg.example.test/archive/high.mp4');
+  assert.equal(resolved.resources[0].mediaType, 'video');
+  assert.equal(resolved.resources[0].metadata.postId, 'tweet-archive-1');
+  assert.equal(resolved.metadata.resolution.archiveStrategy, 'social-media-candidates');
+});
+
+test('instagram native resolver maps GraphQL sidecar archive media', async () => {
+  const { resolved } = await resolveSocial('instagram', {
+    input: 'https://www.instagram.com/openai/',
+    nativeResolver: true,
+    instagramGraphqlPayload: {
+      data: {
+        user: {
+          edge_owner_to_timeline_media: {
+            edges: [{
+              node: {
+                id: 'ig-archive-1',
+                shortcode: 'IGARCHIVE1',
+                edge_media_to_caption: {
+                  edges: [{ node: { text: 'Nested Instagram archive' } }],
+                },
+                edge_sidecar_to_children: {
+                  edges: [{
+                    node: {
+                      id: 'ig-archive-image',
+                      display_url: 'https://instagram.example.test/archive/image.jpg',
+                    },
+                  }, {
+                    node: {
+                      id: 'ig-archive-video',
+                      is_video: true,
+                      video_url: 'https://instagram.example.test/archive/video.mp4',
+                    },
+                  }],
+                },
+              },
+            }],
+          },
+        },
+      },
+    },
+    dryRun: true,
+  });
+
+  assert.equal(resolved.resources.length, 2);
+  assert.deepEqual(resolved.resources.map((resource) => resource.url), [
+    'https://instagram.example.test/archive/image.jpg',
+    'https://instagram.example.test/archive/video.mp4',
+  ]);
+  assert.deepEqual(resolved.resources.map((resource) => resource.mediaType), ['image', 'video']);
+  assert.equal(resolved.resources[0].metadata.archiveStrategy, 'instagram-feed-user');
+  assert.equal(resolved.resources[1].metadata.shortcode, 'IGARCHIVE1');
+});

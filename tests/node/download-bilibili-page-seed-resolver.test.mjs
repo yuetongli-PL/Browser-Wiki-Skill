@@ -14,7 +14,7 @@ import {
 const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(TEST_DIR, '..', '..');
 
-async function resolveBilibili(request, sessionLease = null) {
+async function resolveBilibili(request, sessionLease = null, extraContext = {}) {
   const definition = await resolveDownloadSiteDefinition({ site: 'bilibili' }, { workspaceRoot: REPO_ROOT });
   const plan = await createDownloadPlan(request, {
     workspaceRoot: REPO_ROOT,
@@ -24,6 +24,7 @@ async function resolveBilibili(request, sessionLease = null) {
     request,
     workspaceRoot: REPO_ROOT,
     definition,
+    ...extraContext,
   });
   return { plan, resolved };
 }
@@ -217,6 +218,99 @@ test('bilibili native resolver expands offline collection and UP archive payload
   assert.equal(upResolved.resources.length, 1);
   assert.equal(upResolved.resources[0].url, 'https://upos.example.test/up/a.flv');
   assert.equal(upResolved.resources[0].metadata.playlistKind, 'space-archives');
+});
+
+test('bilibili ordinary BV input can resolve through injected API evidence contract', async () => {
+  const evidenceRequests = [];
+  const { resolved } = await resolveBilibili({
+    site: 'bilibili',
+    input: 'https://www.bilibili.com/video/BV1injectedEvidence/',
+    dryRun: true,
+  }, null, {
+    resolveBilibiliApiEvidence: async (evidenceRequest, options) => {
+      evidenceRequests.push(evidenceRequest);
+      assert.equal(evidenceRequest.contractVersion, 'bilibili-native-api-evidence-v1');
+      assert.equal(evidenceRequest.inputKind, 'video-detail');
+      assert.equal(evidenceRequest.bvid, 'BV1injectedEvidence');
+      assert.deepEqual(evidenceRequest.requiredPayloads, ['view', 'playurl']);
+      assert.equal(evidenceRequest.allowNetworkResolve, false);
+      assert.equal(options.allowNetworkResolve, false);
+      return {
+        viewPayload: {
+          data: {
+            bvid: 'BV1injectedEvidence',
+            title: 'Injected Evidence Video',
+            pages: [{ cid: 9101, page: 1, part: 'Injected Part' }],
+          },
+        },
+        playUrlPayloads: {
+          9101: {
+            cid: 9101,
+            data: {
+              durl: [{ url: 'https://upos.example.test/injected/video.flv' }],
+            },
+          },
+        },
+      };
+    },
+  });
+
+  assert.equal(evidenceRequests.length, 1);
+  assert.equal(resolved.resources.length, 1);
+  assert.equal(resolved.resources[0].url, 'https://upos.example.test/injected/video.flv');
+  assert.equal(resolved.resources[0].metadata.bvid, 'BV1injectedEvidence');
+  assert.equal(resolved.resources[0].metadata.cid, '9101');
+  assert.equal(resolved.metadata.resolution.inputKind, 'video-detail');
+});
+
+test('bilibili ordinary collection input can resolve from request-injected API evidence', async () => {
+  const { resolved } = await resolveBilibili({
+    site: 'bilibili',
+    input: 'https://space.bilibili.com/100/channel/collectiondetail?sid=700',
+    bilibiliApiEvidence: {
+      collectionPayload: {
+        data: {
+          sid: '700',
+          title: 'Injected Collection Evidence',
+          items: [{ bvid: 'BV1collectionEvidence', title: 'Evidence Item', cid: 7001 }],
+        },
+      },
+      playUrlPayloads: {
+        BV1collectionEvidence: {
+          bvid: 'BV1collectionEvidence',
+          data: {
+            durl: [{ url: 'https://upos.example.test/injected/collection.flv' }],
+          },
+        },
+      },
+    },
+    dryRun: true,
+  });
+
+  assert.equal(resolved.resources.length, 1);
+  assert.equal(resolved.resources[0].url, 'https://upos.example.test/injected/collection.flv');
+  assert.equal(resolved.resources[0].metadata.playlistKind, 'collection');
+  assert.equal(resolved.resources[0].metadata.playlistId, '700');
+  assert.equal(resolved.metadata.resolution.inputKind, 'playlist');
+});
+
+test('bilibili injected API evidence stays legacy when playurl evidence is partial', async () => {
+  const { resolved } = await resolveBilibili({
+    site: 'bilibili',
+    input: 'https://www.bilibili.com/video/BV1partialEvidence/',
+    bilibiliApiEvidence: {
+      viewPayload: {
+        data: {
+          bvid: 'BV1partialEvidence',
+          pages: [{ cid: 9901, page: 1 }],
+        },
+      },
+    },
+    dryRun: true,
+  });
+
+  assert.equal(resolved.resources.length, 0);
+  assert.equal(resolved.completeness.reason, 'legacy-downloader-required');
 });
 
 test('bilibili ordinary input without fixture payload still falls back to legacy resolution', async () => {

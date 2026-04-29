@@ -222,22 +222,36 @@ function socialMediaContainers(request = {}, siteKey = '') {
     request.mediaResources,
     request.mediaItems,
     request.archiveItems,
+    request.archivePayload,
+    request.socialArchivePayload,
     request.items,
     request.resources,
     siteKey === 'x' ? request.xMediaItems : undefined,
     siteKey === 'x' ? request.xArchiveItems : undefined,
+    siteKey === 'x' ? request.xTimelinePayload : undefined,
+    siteKey === 'x' ? request.xApiTimelinePayload : undefined,
+    siteKey === 'x' ? request.xArchivePayload : undefined,
     siteKey === 'instagram' ? request.instagramMediaItems : undefined,
     siteKey === 'instagram' ? request.instagramFeedUserPayload : undefined,
+    siteKey === 'instagram' ? request.instagramArchivePayload : undefined,
+    siteKey === 'instagram' ? request.instagramGraphqlPayload : undefined,
     siteKey === 'instagram' ? request.feedUserPayload : undefined,
     metadata.socialMediaResources,
     metadata.mediaResources,
     metadata.mediaItems,
     metadata.archiveItems,
+    metadata.archivePayload,
+    metadata.socialArchivePayload,
     metadata.items,
     siteKey === 'x' ? metadata.xMediaItems : undefined,
     siteKey === 'x' ? metadata.xArchiveItems : undefined,
+    siteKey === 'x' ? metadata.xTimelinePayload : undefined,
+    siteKey === 'x' ? metadata.xApiTimelinePayload : undefined,
+    siteKey === 'x' ? metadata.xArchivePayload : undefined,
     siteKey === 'instagram' ? metadata.instagramMediaItems : undefined,
     siteKey === 'instagram' ? metadata.instagramFeedUserPayload : undefined,
+    siteKey === 'instagram' ? metadata.instagramArchivePayload : undefined,
+    siteKey === 'instagram' ? metadata.instagramGraphqlPayload : undefined,
     siteKey === 'instagram' ? metadata.feedUserPayload : undefined,
   ].filter(Boolean);
 }
@@ -261,21 +275,41 @@ function selectBestXVideoVariant(variants = []) {
     ?? toArray(variants).find((variant) => isObject(variant) && firstText(variant.url, variant.src));
 }
 
+function firstInstagramImageCandidate(entry = {}) {
+  return firstText(
+    entry.image_versions2?.candidates?.[0]?.url,
+    entry.display_url,
+    entry.displayUrl,
+    entry.thumbnail_src,
+    entry.thumbnailSrc,
+  );
+}
+
 function directUrlFromSocialMedia(entry = {}) {
   if (typeof entry === 'string') {
     return entry;
   }
-  const variant = selectBestXVideoVariant(entry.variants ?? entry.videoVariants ?? entry.video_variants);
+  const variant = selectBestXVideoVariant(
+    entry.variants
+      ?? entry.videoVariants
+      ?? entry.video_variants
+      ?? entry.video_info?.variants
+      ?? entry.videoInfo?.variants,
+  );
   return firstText(
     entry.url,
     entry.downloadUrl,
     entry.mediaUrl,
+    entry.media_url_https,
+    entry.media_url,
     entry.bestUrl,
     entry.imageUrl,
     entry.videoUrl,
+    entry.video_url,
+    entry.videoUrl,
     entry.src,
     entry.href,
-    entry.image_versions2?.candidates?.[0]?.url,
+    firstInstagramImageCandidate(entry),
     entry.video_versions?.[0]?.url,
     entry.videoVersion?.url,
     variant?.url,
@@ -298,10 +332,10 @@ function mediaTypeFromSocialMedia(entry = {}, url = '') {
   if (contentType.includes('video/')) {
     return 'video';
   }
-  if (entry.video_versions || entry.videoVariants || entry.variants) {
+  if (entry.video_versions || entry.videoVariants || entry.variants || entry.video_info || entry.videoInfo || entry.video_url) {
     return 'video';
   }
-  if (entry.image_versions2 || entry.imageUrl) {
+  if (entry.image_versions2 || entry.imageUrl || entry.display_url || entry.thumbnail_src || entry.media_url_https) {
     return 'image';
   }
   return inferMediaTypeFromUrl(url) || 'binary';
@@ -324,6 +358,26 @@ function socialMediaChildValues(value = {}) {
     value.videos,
     value.carousel_media,
     value.carouselMedia,
+    value.edge_sidecar_to_children,
+    value.edgeSidecarToChildren,
+    value.edges,
+    value.node,
+    value.entries,
+    value.instructions,
+    value.data,
+    value.user,
+    value.timeline_v2,
+    value.timeline,
+    value.content,
+    value.itemContent,
+    value.tweet_results,
+    value.tweetResults,
+    value.result,
+    value.legacy,
+    value.extended_entities,
+    value.extendedEntities,
+    value.shortcode_media,
+    value.shortcodeMedia,
     value.items,
     value.data?.items,
     value.data?.user?.edge_owner_to_timeline_media?.edges?.map((edge) => edge.node),
@@ -338,7 +392,7 @@ function socialMediaEntries(value = {}, inherited = {}) {
   while (stack.length > 0 && entries.length < 2000) {
     const current = stack.pop();
     const currentValue = current?.value;
-    if (currentValue == null || current.depth > 8) {
+    if (currentValue == null || current.depth > 24) {
       continue;
     }
     if (typeof currentValue === 'string') {
@@ -362,11 +416,18 @@ function socialMediaEntries(value = {}, inherited = {}) {
 
     const nextInherited = {
       ...current.inherited,
-      postId: firstText(currentValue.postId, currentValue.id, currentValue.pk, currentValue.tweetId, currentValue.rest_id, current.inherited.postId),
+      postId: firstText(currentValue.postId, current.inherited.postId, currentValue.id, currentValue.id_str, currentValue.pk, currentValue.tweetId, currentValue.rest_id),
       shortcode: firstText(currentValue.shortcode, currentValue.code, current.inherited.shortcode),
       permalink: firstText(currentValue.permalink, currentValue.url, currentValue.link, current.inherited.permalink),
       title: firstText(currentValue.title, currentValue.full_text, currentValue.text, captionText(currentValue.caption), current.inherited.title),
-      author: firstText(currentValue.author, currentValue.user?.username, currentValue.user?.screen_name, currentValue.owner?.username, current.inherited.author),
+      author: firstText(
+        currentValue.author,
+        currentValue.user?.username,
+        currentValue.user?.screen_name,
+        currentValue.core?.user_results?.result?.legacy?.screen_name,
+        currentValue.owner?.username,
+        current.inherited.author,
+      ),
     };
 
     if (directUrlFromSocialMedia(currentValue)) {
@@ -386,7 +447,7 @@ function seedFromSocialMediaEntry(entry = {}, siteKey, plan, request = {}, index
     return null;
   }
   const mediaType = mediaTypeFromSocialMedia(entry, url);
-  const postId = firstText(entry.postId, entry.id, entry.pk, entry.tweetId, entry.rest_id, entry.shortcode, entry.code);
+  const postId = firstText(entry.postId, entry.id, entry.id_str, entry.pk, entry.tweetId, entry.rest_id, entry.shortcode, entry.code);
   const title = firstText(entry.title, entry.text, entry.full_text, captionText(entry), postId, `${siteKey}-media-${index + 1}`);
   const sourceUrl = firstText(
     entry.permalink,

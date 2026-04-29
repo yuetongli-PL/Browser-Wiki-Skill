@@ -211,7 +211,10 @@ test('xiaohongshu native resolver maps search, author, and followed mock notes t
   }, null, {
     queryXiaohongshuFollow: async (query) => {
       queryCalled = true;
+      assert.equal(query.contractVersion, 'xiaohongshu-native-resolver-deps-v1');
       assert.equal(query.intent, 'list-followed-users');
+      assert.equal(query.sourceType, 'followed-users');
+      assert.equal(query.allowNetworkResolve, false);
       return {
         notes: [{
           noteId: 'followed-note-1',
