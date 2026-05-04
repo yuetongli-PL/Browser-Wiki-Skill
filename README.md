@@ -208,6 +208,17 @@ Download operations move behind the unified runner. The runner is dry-run by def
 
 The runner and Site Capability Layer are under active development. Treat the Site Capability Layer matrix and focused regression batch definition in `CONTRIBUTING.md` as the current progress ledger.
 
+BZ888 also has a standalone public-direct script outside the unified downloader:
+
+```powershell
+python .\src\sites\bz888\download\python\bz888.py --book-url https://www.bz888888888.com/52/52885/ --out-dir .\book-content\bz888-direct
+```
+
+This script reads only public BZ888 HTML, decodes GBK/GB18030 pages, builds a
+TXT plus manifest, and stops with `blocked-by-cloudflare-challenge` when the
+site serves a Cloudflare challenge. It does not read browser cookies, accept
+cookie arguments, use browser profiles, or reuse downloader session material.
+
 ## Network Governance (No Dedicated IP)
 
 For Douyin and similar login-gated sites, the operating assumption is **no dedicated IP**. The supported strategy is to keep using the current trusted network consistently, not to rotate exits or depend on a pinned egress address.
