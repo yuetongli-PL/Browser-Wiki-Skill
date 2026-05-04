@@ -1,6 +1,6 @@
 // @ts-check
 
-import { hostFromUrl } from '../../../shared/normalize.mjs';
+import { hostFromUrl, sanitizeHost } from '../../../shared/normalize.mjs';
 import { readSiteContext } from '../context.mjs';
 import { maybeLoadValidatedProfileForHost, maybeLoadValidatedProfileForUrl } from '../profiles.mjs';
 import { chapterContentAdapter } from './chapter-content.mjs';
@@ -9,11 +9,35 @@ import { douyinAdapter } from './douyin.mjs';
 import { genericNavigationAdapter } from './generic-navigation.mjs';
 import { instagramAdapter } from './instagram.mjs';
 import { jableAdapter } from './jable.mjs';
+import {
+  attackersAdapter,
+  dahliaAvAdapter,
+  dogmaAdapter,
+  eightManAdapter,
+  kmProduceAdapter,
+  madonnaAvAdapter,
+  maxingAdapter,
+  rookieAvAdapter,
+  sodAdapter,
+  s1Adapter,
+  tPowersAdapter,
+} from './jp-av-catalog.mjs';
 import { moodyzAdapter } from './moodyz.mjs';
 import { xAdapter } from './x.mjs';
 import { xiaohongshuAdapter } from './xiaohongshu.mjs';
 
 const ADAPTERS = Object.freeze([
+  rookieAvAdapter,
+  madonnaAvAdapter,
+  dahliaAvAdapter,
+  sodAdapter,
+  s1Adapter,
+  attackersAdapter,
+  tPowersAdapter,
+  eightManAdapter,
+  dogmaAdapter,
+  kmProduceAdapter,
+  maxingAdapter,
   jableAdapter,
   moodyzAdapter,
   bilibiliAdapter,
@@ -24,6 +48,10 @@ const ADAPTERS = Object.freeze([
   chapterContentAdapter,
   genericNavigationAdapter,
 ]);
+
+export function listSiteAdapters() {
+  return [...ADAPTERS];
+}
 
 function resolveHost({ host, inputUrl, siteContext, profile } = {}) {
   return String(
@@ -99,6 +127,15 @@ export function resolveSiteIdentity({
     adapterId: storedAdapterId ?? resolvedAdapter?.id ?? genericNavigationAdapter.id,
     siteKey: storedSiteKey ?? firstNonEmptyString([derivedSiteKey, resolvedAdapter?.id, genericNavigationAdapter.id]),
   };
+}
+
+export function resolveSiteKeyFromHost(host) {
+  const resolvedHost = sanitizeHost(resolveHost({ host }));
+  const identity = resolveSiteIdentity({ host: resolvedHost });
+  if (identity.adapter?.id === genericNavigationAdapter.id) {
+    return resolvedHost;
+  }
+  return firstNonEmptyString([identity.siteKey, resolvedHost]) ?? resolvedHost;
 }
 
 export async function resolveSite({

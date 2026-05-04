@@ -1,7 +1,12 @@
 // @ts-check
 
 import { cleanText, hostFromUrl, normalizeWhitespace } from '../../../shared/normalize.mjs';
+import {
+  normalizeSiteAdapterCandidateDecision,
+  normalizeSiteAdapterCatalogUpgradePolicy,
+} from '../../capability/api-candidates.mjs';
 import { createCatalogAdapter } from './factory.mjs';
+import { normalizeSiteAdapterSemanticEntry } from './generic-navigation.mjs';
 
 export const JABLE_TERMINOLOGY = Object.freeze({
   entityLabel: '\u5f71\u7247',
@@ -72,6 +77,22 @@ function parseUrl(input) {
   } catch {
     return null;
   }
+}
+
+function endpointParts(candidate = {}) {
+  const parsed = parseUrl(candidate?.endpoint?.url);
+  return {
+    host: parsed?.hostname.toLowerCase() ?? '',
+    pathname: parsed?.pathname ?? '',
+  };
+}
+
+function isJableApiCandidate(candidate = {}) {
+  const siteKey = String(candidate?.siteKey ?? '').trim();
+  const { host, pathname } = endpointParts(candidate);
+  return siteKey === 'jable'
+    && host === 'jable.tv'
+    && pathname.startsWith('/api/');
 }
 
 function normalizePathnameValue(pathname) {
@@ -254,5 +275,109 @@ export const jableAdapter = createCatalogAdapter({
       kind: 'author-path',
       detail: modelsPathKind,
     };
+  },
+  describeApiCandidateSemantics({
+    candidate,
+    scope = {},
+  } = {}) {
+    const { host, pathname } = endpointParts(candidate);
+    return normalizeSiteAdapterSemanticEntry({
+      candidate,
+      scope: {
+        semanticMode: 'jable-api-candidate',
+        endpointHost: host,
+        endpointPath: pathname,
+        siteSurface: 'catalog-video-api',
+        ...scope,
+      },
+      semantics: {
+        auth: {
+          ...candidate?.auth,
+          authenticationRequired: false,
+          requirements: [
+            'public catalog endpoint',
+            'optional redacted browser session for region or age-gate continuity',
+          ],
+          credentialPolicy: 'redacted-session-view-only',
+        },
+        pagination: {
+          ...candidate?.pagination,
+          model: 'page-number',
+          pageParam: 'page',
+          firstPage: 1,
+          nextPageSource: 'response pagination metadata or page increment until empty items',
+        },
+        fieldMapping: {
+          ...candidate?.fieldMapping,
+          itemsPath: 'data.items',
+          idPath: 'id or slug',
+          titlePath: 'title',
+          detailUrlPath: 'url',
+          thumbnailPath: 'thumbnail',
+          actorPaths: ['actors', 'models'],
+          tagPaths: ['tags', 'categories'],
+        },
+        risk: {
+          ...candidate?.risk,
+          hints: [
+            'adult-catalog surface',
+            'avoid persisting raw request or response bodies',
+            'treat auth/session material as redacted optional context',
+          ],
+          downloaderBoundary: 'resolved resource consumer only',
+        },
+      },
+    }, {
+      adapterId: 'jable',
+      siteKey: 'jable',
+    });
+  },
+  validateApiCandidate({
+    candidate,
+    evidence = {},
+    scope = {},
+    validatedAt,
+  } = {}) {
+    const { host, pathname } = endpointParts(candidate);
+    const accepted = isJableApiCandidate(candidate);
+    return normalizeSiteAdapterCandidateDecision({
+      adapterId: 'jable',
+      decision: accepted ? 'accepted' : 'rejected',
+      reasonCode: accepted ? undefined : 'api-verification-failed',
+      validatedAt,
+      scope: {
+        validationMode: 'jable-api-candidate',
+        endpointHost: host,
+        endpointPath: pathname,
+        ...scope,
+      },
+      evidence,
+    }, { candidate });
+  },
+  getApiCatalogUpgradePolicy({
+    candidate,
+    siteAdapterDecision,
+    evidence = {},
+    scope = {},
+    decidedAt,
+  } = {}) {
+    const { host, pathname } = endpointParts(candidate);
+    const accepted = siteAdapterDecision?.decision === 'accepted' && isJableApiCandidate(candidate);
+    return normalizeSiteAdapterCatalogUpgradePolicy({
+      adapterId: 'jable',
+      allowCatalogUpgrade: accepted,
+      reasonCode: accepted ? undefined : 'api-catalog-entry-blocked',
+      decidedAt,
+      scope: {
+        policyMode: 'jable-api',
+        endpointHost: host,
+        endpointPath: pathname,
+        ...scope,
+      },
+      evidence,
+    }, {
+      candidate,
+      siteAdapterDecision,
+    });
   },
 });

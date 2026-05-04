@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 
 import {
   buildSiteCapabilitiesPath,
@@ -16,6 +16,7 @@ import {
   readSiteRegistry,
   upsertSiteRegistryRecord,
 } from '../../src/sites/catalog/registry.mjs';
+import { createSiteIndexStore } from '../../src/sites/catalog/index.mjs';
 import { createSiteMetadataSandbox } from './helpers/site-metadata-sandbox.mjs';
 
 test('site registry and capabilities return default empty documents before first write', async () => {
@@ -62,6 +63,108 @@ test('site registry upserts host operational metadata', async () => {
     assert.equal(stableRegistry.sites['www.22biqu.com'].latestDownloadMode, undefined);
     assert.equal(runtimeRegistry.sites['www.22biqu.com'].latestDownloadMode, 'artifact-hit');
     assert.equal(mergedRegistry.sites['www.22biqu.com'].latestDownloadMode, 'artifact-hit');
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('site index writer redacts sensitive patch fields and can write an audit sidecar', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-index-redaction-'));
+  try {
+    const store = createSiteIndexStore({
+      fileName: 'site-index-redaction.json',
+      directoryName: 'runs/site-metadata',
+      resultPathKey: 'indexPath',
+    });
+    const auditPath = path.join(workspace, 'runs', 'site-metadata', 'site-index-redaction.audit.json');
+    const result = await store.upsert(workspace, 'example.test', {
+      siteKey: 'example',
+      latestDiagnostic: {
+        Authorization: 'Bearer synthetic-site-index-token',
+        Cookie: 'sid=synthetic-site-index-cookie',
+        csrfToken: 'synthetic-site-index-csrf',
+        safeValue: 'kept',
+      },
+    }, {
+      redactionAuditPath: auditPath,
+    });
+
+    const persistedText = await readFile(result.indexPath, 'utf8');
+    const auditText = await readFile(result.redactionAuditPath, 'utf8');
+    const persisted = JSON.parse(persistedText);
+    const audit = JSON.parse(auditText);
+
+    assert.equal(persisted.sites['example.test'].latestDiagnostic.safeValue, 'kept');
+    assert.equal(result.record.latestDiagnostic.safeValue, 'kept');
+    assert.doesNotMatch(
+      `${persistedText}\n${auditText}\n${JSON.stringify(result)}`,
+      /synthetic-site-index-|Bearer/iu,
+    );
+    assert.ok(audit.redactedPaths.some((entry) => entry.includes('latestDiagnostic.Authorization')));
+    assert.ok(audit.redactedPaths.some((entry) => entry.includes('latestDiagnostic.Cookie')));
+    assert.ok(audit.redactedPaths.some((entry) => entry.includes('latestDiagnostic.csrfToken')));
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('site index writer can fail closed when a redaction audit sidecar is required', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-index-audit-required-'));
+  try {
+    const store = createSiteIndexStore({
+      fileName: 'site-index-audit-required.json',
+      directoryName: 'runs/site-metadata',
+      resultPathKey: 'indexPath',
+      requireRedactionAudit: true,
+    });
+
+    await assert.rejects(
+      () => store.upsert(workspace, 'example.test', { siteKey: 'example' }),
+      /redactionAuditPath is required/u,
+    );
+    await assert.rejects(
+      () => access(store.buildPath(workspace)),
+      /ENOENT/u,
+    );
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('site index writer preserves the existing document when audit sidecar write is invalid', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-index-no-partial-'));
+  try {
+    const store = createSiteIndexStore({
+      fileName: 'site-index-no-partial.json',
+      directoryName: 'runs/site-metadata',
+      resultPathKey: 'indexPath',
+    });
+    const auditPath = path.join(workspace, 'runs', 'site-metadata', 'site-index-no-partial.audit.json');
+    const result = await store.upsert(workspace, 'example.test', {
+      siteKey: 'example',
+      stableValue: 'original',
+    }, {
+      redactionAuditPath: auditPath,
+    });
+    const originalText = await readFile(result.indexPath, 'utf8');
+
+    await rm(auditPath, { force: true });
+    await mkdir(auditPath, { recursive: true });
+    await assert.rejects(
+      () => store.upsert(workspace, 'example.test', {
+        siteKey: 'example',
+        stableValue: 'should-not-persist',
+      }, {
+        redactionAuditPath: auditPath,
+      }),
+      /output path must not be a directory/u,
+    );
+
+    assert.equal(await readFile(result.indexPath, 'utf8'), originalText);
+    assert.equal(
+      JSON.parse(await readFile(result.indexPath, 'utf8')).sites['example.test'].stableValue,
+      'original',
+    );
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

@@ -174,6 +174,24 @@ const downloaderSchema = {
   },
 };
 
+const ocrSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['enabled', 'engine', 'imageSourceAttributes', 'textAttributes'],
+  properties: {
+    enabled: { type: 'boolean' },
+    required: { type: 'boolean' },
+    engine: nonEmptyString(),
+    command: nonEmptyString(),
+    languages: nonEmptyString(),
+    pageSegmentationMode: integer(1),
+    timeoutSeconds: integer(1),
+    preserveImagePlaceholders: { type: 'boolean' },
+    imageSourceAttributes: stringArray({ minItems: 1 }),
+    textAttributes: stringArray({ minItems: 1 }),
+  },
+};
+
 const looseObjectSchema = {
   type: 'object',
   additionalProperties: true,
@@ -216,6 +234,22 @@ const searchSchema = {
     resultTitleSelectors: stringArray({ minItems: 1 }),
     resultBookSelectors: stringArray({ minItems: 1 }),
     queryParamNames: stringArray({ minItems: 1 }),
+    requestCandidates: {
+      type: 'array',
+      minItems: 1,
+      items: {
+        type: 'object',
+        additionalProperties: true,
+        properties: {
+          method: nonEmptyString(),
+          path: nonEmptyString(),
+          url: nonEmptyString(),
+          urlTemplate: nonEmptyString(),
+          query: looseObjectSchema,
+          data: looseObjectSchema,
+        },
+      },
+    },
     defaultQueries: stringArray(),
     knownQueries: {
       type: 'array',
@@ -371,6 +405,7 @@ const chapterContentSchema = {
   required: ['host', 'version', 'archetype', 'schemaVersion', 'search', 'bookDetail', 'chapter'],
   properties: {
     ...baseProfileProperties(PROFILE_ARCHETYPES.CHAPTER_CONTENT),
+    ocr: ocrSchema,
     search: searchSchema,
     bookDetail: {
       type: 'object',
@@ -394,6 +429,8 @@ const chapterContentSchema = {
         latestChapterNameMetaNames: stringArray({ minItems: 1 }),
         latestChapterMetaNames: stringArray({ minItems: 1 }),
         updateTimeMetaNames: stringArray({ minItems: 1 }),
+        bookUrlPatterns: stringArray(),
+        chapterUrlPatterns: stringArray(),
         chapterLinkSelectors: stringArray({ minItems: 1 }),
         directoryLinkSelectors: stringArray({ minItems: 1 }),
         directoryPageUrlTemplate: nonEmptyString({

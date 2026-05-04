@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process';
 
 import { initializeCliUtf8, writeJsonStdout } from '../../infra/cli.mjs';
 import { openBrowserSession } from '../../infra/browser/session.mjs';
-import { ensureDir, pathExists, readJsonFile, writeJsonFile, writeTextFile } from '../../infra/io.mjs';
+import { ensureDir, pathExists, readJsonFile, writeTextFile } from '../../infra/io.mjs';
 import { sanitizeHost, toArray, uniqueSortedStrings } from '../../shared/normalize.mjs';
 import { detectXiaohongshuRestrictionPage, isXiaohongshuUrl } from '../../shared/xiaohongshu-risk.mjs';
 import { PROFILE_ARCHETYPES } from '../../sites/core/archetypes.mjs';
@@ -38,9 +38,37 @@ import { capture } from '../pipeline/capture.mjs';
 import { derivePageFacts, expandStates } from '../pipeline/expand-states.mjs';
 import { siteKeepalive } from './site-keepalive.mjs';
 import { siteLogin } from './site-login.mjs';
+import {
+  REDACTION_PLACEHOLDER,
+  SECURITY_GUARD_SCHEMA_VERSION,
+  assertNoForbiddenPatterns,
+  prepareRedactedArtifactJson,
+  prepareRedactedArtifactJsonWithAudit,
+  redactValue,
+} from '../../sites/capability/security-guard.mjs';
+import { reasonCodeSummary } from '../../sites/capability/reason-codes.mjs';
+import {
+  createSiteOnboardingDiscoveryArtifacts,
+  createSiteOnboardingDiscoveryInputFromCaptureExpand,
+} from '../../sites/capability/site-onboarding-discovery.mjs';
+import {
+  SiteHealthRecoveryEngine,
+  normalizeSiteAdapterHealthSignal,
+} from '../../sites/capability/site-health-recovery.mjs';
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(MODULE_DIR, '..', '..', '..');
+
+const SITE_DOCTOR_REPORT_PROFILE_KEYS = Object.freeze(new Set([
+  'profilePath',
+  'browserProfileRoot',
+  'userDataDir',
+  'cookieFile',
+  'sidecarPath',
+  'networkIdentityFingerprint',
+  'sessionLeaseId',
+  'fingerprint',
+]));
 const BILIBILI_DOWNLOAD_PYTHON_ENTRY = path.join(REPO_ROOT, 'src', 'sites', 'bilibili', 'download', 'python', 'bilibili.py');
 const BOOK_DOWNLOAD_PYTHON_ENTRY = path.join(REPO_ROOT, 'src', 'sites', 'chapter-content', 'download', 'python', 'book.py');
 const XIAOHONGSHU_ACTION_ENTRY = path.join(REPO_ROOT, 'src', 'entrypoints', 'sites', 'xiaohongshu-action.mjs');
@@ -511,6 +539,145 @@ function summarizeReportRisk(report) {
   };
 }
 
+function createHealthSignalFromReason({
+  siteId,
+  rawSignal,
+  affectedCapability,
+  metadata = {},
+}) {
+  if (!rawSignal) {
+    return null;
+  }
+  return {
+    siteId,
+    rawSignal,
+    affectedCapability,
+    metadata,
+  };
+}
+
+function collectSiteDoctorHealthSignals(report = {}) {
+  const siteId = report.site?.siteKey ?? report.site?.host ?? 'unknown-site';
+  const signals = [
+    createHealthSignalFromReason({
+      siteId,
+      rawSignal: report.riskCauseCode,
+      affectedCapability: 'site.health',
+      metadata: {
+        riskAction: report.riskAction,
+        source: 'site-doctor.report-risk',
+      },
+    }),
+    createHealthSignalFromReason({
+      siteId,
+      rawSignal: report.authSession?.riskCauseCode,
+      affectedCapability: 'session.reuse',
+      metadata: {
+        riskAction: report.authSession?.riskAction,
+        source: 'site-doctor.auth-session',
+      },
+    }),
+    createHealthSignalFromReason({
+      siteId,
+      rawSignal: report.sessionHealth?.reason,
+      affectedCapability: 'session.reuse',
+      metadata: {
+        repairAction: report.sessionHealth?.repairPlan?.action,
+        source: 'site-doctor.session-health',
+      },
+    }),
+    createHealthSignalFromReason({
+      siteId,
+      rawSignal: report.antiCrawlReasonCode,
+      affectedCapability: 'capture.read',
+      metadata: {
+        source: 'site-doctor.capture',
+        antiCrawlSignals: report.antiCrawlSignals,
+      },
+    }),
+  ].filter(Boolean);
+
+  for (const scenario of Array.isArray(report.scenarios) ? report.scenarios : []) {
+    const rawSignal = scenario.riskCauseCode ?? scenario.reasonCode;
+    const signal = createHealthSignalFromReason({
+      siteId,
+      rawSignal,
+      affectedCapability: scenario.expectedSemanticPageType
+        ? `${scenario.expectedSemanticPageType}.read`
+        : 'scenario.read',
+      metadata: {
+        scenarioId: scenario.id,
+        source: 'site-doctor.scenario',
+        status: scenario.status,
+      },
+    });
+    if (signal) {
+      signals.push(signal);
+    }
+  }
+  const seen = new Set();
+  return signals.filter((signal) => {
+    const key = [
+      signal.siteId,
+      signal.rawSignal,
+      signal.affectedCapability,
+      signal.metadata?.source,
+      signal.metadata?.scenarioId,
+    ].join('|');
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+export async function createSiteDoctorHealthRecovery({
+  report,
+  adapter = null,
+  engine = new SiteHealthRecoveryEngine(),
+} = {}) {
+  const siteId = report?.site?.siteKey ?? report?.site?.host ?? 'unknown-site';
+  const rawSignals = collectSiteDoctorHealthSignals(report);
+  if (!rawSignals.length) {
+    const emptyReport = {
+      schemaVersion: 1,
+      report: {
+        schemaVersion: 1,
+        siteId,
+        status: 'healthy',
+        risks: [],
+        affectedCapabilities: [],
+        capabilityHealth: [],
+        recommendedActions: [],
+      },
+      recovery: {
+        actions: [],
+        auditLog: [],
+      },
+    };
+    assertNoForbiddenPatterns(emptyReport);
+    return emptyReport;
+  }
+  const normalizedRisks = rawSignals.map((signal) => (
+    adapter
+      ? normalizeSiteAdapterHealthSignal(adapter, signal, { siteId })
+      : signal
+  ));
+  return await engine.recover({
+    siteId,
+    risks: normalizedRisks,
+    capabilities: uniqueSortedStrings([
+      'profile.read',
+      'search.read',
+      'capture.read',
+      'session.reuse',
+      ...normalizedRisks.map((risk) => risk.affectedCapability).filter(Boolean),
+    ]),
+    adapter,
+  });
+}
+
 function summarizeDoctorBudget(expandManifest, settings) {
   const stopReason = (expandManifest?.warnings ?? []).find((warning) => /Expansion stopped after reaching /u.test(String(warning))) ?? null;
   return {
@@ -636,6 +803,16 @@ function buildReportMarkdown(report) {
     lines.push(`- Network identity fingerprint: ${report.networkIdentityFingerprint ?? 'none'}`);
     lines.push(`- Profile quarantined: ${report.profileQuarantined ? 'yes' : 'no'}`);
   }
+  if (report.healthRecovery?.report) {
+    lines.push('', '## Health Recovery', '');
+    lines.push(`- Status: ${report.healthRecovery.report.status ?? 'unknown'}`);
+    lines.push(`- Risks: ${Array.isArray(report.healthRecovery.report.risks) && report.healthRecovery.report.risks.length
+      ? report.healthRecovery.report.risks.map((risk) => `${risk.type}:${risk.affectedCapability ?? 'site'}`).join(', ')
+      : 'none'}`);
+    lines.push(`- Recommended actions: ${Array.isArray(report.healthRecovery.report.recommendedActions) && report.healthRecovery.report.recommendedActions.length
+      ? report.healthRecovery.report.recommendedActions.join(', ')
+      : 'none'}`);
+  }
   if (
     report.antiCrawlReasonCode
     || (Array.isArray(report.antiCrawlSignals) && report.antiCrawlSignals.length > 0)
@@ -676,6 +853,197 @@ function buildReportMarkdown(report) {
     }
   }
   return lines.join('\n');
+}
+
+function isPlainObject(value) {
+  return value !== null
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+function auditPath(pathParts) {
+  return pathParts.join('.');
+}
+
+function redactSiteDoctorProfileRefs(value, pathParts = [], audit = {
+  schemaVersion: SECURITY_GUARD_SCHEMA_VERSION,
+  redactedPaths: [],
+  findings: [],
+}) {
+  if (Array.isArray(value)) {
+    return {
+      value: value.map((item, index) => redactSiteDoctorProfileRefs(item, [...pathParts, String(index)], audit).value),
+      audit,
+    };
+  }
+  if (!isPlainObject(value)) {
+    return { value, audit };
+  }
+  const output = {};
+  for (const [key, child] of Object.entries(value)) {
+    const childPath = [...pathParts, key];
+    if (SITE_DOCTOR_REPORT_PROFILE_KEYS.has(key)) {
+      output[key] = REDACTION_PLACEHOLDER;
+      audit.redactedPaths.push(auditPath(childPath));
+      continue;
+    }
+    output[key] = redactSiteDoctorProfileRefs(child, childPath, audit).value;
+  }
+  return { value: output, audit };
+}
+
+function mergeRedactionAudits(...audits) {
+  const redactedPaths = [];
+  const findings = [];
+  for (const audit of audits) {
+    if (!audit || typeof audit !== 'object') {
+      continue;
+    }
+    redactedPaths.push(...(Array.isArray(audit.redactedPaths) ? audit.redactedPaths : []));
+    findings.push(...(Array.isArray(audit.findings) ? audit.findings : []));
+  }
+  return {
+    schemaVersion: SECURITY_GUARD_SCHEMA_VERSION,
+    redactedPaths: [...new Set(redactedPaths)],
+    findings,
+  };
+}
+
+function createSiteDoctorReportRedactionFailure(error) {
+  const recovery = reasonCodeSummary('redaction-failed');
+  const causeSummary = redactValue({
+    name: error instanceof Error ? error.name : undefined,
+    code: error && typeof error === 'object' ? error.code : undefined,
+  }).value;
+  const failure = new Error('Redaction failed for site-doctor report; persistent report write blocked');
+  failure.name = 'SiteDoctorReportRedactionFailure';
+  failure.code = 'redaction-failed';
+  failure.reasonCode = 'redaction-failed';
+  failure.retryable = recovery.retryable;
+  failure.cooldownNeeded = recovery.cooldownNeeded;
+  failure.isolationNeeded = recovery.isolationNeeded;
+  failure.manualRecoveryNeeded = recovery.manualRecoveryNeeded;
+  failure.degradable = recovery.degradable;
+  failure.artifactWriteAllowed = recovery.artifactWriteAllowed;
+  failure.catalogAction = recovery.catalogAction;
+  failure.causeSummary = causeSummary;
+  return failure;
+}
+
+export function prepareSiteDoctorReportArtifacts(report) {
+  try {
+    const profileRedacted = redactSiteDoctorProfileRefs(report);
+    const preparedJson = prepareRedactedArtifactJsonWithAudit(profileRedacted.value);
+    const markdown = buildReportMarkdown(preparedJson.value);
+    const redactedMarkdown = redactValue(String(markdown ?? ''));
+    const markdownText = String(redactedMarkdown.value ?? '');
+    assertNoForbiddenPatterns(markdownText);
+    const jsonAudit = mergeRedactionAudits(profileRedacted.audit, preparedJson.auditValue);
+    const markdownAudit = mergeRedactionAudits(profileRedacted.audit, redactedMarkdown.audit);
+    return {
+      json: preparedJson.json,
+      jsonAudit: prepareRedactedArtifactJson(jsonAudit).json,
+      markdown: markdownText,
+      markdownAudit: prepareRedactedArtifactJson(markdownAudit).json,
+      value: preparedJson.value,
+    };
+  } catch (error) {
+    throw createSiteDoctorReportRedactionFailure(error);
+  }
+}
+
+export async function writeSiteDoctorReportArtifacts(report, {
+  reportDir,
+  jsonPath,
+  jsonAuditPath,
+  markdownPath,
+  markdownAuditPath,
+  healthRecoveryPath,
+  healthRecoveryAuditPath,
+}) {
+  const prepared = prepareSiteDoctorReportArtifacts(report);
+  const resolvedHealthRecoveryPath = healthRecoveryPath ?? (reportDir ? path.join(reportDir, 'health-recovery-report.json') : undefined);
+  const resolvedHealthRecoveryAuditPath = healthRecoveryAuditPath
+    ?? (reportDir ? path.join(reportDir, 'health-recovery-report.redaction-audit.json') : undefined);
+  const preparedHealthRecovery = report?.healthRecovery && resolvedHealthRecoveryPath && resolvedHealthRecoveryAuditPath
+    ? prepareRedactedArtifactJsonWithAudit(report.healthRecovery)
+    : null;
+  await ensureDir(reportDir);
+  await writeTextFile(jsonPath, prepared.json);
+  await writeTextFile(jsonAuditPath, prepared.jsonAudit);
+  await writeTextFile(markdownPath, prepared.markdown);
+  await writeTextFile(markdownAuditPath, prepared.markdownAudit);
+  if (preparedHealthRecovery) {
+    await writeTextFile(resolvedHealthRecoveryPath, preparedHealthRecovery.json);
+    await writeTextFile(resolvedHealthRecoveryAuditPath, preparedHealthRecovery.auditJson);
+  }
+  return prepared.value;
+}
+
+function siteOnboardingDiscoveryArtifactPaths(reportDir) {
+  const discoveryDir = path.join(reportDir, 'site-onboarding');
+  return {
+    directory: discoveryDir,
+    NODE_INVENTORY: path.join(discoveryDir, 'NODE_INVENTORY.md'),
+    API_INVENTORY: path.join(discoveryDir, 'API_INVENTORY.md'),
+    UNKNOWN_NODE_REPORT: path.join(discoveryDir, 'UNKNOWN_NODE_REPORT.md'),
+    SITE_CAPABILITY_REPORT: path.join(discoveryDir, 'SITE_CAPABILITY_REPORT.md'),
+    DISCOVERY_AUDIT: path.join(discoveryDir, 'DISCOVERY_AUDIT.md'),
+  };
+}
+
+async function writeSiteOnboardingDiscoveryArtifacts({
+  report,
+  reportDir,
+  siteKey,
+  captureManifest,
+  expandManifest = null,
+  states = [],
+  adapter = null,
+}) {
+  if (!captureManifest || typeof captureManifest !== 'object') {
+    return null;
+  }
+  const paths = siteOnboardingDiscoveryArtifactPaths(reportDir);
+  const discoveryInput = createSiteOnboardingDiscoveryInputFromCaptureExpand({
+    siteKey,
+    captureOutput: captureManifest,
+    expandOutput: expandManifest ? {
+      ...expandManifest,
+      states,
+    } : null,
+  });
+  const artifacts = createSiteOnboardingDiscoveryArtifacts({
+    siteKey,
+    discoveredNodes: discoveryInput.discoveredNodes,
+    discoveredApis: discoveryInput.discoveredApis,
+    adapter,
+  });
+
+  await ensureDir(paths.directory);
+  await writeTextFile(paths.NODE_INVENTORY, artifacts.markdown.NODE_INVENTORY);
+  await writeTextFile(paths.API_INVENTORY, artifacts.markdown.API_INVENTORY);
+  await writeTextFile(paths.UNKNOWN_NODE_REPORT, artifacts.markdown.UNKNOWN_NODE_REPORT);
+  await writeTextFile(paths.SITE_CAPABILITY_REPORT, artifacts.markdown.SITE_CAPABILITY_REPORT);
+  await writeTextFile(paths.DISCOVERY_AUDIT, artifacts.markdown.DISCOVERY_AUDIT);
+
+  const summary = {
+    ...paths,
+    schemaVersion: artifacts.schemaVersion,
+    source: discoveryInput.source,
+    producer: discoveryInput.producer,
+    nodes: artifacts.objects.NODE_INVENTORY.entries.length,
+    apis: artifacts.objects.API_INVENTORY.entries.length,
+    requiredCoverage: artifacts.gate.requiredCoverage,
+    requiredCoveragePercent: artifacts.gate.requiredCoveragePercent,
+    passed: artifacts.gate.passed,
+    failures: artifacts.gate.failures,
+    unknownNodes: artifacts.objects.UNKNOWN_NODE_REPORT.nodes.length,
+    unknownApis: artifacts.objects.UNKNOWN_NODE_REPORT.apis.length,
+  };
+  report.reports.siteOnboardingDiscovery = summary;
+  return summary;
 }
 
 async function maybeReadStateManifest(entry, deps) {
@@ -949,6 +1317,70 @@ function buildLoginBootstrapProbeResult(loginReport, fallbackFingerprint = null,
     bootstrapManualLoginRequired: status === 'credentials-unavailable' || auth.waitStatus === 'timeout',
     bootstrapReports: loginReport?.reports ?? null,
     bootstrapError: null,
+  };
+}
+
+function normalizeStatusText(value = '') {
+  return String(value ?? '').trim().toLowerCase();
+}
+
+function isBlockedSessionHealthReason(value = '') {
+  const reason = normalizeStatusText(value);
+  return ['not-logged-in', 'anti-crawl-challenge', 'anti-crawl-rate-limit', 'browser-fingerprint-risk', 'platform-boundary'].includes(reason)
+    || reason.startsWith('anti-crawl-')
+    || reason.includes('challenge')
+    || reason.includes('rate-limit')
+    || reason.includes('fingerprint');
+}
+
+function sessionHealthConfirmsReusableAuth(sessionHealth = null) {
+  const status = normalizeStatusText(sessionHealth?.status);
+  const healthStatus = normalizeStatusText(sessionHealth?.healthStatus);
+  const authStatus = normalizeStatusText(sessionHealth?.authStatus);
+  const reason = sessionHealth?.reason ?? sessionHealth?.riskCauseCode ?? healthStatus;
+  if (!sessionHealth || healthStatus !== 'ready' || !['passed', 'ready'].includes(status)) {
+    return false;
+  }
+  if (isBlockedSessionHealthReason(reason)) {
+    return false;
+  }
+  if (
+    authStatus.includes('not-')
+    || authStatus.includes('manual')
+    || authStatus.includes('expired')
+    || authStatus.includes('blocked')
+    || authStatus.includes('anonymous-only')
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function applySessionHealthAuthFallback(authProbe = null, sessionHealth = null) {
+  if (!sessionHealthConfirmsReusableAuth(sessionHealth) || authProbe?.authAvailable === true) {
+    return authProbe;
+  }
+  return {
+    ...(authProbe ?? {}),
+    attempted: authProbe?.attempted !== false,
+    authAvailable: true,
+    loginStateDetected: true,
+    identityConfirmed: authProbe?.identityConfirmed === true || sessionHealth?.identityConfirmed === true,
+    identitySource: authProbe?.identitySource ?? 'unified-session-health:ready',
+    currentUrl: authProbe?.currentUrl ?? null,
+    title: authProbe?.title ?? null,
+    riskCauseCode: authProbe?.riskCauseCode ?? sessionHealth?.riskCauseCode ?? null,
+    riskAction: authProbe?.riskAction ?? sessionHealth?.riskAction ?? null,
+    profileQuarantined: authProbe?.profileQuarantined === true,
+    bootstrapAttempted: authProbe?.bootstrapAttempted === true,
+    bootstrapStatus: authProbe?.bootstrapStatus ?? null,
+    bootstrapCredentialsSource: authProbe?.bootstrapCredentialsSource ?? null,
+    bootstrapPersistenceVerified: authProbe?.bootstrapPersistenceVerified === true,
+    bootstrapWaitedForManualLogin: authProbe?.bootstrapWaitedForManualLogin === true,
+    bootstrapManualLoginRequired: authProbe?.bootstrapManualLoginRequired === true,
+    bootstrapReports: authProbe?.bootstrapReports ?? null,
+    bootstrapError: authProbe?.bootstrapError ?? null,
+    sessionHealthFallback: true,
   };
 }
 
@@ -1516,6 +1948,23 @@ function buildNextActions(report, sample) {
   ].filter(Boolean));
 }
 
+function healthRecoveryNextActions(healthRecovery = null) {
+  const report = healthRecovery?.report;
+  if (!report) {
+    return [];
+  }
+  const actions = Array.isArray(report.recommendedActions) ? report.recommendedActions : [];
+  return uniqueSortedStrings([
+    actions.includes('require-user-action') ? 'Pause automation and complete the required user action on the official site before rerunning.' : null,
+    actions.includes('quarantine-site-profile') ? 'Keep the affected site profile quarantined until manual review clears the account or platform risk.' : null,
+    actions.includes('switch-to-readonly-mode') ? 'Run read-only workflows only; disable write/download/high-risk capabilities for this site until health recovers.' : null,
+    actions.includes('disable-risky-capability') ? 'Disable only the affected capability and keep unrelated healthy read capabilities available.' : null,
+    actions.includes('apply-backoff') ? 'Apply backoff before retrying and avoid burst retries.' : null,
+    actions.includes('reduce-concurrency') ? 'Reduce concurrency for this site before retrying.' : null,
+    actions.includes('safe-stop') ? 'Stop the current automated task instead of retrying through the risk state.' : null,
+  ].filter(Boolean));
+}
+
 async function runProcess(command, args, deps, options = {}) {
   const resolvedEnv = {
     ...process.env,
@@ -1755,7 +2204,11 @@ export async function siteDoctor(inputUrl, options = {}, deps = {}) {
   const reportDir = path.join(settings.outDir, `${formatTimestampForDir()}_${sanitizeHost(settings.host)}`);
   settings.reportDir = reportDir;
   const reportJsonPath = path.join(reportDir, 'doctor-report.json');
+  const reportJsonAuditPath = path.join(reportDir, 'doctor-report.redaction-audit.json');
   const reportMarkdownPath = path.join(reportDir, 'doctor-report.md');
+  const reportMarkdownAuditPath = path.join(reportDir, 'doctor-report.md.redaction-audit.json');
+  const healthRecoveryReportPath = path.join(reportDir, 'health-recovery-report.json');
+  const healthRecoveryAuditPath = path.join(reportDir, 'health-recovery-report.redaction-audit.json');
   const runtime = {
     capture,
     ensureCrawlerScript,
@@ -1811,12 +2264,17 @@ export async function siteDoctor(inputUrl, options = {}, deps = {}) {
     recoveryAttempted: false,
     recoveryStatus: null,
     riskRecovery: null,
+    healthRecovery: null,
     warnings: [],
     missingFields: [],
     nextActions: [],
     reports: {
       json: reportJsonPath,
+      jsonRedactionAudit: reportJsonAuditPath,
       markdown: reportMarkdownPath,
+      markdownRedactionAudit: reportMarkdownAuditPath,
+      healthRecovery: healthRecoveryReportPath,
+      healthRecoveryRedactionAudit: healthRecoveryAuditPath,
     },
   };
 
@@ -1950,6 +2408,7 @@ export async function siteDoctor(inputUrl, options = {}, deps = {}) {
 
       try {
         authProbe = await probeReusableLoginSession(inputUrl, settings, runtime, validatedProfile);
+        authProbe = applySessionHealthAuthFallback(authProbe, report.sessionHealth);
         report.sessionReuseWorked = authProbe.attempted ? authProbe.authAvailable : null;
         report.authSession = authProbe.attempted
           ? {
@@ -1970,6 +2429,7 @@ export async function siteDoctor(inputUrl, options = {}, deps = {}) {
               bootstrapManualLoginRequired: authProbe.bootstrapManualLoginRequired === true,
               bootstrapReports: authProbe.bootstrapReports ?? null,
               bootstrapError: authProbe.bootstrapError ?? null,
+              sessionHealthFallback: authProbe.sessionHealthFallback === true,
               sessionHealthSummary: keepalivePreflight?.sessionHealthSummaryAfter ?? keepalivePreflight?.sessionHealthSummary ?? null,
               keepalivePreflight: {
                 ran: keepalivePreflight?.ran === true,
@@ -1982,6 +2442,9 @@ export async function siteDoctor(inputUrl, options = {}, deps = {}) {
           : null;
         if (authProbe.attempted && !authProbe.authAvailable) {
           report.warnings.push(`No reusable logged-in ${authSiteLabel} session was detected; authenticated-only scenarios may be skipped.`);
+        }
+        if (authProbe.sessionHealthFallback) {
+          report.warnings.push(`Accepted ready unified ${authSiteLabel} session health as reusable auth evidence for authenticated scenario validation.`);
         }
         if (authProbe.bootstrapAttempted && authProbe.bootstrapStatus) {
           report.warnings.push(`Attempted ${authSiteLabel} auth bootstrap via site-login; status=${authProbe.bootstrapStatus}.`);
@@ -2056,8 +2519,23 @@ export async function siteDoctor(inputUrl, options = {}, deps = {}) {
       report.missingFields.push(...error.errors.map((entry) => entry.path));
     }
     report.nextActions = buildNextActions(report, sample);
-    await writeJsonFile(reportJsonPath, report);
-    await writeTextFile(reportMarkdownPath, buildReportMarkdown(report));
+    report.healthRecovery = await createSiteDoctorHealthRecovery({
+      report,
+      adapter: resolvedSite?.adapter ?? null,
+    });
+    report.nextActions = uniqueSortedStrings([
+      ...report.nextActions,
+      ...healthRecoveryNextActions(report.healthRecovery),
+    ]);
+    await writeSiteDoctorReportArtifacts(report, {
+      reportDir,
+      jsonPath: reportJsonPath,
+      jsonAuditPath: reportJsonAuditPath,
+      markdownPath: reportMarkdownPath,
+      markdownAuditPath: reportMarkdownAuditPath,
+      healthRecoveryPath: healthRecoveryReportPath,
+      healthRecoveryAuditPath,
+    });
     return report;
   }
 
@@ -2152,6 +2630,17 @@ export async function siteDoctor(inputUrl, options = {}, deps = {}) {
     if (activeRestriction?.restrictionDetected) {
       const restrictionMessage = `Xiaohongshu capture remained on restriction page${activeRestriction.riskPageCode ? ` ${activeRestriction.riskPageCode}` : ''}.`;
       markSkipped(report.expand, restrictionMessage);
+      try {
+        await writeSiteOnboardingDiscoveryArtifacts({
+          report,
+          reportDir,
+          siteKey: siteIdentity?.siteKey ?? downloadSiteKey,
+          captureManifest,
+          adapter: resolvedSite?.adapter ?? null,
+        });
+      } catch (error) {
+        report.warnings.push(`Site onboarding discovery artifact generation failed: ${error.message ?? error}`);
+      }
       if (sample && report.search.status === 'pending') {
         markFail(report.search, new Error(`${restrictionMessage} Search validation did not run.`));
       }
@@ -2199,6 +2688,19 @@ export async function siteDoctor(inputUrl, options = {}, deps = {}) {
         searchQueries: sample?.query ? [sample.query] : [],
       });
       const states = await collectExpandedStates(expandManifest, validatedProfile.profile, runtime);
+      try {
+        await writeSiteOnboardingDiscoveryArtifacts({
+          report,
+          reportDir,
+          siteKey: siteIdentity?.siteKey ?? downloadSiteKey,
+          captureManifest,
+          expandManifest,
+          states,
+          adapter: resolvedSite?.adapter ?? null,
+        });
+      } catch (error) {
+        report.warnings.push(`Site onboarding discovery artifact generation failed: ${error.message ?? error}`);
+      }
       const budget = summarizeDoctorBudget(expandManifest, settings);
       let searchState = sample
         ? findFirstState(states, (state) => state.pageType === 'search-results-page' || state.trigger?.kind === 'search-form')
@@ -2408,9 +2910,24 @@ export async function siteDoctor(inputUrl, options = {}, deps = {}) {
   report.warnings = uniqueSortedStrings(report.warnings);
   report.missingFields = uniqueSortedStrings(report.missingFields);
   Object.assign(report, summarizeReportRisk(report));
+  report.healthRecovery = await createSiteDoctorHealthRecovery({
+    report,
+    adapter: resolvedSite?.adapter ?? null,
+  });
+  report.nextActions = uniqueSortedStrings([
+    ...report.nextActions,
+    ...healthRecoveryNextActions(report.healthRecovery),
+  ]);
 
-  await writeJsonFile(reportJsonPath, report);
-  await writeTextFile(reportMarkdownPath, buildReportMarkdown(report));
+  await writeSiteDoctorReportArtifacts(report, {
+    reportDir,
+    jsonPath: reportJsonPath,
+    jsonAuditPath: reportJsonAuditPath,
+    markdownPath: reportMarkdownPath,
+    markdownAuditPath: reportMarkdownAuditPath,
+    healthRecoveryPath: healthRecoveryReportPath,
+    healthRecoveryAuditPath,
+  });
   return report;
 }
 

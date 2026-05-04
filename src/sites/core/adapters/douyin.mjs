@@ -1,6 +1,10 @@
 // @ts-check
 
 import { cleanText } from '../../../shared/normalize.mjs';
+import {
+  normalizeSiteAdapterCandidateDecision,
+  normalizeSiteAdapterCatalogUpgradePolicy,
+} from '../../capability/api-candidates.mjs';
 import { inferDouyinPageTypeFromUrl } from '../../douyin/model/site.mjs';
 import { createCatalogAdapter } from './factory.mjs';
 
@@ -37,6 +41,93 @@ const INTENT_LABELS = Object.freeze({
   'list-followed-updates': '\u63d0\u53d6\u5173\u6ce8\u66f4\u65b0\u89c6\u9891',
 });
 
+function parseUrl(input) {
+  try {
+    return input ? new URL(input) : null;
+  } catch {
+    return null;
+  }
+}
+
+function endpointParts(candidate = {}) {
+  const parsed = parseUrl(candidate?.endpoint?.url);
+  return {
+    host: parsed?.hostname.toLowerCase() ?? '',
+    pathname: parsed?.pathname ?? '',
+  };
+}
+
+function isDouyinApiCandidate(candidate = {}) {
+  const siteKey = String(candidate?.siteKey ?? '').trim();
+  const { host, pathname } = endpointParts(candidate);
+  return siteKey === 'douyin'
+    && host === 'www.douyin.com'
+    && pathname.startsWith('/aweme/v1/');
+}
+
+const DOUYIN_HEALTH_SIGNAL_MAP = Object.freeze({
+  'login-required': Object.freeze({
+    type: 'login-required',
+    severity: 'high',
+    affectedCapability: 'auth.session',
+    autoRecoverable: false,
+    requiresUserAction: true,
+  }),
+  captcha: Object.freeze({
+    type: 'captcha-required',
+    severity: 'high',
+    affectedCapability: 'auth.challenge',
+    autoRecoverable: false,
+    requiresUserAction: true,
+  }),
+  mfa: Object.freeze({
+    type: 'mfa-required',
+    severity: 'high',
+    affectedCapability: 'auth.session',
+    autoRecoverable: false,
+    requiresUserAction: true,
+  }),
+  'rate-limit': Object.freeze({
+    type: 'rate-limited',
+    severity: 'medium',
+    affectedCapability: 'api.request',
+    autoRecoverable: true,
+    requiresUserAction: false,
+  }),
+  'permission-denied': Object.freeze({
+    type: 'permission-denied',
+    severity: 'high',
+    affectedCapability: 'content.read',
+    autoRecoverable: false,
+    requiresUserAction: true,
+  }),
+  csrf: Object.freeze({
+    type: 'csrf-invalid',
+    severity: 'medium',
+    affectedCapability: 'api.auth',
+    autoRecoverable: true,
+    requiresUserAction: false,
+  }),
+});
+
+function normalizeDouyinHealthSignal(rawSignal = {}) {
+  const signal = typeof rawSignal === 'string'
+    ? rawSignal
+    : String(rawSignal?.rawSignal ?? rawSignal?.signal ?? rawSignal?.reasonCode ?? 'unknown-health-risk');
+  const mapped = DOUYIN_HEALTH_SIGNAL_MAP[signal] ?? {
+    type: 'unknown-health-risk',
+    severity: 'medium',
+    autoRecoverable: false,
+    requiresUserAction: true,
+  };
+  return {
+    siteId: 'douyin',
+    rawSignal: signal,
+    ...mapped,
+    affectedCapability: rawSignal?.affectedCapability ?? rawSignal?.capabilityKey ?? mapped.affectedCapability,
+  };
+}
+
 export const douyinAdapter = createCatalogAdapter({
   id: 'douyin',
   hosts: DOUYIN_HOSTS,
@@ -46,4 +137,53 @@ export const douyinAdapter = createCatalogAdapter({
     return inferDouyinPageTypeFromUrl(inputUrl);
   },
   normalizeDisplayLabel: ({ value }) => cleanText(value),
+  validateApiCandidate({
+    candidate,
+    evidence = {},
+    scope = {},
+    validatedAt,
+  } = {}) {
+    const { host, pathname } = endpointParts(candidate);
+    const accepted = isDouyinApiCandidate(candidate);
+    return normalizeSiteAdapterCandidateDecision({
+      adapterId: 'douyin',
+      decision: accepted ? 'accepted' : 'rejected',
+      reasonCode: accepted ? undefined : 'api-verification-failed',
+      validatedAt,
+      scope: {
+        validationMode: 'douyin-api-candidate',
+        endpointHost: host,
+        endpointPath: pathname,
+        ...scope,
+      },
+      evidence,
+    }, { candidate });
+  },
+  getApiCatalogUpgradePolicy({
+    candidate,
+    siteAdapterDecision,
+    evidence = {},
+    scope = {},
+    decidedAt,
+  } = {}) {
+    const { host, pathname } = endpointParts(candidate);
+    const accepted = siteAdapterDecision?.decision === 'accepted' && isDouyinApiCandidate(candidate);
+    return normalizeSiteAdapterCatalogUpgradePolicy({
+      adapterId: 'douyin',
+      allowCatalogUpgrade: accepted,
+      reasonCode: accepted ? undefined : 'api-catalog-entry-blocked',
+      decidedAt,
+      scope: {
+        policyMode: 'douyin-aweme-api',
+        endpointHost: host,
+        endpointPath: pathname,
+        ...scope,
+      },
+      evidence,
+    }, {
+      candidate,
+      siteAdapterDecision,
+    });
+  },
+  normalizeHealthSignal: normalizeDouyinHealthSignal,
 });

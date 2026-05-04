@@ -1,6 +1,10 @@
 // @ts-check
 
 import { cleanText } from '../../../shared/normalize.mjs';
+import {
+  normalizeSiteAdapterCandidateDecision,
+  normalizeSiteAdapterCatalogUpgradePolicy,
+} from '../../capability/api-candidates.mjs';
 import { createCatalogAdapter } from './factory.mjs';
 
 export const MOODYZ_TERMINOLOGY = Object.freeze({
@@ -26,10 +30,82 @@ const INTENT_LABELS = Object.freeze({
   'open-utility-page': '鎵撳紑鍔熻兘椤?',
 });
 
+function parseUrl(input) {
+  try {
+    return input ? new URL(input) : null;
+  } catch {
+    return null;
+  }
+}
+
+function endpointParts(candidate = {}) {
+  const parsed = parseUrl(candidate?.endpoint?.url);
+  return {
+    host: parsed?.hostname.toLowerCase() ?? '',
+    pathname: parsed?.pathname ?? '',
+  };
+}
+
+function isMoodyzApiCandidate(candidate = {}) {
+  const siteKey = String(candidate?.siteKey ?? '').trim();
+  const { host, pathname } = endpointParts(candidate);
+  return siteKey === 'moodyz'
+    && host === 'moodyz.com'
+    && pathname.startsWith('/api/');
+}
+
 export const moodyzAdapter = createCatalogAdapter({
   id: 'moodyz',
   hosts: ['moodyz.com'],
   terminology: MOODYZ_TERMINOLOGY,
   intentLabels: INTENT_LABELS,
   normalizeDisplayLabel: ({ value }) => cleanText(value),
+  validateApiCandidate({
+    candidate,
+    evidence = {},
+    scope = {},
+    validatedAt,
+  } = {}) {
+    const { host, pathname } = endpointParts(candidate);
+    const accepted = isMoodyzApiCandidate(candidate);
+    return normalizeSiteAdapterCandidateDecision({
+      adapterId: 'moodyz',
+      decision: accepted ? 'accepted' : 'rejected',
+      reasonCode: accepted ? undefined : 'api-verification-failed',
+      validatedAt,
+      scope: {
+        validationMode: 'moodyz-api-candidate',
+        endpointHost: host,
+        endpointPath: pathname,
+        ...scope,
+      },
+      evidence,
+    }, { candidate });
+  },
+  getApiCatalogUpgradePolicy({
+    candidate,
+    siteAdapterDecision,
+    evidence = {},
+    scope = {},
+    decidedAt,
+  } = {}) {
+    const { host, pathname } = endpointParts(candidate);
+    const accepted = siteAdapterDecision?.decision === 'accepted' && isMoodyzApiCandidate(candidate);
+    return normalizeSiteAdapterCatalogUpgradePolicy({
+      adapterId: 'moodyz',
+      allowCatalogUpgrade: accepted,
+      reasonCode: accepted ? undefined : 'api-catalog-entry-blocked',
+      decidedAt,
+      scope: {
+        policyMode: 'moodyz-api',
+        endpointHost: host,
+        endpointPath: pathname,
+        ...scope,
+      },
+      evidence,
+    }, {
+      candidate,
+      siteAdapterDecision,
+    });
+  },
 });

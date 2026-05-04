@@ -24,6 +24,7 @@ const DEFAULT_OPTIONS = {
   workspaceRoot: process.cwd(),
   maxTagPages: 4,
   groupConcurrency: 6,
+  writeSiteMetadata: true,
 };
 const SUPPORTED_RANKING_MODES = ['combined', 'recent', 'most-viewed', 'most-favourited'];
 
@@ -63,6 +64,7 @@ function parseArgs(argv) {
     workspaceRoot: flags['workspace-root'] ? path.resolve(String(flags['workspace-root'])) : DEFAULT_OPTIONS.workspaceRoot,
     maxTagPages: normalizeJableLimit(flags['max-tag-pages'], DEFAULT_OPTIONS.maxTagPages),
     groupConcurrency: normalizeJableLimit(flags['group-concurrency'], DEFAULT_OPTIONS.groupConcurrency),
+    writeSiteMetadata: !flags['no-write'] && !flags['no-site-metadata'],
   };
 }
 
@@ -84,6 +86,33 @@ function resolveSortModeFromQuery(queryText, explicitSortMode) {
     return resolveJableSortMode(explicitSortMode);
   }
   return resolveJableSortMode(queryText ?? explicitSortMode);
+}
+
+function createDirectJableTarget(inputUrl, targetLabel) {
+  let parsed;
+  try {
+    parsed = new URL(inputUrl);
+  } catch {
+    return null;
+  }
+  if (parsed.hostname.toLowerCase() !== 'jable.tv') {
+    return null;
+  }
+  const segments = parsed.pathname.split('/').filter(Boolean);
+  const surface = segments[0]?.toLowerCase();
+  if (!['tags', 'hot', 'latest-updates'].includes(surface)) {
+    return null;
+  }
+  const label = targetLabel
+    ?? (surface === 'tags' ? decodeURIComponent(segments[1] ?? 'tag') : surface);
+  return {
+    scopeType: 'tag',
+    displayLabel: label,
+    canonicalLabel: String(label).trim().toLowerCase(),
+    targetUrl: parsed.toString(),
+    groupLabel: null,
+    source: 'direct-url',
+  };
 }
 
 function buildPageUrl(targetUrl, pageNumber, sortMode) {
@@ -138,12 +167,13 @@ async function fetchHtml(url) {
   }
 }
 
-async function fetchTagResults(targetUrl, sortMode, limit, maxPages) {
+async function fetchTagResults(targetUrl, sortMode, limit, maxPages, options = {}) {
   const rows = [];
   const visited = new Set();
+  const htmlFetcher = options.fetchHtml ?? fetchHtml;
   for (let pageNumber = 1; pageNumber <= maxPages && rows.length < limit; pageNumber += 1) {
     const pageUrl = buildPageUrl(targetUrl, pageNumber, sortMode);
-    const html = await fetchHtml(pageUrl);
+    const html = await htmlFetcher(pageUrl);
     const pageRows = parseJableVideoCardsFromHtml(html, pageUrl);
     if (!pageRows.length) {
       break;
@@ -231,7 +261,7 @@ function sortGroupCards(cards, sortMode) {
 async function fetchGroupResults(target, sortMode, limit, options) {
   const sampleLimit = Math.max(limit, 12);
   const perTagRows = await mapLimit(target.tags ?? [], options.groupConcurrency, async (tag) => {
-    const rows = await fetchTagResults(tag.href, sortMode, sampleLimit, 1);
+    const rows = await fetchTagResults(tag.href, sortMode, sampleLimit, 1, options);
     return rows.map((row) => ({
       ...row,
       sourceTag: tag.label,
@@ -288,14 +318,39 @@ export async function queryJableRanking(url, options = {}) {
     sortMode: resolveSortModeFromQuery(runtimeOptions.query, runtimeOptions.sortMode),
     limit: runtimeOptions.query && !runtimeOptions.targetLabel ? extractLimitFromQuery(runtimeOptions.query) : runtimeOptions.limit,
   };
-  const taxonomyBundle = await loadJableTaxonomy(runtimeOptions.workspaceRoot, 'jable.tv');
-  const targetResolution = runtimeOptions.query && !runtimeOptions.targetLabel
-    ? normalizeQueryIntent(runtimeOptions.query, taxonomyBundle.taxonomyIndex)
-    : {
+  const directTarget = createDirectJableTarget(url, runtimeOptions.targetLabel);
+  let taxonomyBundle = null;
+  let targetResolution;
+  if (!runtimeOptions.query && !runtimeOptions.targetLabel && directTarget && !runtimeOptions.writeSiteMetadata) {
+    targetResolution = {
+      sortMode: parsedOptions.sortMode,
+      limit: parsedOptions.limit,
+      target: directTarget,
+      suggestions: [],
+    };
+  } else {
+    try {
+      taxonomyBundle = await loadJableTaxonomy(runtimeOptions.workspaceRoot, 'jable.tv');
+      targetResolution = runtimeOptions.query && !runtimeOptions.targetLabel
+        ? normalizeQueryIntent(runtimeOptions.query, taxonomyBundle.taxonomyIndex)
+        : {
+            sortMode: parsedOptions.sortMode,
+            limit: parsedOptions.limit,
+            ...resolveJableRankingTarget(runtimeOptions.targetLabel, taxonomyBundle.taxonomyIndex),
+          };
+    } catch (error) {
+      if (!directTarget || runtimeOptions.writeSiteMetadata) {
+        throw error;
+      }
+      targetResolution = {
         sortMode: parsedOptions.sortMode,
         limit: parsedOptions.limit,
-        ...resolveJableRankingTarget(runtimeOptions.targetLabel, taxonomyBundle.taxonomyIndex),
+        target: directTarget,
+        suggestions: [],
+        warning: 'taxonomy-kb-unavailable-direct-url-fallback',
       };
+    }
+  }
   const target = targetResolution.target;
   if (!target) {
     return {
@@ -303,8 +358,8 @@ export async function queryJableRanking(url, options = {}) {
       code: 'target-not-found',
       query: runtimeOptions.query ?? runtimeOptions.targetLabel ?? null,
       suggestions: targetResolution.suggestions,
-      supportedGroupCount: taxonomyBundle.categoryGroups.length,
-      supportedTagCount: taxonomyBundle.categoryTagCount,
+      supportedGroupCount: taxonomyBundle?.categoryGroups?.length ?? 0,
+      supportedTagCount: taxonomyBundle?.categoryTagCount ?? 0,
     };
   }
   const sortMode = targetResolution.sortMode ?? parsedOptions.sortMode;
@@ -317,7 +372,7 @@ export async function queryJableRanking(url, options = {}) {
       ? 'group-tag-page-order'
       : 'group-metric-order';
   } else {
-    cards = await fetchTagResults(target.targetUrl, sortMode, limit, parsedOptions.maxTagPages);
+    cards = await fetchTagResults(target.targetUrl, sortMode, limit, parsedOptions.maxTagPages, parsedOptions);
     aggregationMode = 'tag-page-order';
   }
   const results = cards.map((card, index) => ({
@@ -330,28 +385,34 @@ export async function queryJableRanking(url, options = {}) {
     sourceTag: card.sourceTag ?? target.displayLabel,
   }));
   const host = new URL(url).host;
-  const entrypointPath = path.resolve(runtimeOptions.workspaceRoot, 'src', 'entrypoints', 'sites', 'jable-ranking.mjs');
-  await upsertSiteRegistryRecord(runtimeOptions.workspaceRoot, host, {
-    canonicalBaseUrl: 'https://jable.tv/',
-    latestRankingQueryAt: new Date().toISOString(),
-    rankingQueryEntrypoint: entrypointPath,
-    knowledgeBaseDir: taxonomyBundle.kbDir,
-  }, runtimeOptions.siteMetadataOptions ?? {});
-  await upsertSiteCapabilities(runtimeOptions.workspaceRoot, host, {
-    baseUrl: 'https://jable.tv/',
-    primaryArchetype: 'catalog-detail',
-    pageTypes: ['author-list-page', 'author-page', 'book-detail-page', 'category-page', 'home', 'search-results-page'],
-    capabilityFamilies: ['navigate-to-author', 'navigate-to-category', 'navigate-to-content', 'search-content', 'switch-in-page-state'],
-    supportedIntents: ['list-category-videos', 'open-category', 'open-model', 'open-video', 'search-video'],
-    safeActionKinds: ['navigate', 'query-ranking'],
-    approvalActionKinds: ['search-submit'],
-    rankingSupported: true,
-    rankingModes: SUPPORTED_RANKING_MODES,
-    categoryTaxonomySupported: true,
-  }, runtimeOptions.siteMetadataOptions ?? {});
+  if (runtimeOptions.writeSiteMetadata) {
+    const entrypointPath = path.resolve(runtimeOptions.workspaceRoot, 'src', 'entrypoints', 'sites', 'jable-ranking.mjs');
+    await upsertSiteRegistryRecord(runtimeOptions.workspaceRoot, host, {
+      canonicalBaseUrl: 'https://jable.tv/',
+      latestRankingQueryAt: new Date().toISOString(),
+      rankingQueryEntrypoint: entrypointPath,
+      knowledgeBaseDir: taxonomyBundle?.kbDir,
+    }, runtimeOptions.siteMetadataOptions ?? {});
+    await upsertSiteCapabilities(runtimeOptions.workspaceRoot, host, {
+      baseUrl: 'https://jable.tv/',
+      primaryArchetype: 'catalog-detail',
+      pageTypes: ['author-list-page', 'author-page', 'book-detail-page', 'category-page', 'home', 'search-results-page'],
+      capabilityFamilies: ['navigate-to-author', 'navigate-to-category', 'navigate-to-content', 'search-content', 'switch-in-page-state'],
+      supportedIntents: ['list-category-videos', 'open-category', 'open-model', 'open-video', 'search-video'],
+      safeActionKinds: ['navigate', 'query-ranking'],
+      approvalActionKinds: ['search-submit'],
+      rankingSupported: true,
+      rankingModes: SUPPORTED_RANKING_MODES,
+      categoryTaxonomySupported: true,
+    }, runtimeOptions.siteMetadataOptions ?? {});
+  }
   return {
     ok: true,
     baseUrl: 'https://jable.tv/',
+    siteMetadata: {
+      host,
+      written: Boolean(runtimeOptions.writeSiteMetadata),
+    },
     resolvedTarget: {
       scopeType: target.scopeType,
       displayLabel: target.displayLabel,
@@ -359,6 +420,7 @@ export async function queryJableRanking(url, options = {}) {
       targetUrl: target.targetUrl,
       groupLabel: target.groupLabel ?? null,
       tagCount: target.scopeType === 'group' ? (target.tags?.length ?? 0) : undefined,
+      source: target.source ?? 'taxonomy',
     },
     sortMode: sortMode.sortMode,
     sortLabel: sortMode.displayLabel,
@@ -380,6 +442,8 @@ function printHelp() {
     '  --sort <mode>            combined | recent | most-viewed | most-favourited',
     '  --limit <n>              Default 3',
     '  --workspace-root <dir>   Override workspace root',
+    '  --no-site-metadata       Fetch/plan only; skip registry and capability writes',
+    '  --no-write               Alias for --no-site-metadata',
   ].join('\n') + '\n');
 }
 
@@ -390,7 +454,7 @@ async function main() {
     printHelp();
     return;
   }
-  if (!args.query && !args.targetLabel) {
+  if (!args.query && !args.targetLabel && !createDirectJableTarget(args.url, null)) {
     throw new Error('Provide either --query or --target-label.');
   }
   const result = await queryJableRanking(args.url, args);
