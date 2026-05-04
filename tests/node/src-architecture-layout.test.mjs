@@ -46,14 +46,10 @@ test('root truth and output boundaries stay outside src', async () => {
     expectPathExists('profiles'),
     expectPathExists('schema'),
     expectPathExists('config'),
-    expectPathExists('docs'),
     expectPathExists('tools'),
-    expectPathExists('runs'),
     expectPathExists('config/site-registry.json'),
     expectPathExists('config/site-capabilities.json'),
     expectPathExists('crawler-scripts'),
-    expectPathExists('knowledge-base'),
-    expectPathExists('book-content'),
     expectPathExists('skills'),
     expectPathMissing('site-registry.json'),
     expectPathMissing('site-capabilities.json'),
@@ -67,15 +63,30 @@ test('root truth and output boundaries stay outside src', async () => {
   ]);
 });
 
-test('root only keeps README.md and .gitignore as regular files', async () => {
+test('root only keeps approved project metadata regular files', async () => {
   const entries = await readdir(REPO_ROOT, { withFileTypes: true });
   const regularFiles = entries
     .filter((entry) => entry.isFile())
     .filter((entry) => entry.name !== '.git')
     .map((entry) => entry.name)
     .sort();
+  const rootDesignDocs = regularFiles.filter((name) => /^Site Capability Layer .+\.md$/u.test(name));
+  assert.ok(rootDesignDocs.length <= 1, 'root should not accumulate duplicate Site Capability Layer design docs');
+  await Promise.all([
+    expectPathExists('README.md'),
+    expectPathExists('CONTRIBUTING.md'),
+    expectPathExists('AGENTS.md'),
+  ]);
 
-  assert.deepEqual(regularFiles, ['.gitignore', 'README.md']);
+  assert.deepEqual(regularFiles, [
+    '.gitattributes',
+    '.gitignore',
+    'AGENTS.md',
+    'CONTRIBUTING.md',
+    'README.md',
+    'SECURITY.md',
+    ...rootDesignDocs,
+  ].sort());
 });
 
 test('retired compatibility directories stay removed', async () => {

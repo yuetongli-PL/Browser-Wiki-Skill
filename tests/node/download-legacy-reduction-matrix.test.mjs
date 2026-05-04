@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(TEST_DIR, '..', '..');
-const MATRIX_PATH = path.join(REPO_ROOT, 'docs', 'DOWNLOAD_LEGACY_REDUCTION_MIGRATION_MATRIX.md');
+const MATRIX_PATH = path.join(REPO_ROOT, 'CONTRIBUTING.md');
 
 async function pathExists(relativePath) {
   try {
