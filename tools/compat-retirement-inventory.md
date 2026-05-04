@@ -30,7 +30,7 @@ This file tracks what has already been retired outside the canonical `src/` tree
   - `site-registry.json`
   - `site-capabilities.json`
 - Root checklist doc:
-  - `NEW_SITE_CHECKLIST.md`
+  - `NEW_SITE_CHECKLIST.md` folded into `CONTRIBUTING.md`
 
 Canonical replacements:
 
@@ -38,7 +38,7 @@ Canonical replacements:
 - Site/query CLI: `src/entrypoints/sites/*.mjs`
 - Python download and site-context entrypoints: `src/sites/**/python/*.py`
 - Site truth/config: `config/site-registry.json`, `config/site-capabilities.json`
-- Checklist doc: `docs/NEW_SITE_CHECKLIST.md`
+- Checklist and onboarding policy: `CONTRIBUTING.md`
 
 ## Keep for now
 
