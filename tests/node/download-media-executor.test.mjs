@@ -65,7 +65,12 @@ test('media executor writes queue and dedupes by content hash', async (t) => {
   const payload = 'shared media body';
   const result = await downloadMediaFiles({
     media: [
-      { type: 'image', url: 'https://cdn.example.test/one.jpg', itemId: 'post-1', pageUrl: 'https://x.com/a/status/1' },
+      {
+        type: 'image',
+        url: 'https://cdn.example.test/one.jpg?access_token=synthetic-media-token',
+        itemId: 'post-1',
+        pageUrl: 'https://x.com/a/status/1?refresh_token=synthetic-page-token',
+      },
       { type: 'image', url: 'https://cdn.example.test/two.jpg', itemId: 'post-2', pageUrl: 'https://x.com/a/status/2' },
     ],
     headers: { Referer: 'https://x.com/a' },
@@ -88,8 +93,17 @@ test('media executor writes queue and dedupes by content hash', async (t) => {
   assert.equal(await readFile(result.downloads[0].filePath, 'utf8'), payload);
 
   const queue = JSON.parse(await readFile(queuePath, 'utf8'));
+  const queueText = await readFile(queuePath, 'utf8');
+  const queueAudit = JSON.parse(await readFile(`${queuePath}.redaction-audit.json`, 'utf8'));
   assert.equal(queue.counts.done, 2);
-  assert.equal(queue.queue[1].result.duplicateOf, 'https://cdn.example.test/one.jpg');
+  assert.equal(queue.queue[0].url.includes('synthetic-media-token'), false);
+  assert.equal(queue.queue[0].pageUrl.includes('synthetic-page-token'), false);
+  assert.equal(queue.queue[1].result.duplicateOf.includes('synthetic-media-token'), false);
+  assert.equal(queueText.includes('synthetic-media-token'), false);
+  assert.equal(queueText.includes('synthetic-page-token'), false);
+  assert.equal(queueAudit.redactedPaths.includes('queue.0.url'), true);
+  assert.equal(queueAudit.redactedPaths.includes('queue.0.pageUrl'), true);
+  assert.equal(queueAudit.redactedPaths.includes('queue.1.result.duplicateOf'), true);
 });
 
 test('media executor resumes completed downloads from previous jsonl rows', async (t) => {

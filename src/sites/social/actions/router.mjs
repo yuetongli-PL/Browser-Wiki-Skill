@@ -13,6 +13,11 @@ import {
   exportDownloadSessionPassthrough,
   resolveSiteBrowserSessionOptions,
 } from '../../../infra/auth/site-auth.mjs';
+import {
+  readAuthSessionState,
+  resolveAuthSessionPolicy,
+  writeAuthSessionState,
+} from '../../../infra/auth/site-session-governance.mjs';
 import { ensureDir, readJsonFile, readTextFile, writeJsonFile, writeJsonLines, writeTextFile } from '../../../infra/io.mjs';
 import { cleanText, compactSlug, normalizeText } from '../../../shared/normalize.mjs';
 import { downloadMediaFiles as executeMediaDownloads } from '../../downloads/media-executor.mjs';
@@ -23,6 +28,20 @@ import {
 import { evaluateAuthenticatedSessionReleaseGate } from '../../sessions/release-gate.mjs';
 import { buildSessionRepairPlanCommand } from '../../sessions/repair-command.mjs';
 import { runSessionTask } from '../../sessions/runner.mjs';
+import { normalizeArtifactReferenceSet } from '../../capability/artifact-schema.mjs';
+import { matchCapabilityHooksForLifecycleEvent } from '../../capability/capability-hook.mjs';
+import { assertSchemaCompatible } from '../../capability/compatibility-registry.mjs';
+import {
+  normalizeLifecycleEvent,
+  writeLifecycleEventArtifact,
+} from '../../capability/lifecycle-events.mjs';
+import { reasonCodeSummary } from '../../capability/reason-codes.mjs';
+import { normalizeRiskTransition } from '../../capability/risk-state.mjs';
+import {
+  assertNoForbiddenPatterns,
+  prepareRedactedArtifactJsonWithAudit,
+  redactValue,
+} from '../../capability/security-guard.mjs';
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(MODULE_DIR, '..', '..', '..', '..');
@@ -486,6 +505,139 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function socialStateHasExtractedContent(state = {}) {
+  return Boolean(
+    (Array.isArray(state.items) && state.items.length > 0)
+    || (Array.isArray(state.relations) && state.relations.length > 0)
+    || (Array.isArray(state.media) && state.media.length > 0)
+  );
+}
+
+function socialStateHasProfileSurface(state = {}) {
+  return Boolean(
+    cleanText(state?.account?.displayName || '')
+    || cleanText(state?.account?.bio || '')
+    || (Array.isArray(state?.account?.stats) && state.account.stats.length > 0)
+  );
+}
+
+function socialStateHasBoundarySignal(state = {}) {
+  return Boolean(
+    (Array.isArray(state.visibilitySignals) && state.visibilitySignals.length > 0)
+    || (Array.isArray(state.riskSignals) && state.riskSignals.length > 0)
+  );
+}
+
+function isLikelyXBlankShell(state = {}) {
+  const title = cleanText(state?.title || '');
+  return title === 'X'
+    && !socialStateHasExtractedContent(state)
+    && !socialStateHasProfileSurface(state)
+    && !socialStateHasBoundarySignal(state);
+}
+
+function initialSocialStateReady(config, state = {}) {
+  if (!state) {
+    return false;
+  }
+  if (socialStateHasExtractedContent(state) || socialStateHasProfileSurface(state) || socialStateHasBoundarySignal(state)) {
+    return true;
+  }
+  if (config?.siteKey !== 'x') {
+    return true;
+  }
+  return !isLikelyXBlankShell(state);
+}
+
+function shouldPrimeXVideoResources(config = {}, plan = {}, settings = {}) {
+  return config?.siteKey === 'x'
+    && settings?.downloadMedia === true
+    && ['profile-content', 'search', 'followed-posts-by-date'].includes(plan?.action);
+}
+
+async function readInitialSocialState(session, config, plan, settings) {
+  const request = {
+    account: plan.account,
+    action: plan.action,
+    contentType: plan.contentType,
+    date: plan.date,
+    fromDate: plan.fromDate,
+    toDate: plan.toDate,
+  };
+  const startedAt = Date.now();
+  const shouldWaitForSpaSurface = config?.siteKey === 'x';
+  const deadline = startedAt + (shouldWaitForSpaSurface ? Math.min(settings.timeoutMs ?? DEFAULT_TIMEOUT_MS, 15_000) : 0);
+  const pollMs = Math.min(700, Math.max(50, settings.scrollWaitMs || 0));
+  let attempts = 0;
+  let state = null;
+  while (true) {
+    attempts += 1;
+    if (shouldPrimeXVideoResources(config, plan, settings)) {
+      try {
+        await session.callPageFunction(pagePrimeXVideoResources);
+      } catch {
+        // Video resource priming is best-effort; extraction below remains authoritative.
+      }
+    }
+    state = await session.callPageFunction(pageExtractSocialState, config, request);
+    if (initialSocialStateReady(config, state)) {
+      return {
+        state,
+        surfaceWait: {
+          ready: true,
+          attempts,
+          elapsedMs: Date.now() - startedAt,
+        },
+      };
+    }
+    if (!shouldWaitForSpaSurface || Date.now() >= deadline) {
+      return {
+        state,
+        surfaceWait: {
+          ready: false,
+          reason: isLikelyXBlankShell(state) ? 'x-blank-shell-timeout' : 'social-surface-timeout',
+          attempts,
+          elapsedMs: Date.now() - startedAt,
+        },
+      };
+    }
+    await sleep(pollMs);
+  }
+}
+
+async function pagePrimeXVideoResources() {
+  const videos = [...document.querySelectorAll('video')].slice(0, 8);
+  const attempts = [];
+  for (const video of videos) {
+    try {
+      video.muted = true;
+      video.playsInline = true;
+      if (typeof video.play === 'function') {
+        attempts.push(Promise.resolve(video.play()).catch(() => null));
+      }
+    } catch {
+      // Ignore individual video failures; this helper only warms resource entries.
+    }
+  }
+  if (attempts.length) {
+    await Promise.allSettled(attempts);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    for (const video of videos) {
+      try {
+        if (typeof video.pause === 'function') {
+          video.pause();
+        }
+      } catch {
+        // Ignore pause failures.
+      }
+    }
+  }
+  return {
+    videoCount: videos.length,
+    attempted: attempts.length,
+  };
+}
+
 function pageExtractSocialState(config, request) {
   const normalize = (value) => String(value ?? '').replace(/\s+/gu, ' ').trim();
   const absoluteUrl = (value) => {
@@ -698,13 +850,32 @@ function pageExtractSocialState(config, request) {
   if (/challenge|captcha|verification required|verify (?:it'?s you|your account|your identity)|unusual activity|suspicious activity|机器人|需要验证|安全验证/iu.test(bodyText) || normalizedPath.includes('/challenge')) {
     riskSignals.push('challenge');
   }
+  if (riskSignals.includes('challenge')) {
+    const hasChallengeUi = Boolean(document.querySelector(
+      'iframe[src*="captcha"], input[name="challenge_response"], [data-testid*="verification"]',
+    ));
+    const hasChallengeText = /captcha|verification required|verify (?:it'?s you|your account|your identity)|unusual activity|suspicious activity/iu.test(bodyText)
+      || normalizedPath.includes('/challenge');
+    if (!hasChallengeUi && !hasChallengeText) {
+      riskSignals.splice(riskSignals.indexOf('challenge'), 1);
+    }
+  }
   if (/rate limit|too many requests|try again later|temporarily restricted|temporarily unavailable|稍后再试|请求过多/iu.test(bodyText)) {
     riskSignals.push('rate-limited');
   }
+  if (/something went wrong|try reloading|出错了|請嘗試重新載入|请尝试重新加载|重试/iu.test(bodyText)) {
+    riskSignals.push('timeline-load-error');
+  }
 
-  const shouldDeferDateFiltering = config.siteKey === 'instagram'
+  const shouldDeferDateFiltering = (
+    config.siteKey === 'instagram'
     && request.action === 'profile-content'
-    && (request.date || request.fromDate || request.toDate);
+    && (request.date || request.fromDate || request.toDate)
+  ) || (
+    config.siteKey === 'x'
+    && request.action === 'followed-posts-by-date'
+    && (request.date || request.fromDate || request.toDate)
+  );
 
   let rawItems = all(config.contentSelectors.item)
     .map((root) => {
@@ -813,6 +984,26 @@ function pageOpenSocialRelationSurface(request) {
     relation,
     href: target.getAttribute('href') || target.href || '',
     text: target.textContent || '',
+  };
+}
+
+function pageClickSocialRetry() {
+  const normalize = (value) => String(value ?? '').replace(/\s+/gu, ' ').trim();
+  const candidates = [
+    ...document.querySelectorAll('button, [role="button"], div[data-testid], span'),
+  ];
+  const target = candidates.find((node) => /^(?:retry|重试|重試)$/iu.test(normalize(node.textContent || node.getAttribute?.('aria-label') || '')))
+    || candidates.find((node) => /retry|重试|重試/iu.test(normalize(node.textContent || node.getAttribute?.('aria-label') || '')));
+  if (!target) {
+    return { clicked: false, reason: 'retry-control-not-found' };
+  }
+  const clickable = typeof target.closest === 'function'
+    ? target.closest('button, [role="button"]') || target
+    : target;
+  clickable.click();
+  return {
+    clicked: true,
+    text: normalize(target.textContent || target.getAttribute?.('aria-label') || ''),
   };
 }
 
@@ -930,6 +1121,9 @@ function pickRuntimeRiskSignal(signals = []) {
   if (normalized.has('rate-limited')) {
     return 'rate-limited';
   }
+  if (normalized.has('timeline-load-error')) {
+    return 'timeline-load-error';
+  }
   return null;
 }
 
@@ -943,11 +1137,14 @@ function runtimeRiskToStopReason(signal) {
   if (signal === 'rate-limited') {
     return 'rate-limited';
   }
+  if (signal === 'timeline-load-error') {
+    return 'timeline-load-error';
+  }
   return null;
 }
 
 function isRetryableRuntimeRisk(signal) {
-  return signal === 'rate-limited';
+  return signal === 'rate-limited' || signal === 'timeline-load-error';
 }
 
 function riskBackoffDelayMs(settings, retryIndex) {
@@ -1081,16 +1278,29 @@ async function collectSocialPage(session, config, plan, settings) {
   let riskRetryCount = 0;
   let stopReason = null;
   let relationExpectedCount = null;
+  const initialRead = await readInitialSocialState(session, config, plan, settings);
+  if (initialRead.surfaceWait?.ready === false && initialRead.surfaceWait.reason) {
+    visibilitySignals.push(initialRead.surfaceWait.reason);
+  }
 
   for (let round = 0; round <= maxScrolls; round += 1) {
-    const state = await session.callPageFunction(pageExtractSocialState, config, {
-      account: plan.account,
-      action: plan.action,
-      contentType: plan.contentType,
-      date: plan.date,
-      fromDate: plan.fromDate,
-      toDate: plan.toDate,
-    });
+    if (round > 0 && shouldPrimeXVideoResources(config, plan, settings)) {
+      try {
+        await session.callPageFunction(pagePrimeXVideoResources);
+      } catch {
+        // Keep scroll extraction resilient when browser video playback is blocked.
+      }
+    }
+    const state = round === 0 && initialRead.state
+      ? initialRead.state
+      : await session.callPageFunction(pageExtractSocialState, config, {
+        account: plan.account,
+        action: plan.action,
+        contentType: plan.contentType,
+        date: plan.date,
+        fromDate: plan.fromDate,
+        toDate: plan.toDate,
+      });
     collectedStates.push(state);
     if (state?.relationExpectedCount !== null && state?.relationExpectedCount !== undefined && Number.isFinite(Number(state.relationExpectedCount)) && Number(state.relationExpectedCount) >= 0) {
       relationExpectedCount = Math.max(relationExpectedCount ?? 0, Number(state.relationExpectedCount));
@@ -1100,7 +1310,14 @@ async function collectSocialPage(session, config, plan, settings) {
     const runtimeRiskSignal = pickRuntimeRiskSignal(state?.riskSignals || []);
     if (runtimeRiskSignal) {
       const retryable = isRetryableRuntimeRisk(runtimeRiskSignal) && riskRetryCount < settings.riskRetries;
-      const waitMs = retryable ? riskBackoffDelayMs(settings, riskRetryCount) : 0;
+      const waitMs = retryable
+        ? runtimeRiskSignal === 'timeline-load-error'
+          ? Math.max(settings.scrollWaitMs, 1_500)
+          : riskBackoffDelayMs(settings, riskRetryCount)
+        : 0;
+      const recoveryAction = retryable && runtimeRiskSignal === 'timeline-load-error'
+        ? await session.callPageFunction(pageClickSocialRetry)
+        : null;
       riskEvents.push({
         round,
         signal: runtimeRiskSignal,
@@ -1108,6 +1325,7 @@ async function collectSocialPage(session, config, plan, settings) {
         retry: retryable ? riskRetryCount + 1 : riskRetryCount,
         waitMs,
         finalUrl: state?.url ?? null,
+        recoveryAction,
       });
       if (retryable) {
         riskRetryCount += 1;
@@ -1173,6 +1391,11 @@ async function collectSocialPage(session, config, plan, settings) {
   const allItems = collectedStates.flatMap((entry) => entry.items || []);
   const allRelations = collectedStates.flatMap((entry) => entry.relations || []);
   const allMedia = collectedStates.flatMap((entry) => entry.media || []);
+  const mergedMedia = mergeByKey(allMedia, (entry) => `${entry.type}:${entry.url}`, maxItems * 5);
+  const mergedItems = mergeByKey(allItems, (entry) => entry.url || entry.text, maxItems);
+  const upgradedItems = config.siteKey === 'x'
+    ? upgradeXPosterMediaWithVideoResources(mergedItems, mergedMedia)
+    : mergedItems;
   const mergedRelations = mergeByKey(allRelations, (entry) => entry.handle || entry.url, maxItems);
   const hasRelationExpectedCount = Number.isFinite(relationExpectedCount);
   const relationArchive = isSocialRelationAction(plan.action)
@@ -1204,12 +1427,13 @@ async function collectSocialPage(session, config, plan, settings) {
     title: latest.title || null,
     currentAccount: latest.currentAccount || null,
     account: latest.account || null,
-    items: mergeByKey(allItems, (entry) => entry.url || entry.text, maxItems),
+    items: upgradedItems,
     relations: mergedRelations,
-    media: mergeByKey(allMedia, (entry) => `${entry.type}:${entry.url}`, maxItems * 5),
+    media: mergedMedia,
     relationExpectedCount: Number.isFinite(relationExpectedCount) ? relationExpectedCount : null,
     archive: relationArchive,
     scrollSummary,
+    surfaceWait: initialRead.surfaceWait,
     visibilitySignals: dedupeSortedStrings(visibilitySignals),
     riskSignals: dedupeSortedStrings(riskSignals),
     riskEvents,
@@ -1542,12 +1766,139 @@ function selectBestVideoCandidate(candidates = []) {
     })[0] ?? null;
 }
 
+function xVideoMediaKeyFromUrl(value) {
+  const url = String(value ?? '');
+  if (!url) {
+    return null;
+  }
+  const match = url.match(/\/(?:ext_tw_video|amplify_video|tweet_video)(?:_thumb)?\/(\d+)/iu);
+  return match?.[1] ?? null;
+}
+
+function isXVideoPosterMedia(entry = {}) {
+  const value = String(entry.url ?? entry.posterUrl ?? '').toLowerCase();
+  return /\/(?:ext_tw_video|amplify_video|tweet_video)_thumb\//u.test(value)
+    || /[?&]format=(?:jpg|jpeg|png|webp)\b/u.test(value) && /(?:ext_tw_video|amplify_video|tweet_video)/u.test(value);
+}
+
+function isXDirectVideoMedia(entry = {}) {
+  const value = String(entry.url ?? '').toLowerCase();
+  return entry.type === 'video'
+    && /^https?:\/\//iu.test(value)
+    && (
+      /(^|\.)video\.twimg\.com\//iu.test(value)
+      || /(?:\.mp4|\.m3u8)(?:[?#]|$)/iu.test(value)
+    );
+}
+
+function upgradeXPosterMediaWithVideoResources(items = [], media = []) {
+  const videosByKey = new Map();
+  for (const entry of Array.isArray(media) ? media : []) {
+    if (!isXDirectVideoMedia(entry)) {
+      continue;
+    }
+    const key = xVideoMediaKeyFromUrl(entry.url);
+    if (!key) {
+      continue;
+    }
+    const dimensions = parseDimensionsFromUrl(entry.url);
+    const candidate = {
+      ...entry,
+      type: 'video',
+      width: entry.width ?? dimensions.width,
+      height: entry.height ?? dimensions.height,
+      source: entry.source || 'performance-video-resource',
+    };
+    const existing = videosByKey.get(key);
+    videosByKey.set(key, selectBestVideoCandidate([existing, candidate].filter(Boolean)));
+  }
+  if (!videosByKey.size) {
+    return items;
+  }
+  return (Array.isArray(items) ? items : []).map((item) => {
+    const itemMedia = Array.isArray(item?.media) ? item.media : [];
+    if (!itemMedia.length) {
+      return item;
+    }
+    let changed = false;
+    const upgradedMedia = itemMedia.map((entry) => {
+      if (!isXVideoPosterMedia(entry)) {
+        return entry;
+      }
+      const key = xVideoMediaKeyFromUrl(entry.url || entry.posterUrl);
+      const video = key ? videosByKey.get(key) : null;
+      if (!video?.url) {
+        return entry;
+      }
+      changed = true;
+      const dimensions = parseDimensionsFromUrl(video.url);
+      const { fallbackFrom, expectedType, ...rest } = entry;
+      return {
+        ...rest,
+        type: 'video',
+        url: video.url,
+        posterUrl: entry.url || entry.posterUrl || video.posterUrl || null,
+        width: video.width ?? dimensions.width ?? entry.width ?? null,
+        height: video.height ?? dimensions.height ?? entry.height ?? null,
+        bitrate: video.bitrate ?? entry.bitrate ?? null,
+        durationMillis: video.durationMillis ?? entry.durationMillis ?? null,
+        variants: Array.isArray(video.variants) ? video.variants : entry.variants,
+        source: video.source || entry.source || 'performance-video-resource',
+      };
+    });
+    return changed ? { ...item, media: upgradedMedia } : item;
+  });
+}
+
 function dedupeMediaEntries(media = []) {
   return mergeByKey(
     (Array.isArray(media) ? media : []).filter((entry) => entry?.url),
     (entry) => `${entry.type}:${entry.url}`,
     Number.MAX_SAFE_INTEGER,
   );
+}
+
+function urlHostname(value) {
+  try {
+    return new URL(String(value ?? '')).hostname.toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+function urlPathname(value) {
+  try {
+    return new URL(String(value ?? '')).pathname.toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+function isXResponsiveWebStaticMedia(entry = {}) {
+  return urlHostname(entry.url) === 'abs.twimg.com'
+    && /\/responsive-web\//u.test(urlPathname(entry.url));
+}
+
+function hasSocialMediaItemContext(entry = {}) {
+  return Boolean(String(entry.itemId ?? '').trim() || String(entry.pageUrl ?? '').trim());
+}
+
+function shouldFilterXDownloadMedia(plan = {}) {
+  return plan.siteKey === 'x'
+    && ['profile-content', 'search', 'followed-posts-by-date'].includes(plan.action);
+}
+
+function filterSocialDownloadMediaCandidates(media = [], plan = {}) {
+  const candidates = Array.isArray(media) ? media : [];
+  if (!shouldFilterXDownloadMedia(plan)) {
+    return candidates;
+  }
+  return candidates.filter((entry) => {
+    if (isXResponsiveWebStaticMedia(entry)) {
+      return false;
+    }
+    return hasSocialMediaItemContext(entry);
+  });
 }
 
 function normalizeXImageUrl(value) {
@@ -2334,11 +2685,12 @@ function urlFromApiEntry(entry = {}) {
 function scoreSocialApiSeed(entry, config, plan) {
   const operationName = operationNameFromApiEntry(entry);
   const url = urlFromApiEntry(entry);
+  const parsedItems = parsedApiEntries(entry.parsed);
   let score = 0;
-  if (entry.parsed.nextCursor) {
+  if (entry.parsed?.nextCursor) {
     score += 100;
   }
-  score += Math.min(entry.parsed.items.length, 50);
+  score += Math.min(parsedItems.length, 50);
   if (config.siteKey === 'x') {
     if (plan.action === 'search' || plan.action === 'followed-posts-by-date') {
       if (/search|searchtimeline/iu.test(operationName) || /\/2\/search\//iu.test(url)) {
@@ -2376,6 +2728,16 @@ function scoreSocialApiSeed(entry, config, plan) {
     }
   }
   return score;
+}
+
+function parsedApiEntries(parsed = {}) {
+  if (Array.isArray(parsed?.items)) {
+    return parsed.items;
+  }
+  if (Array.isArray(parsed?.users)) {
+    return parsed.users;
+  }
+  return [];
 }
 
 function isTargetTimelineApiSummary(summary, config = {}, plan = {}) {
@@ -2507,7 +2869,7 @@ function selectSocialApiSeed(parsedResponses, config, plan) {
       if (cursorDelta !== 0) {
         return cursorDelta;
       }
-      return right.parsed.items.length - left.parsed.items.length;
+      return parsedApiEntries(right.parsed).length - parsedApiEntries(left.parsed).length;
     })[0] ?? null;
 }
 
@@ -2540,7 +2902,7 @@ function summarizeSocialApiCapture(apiCapture, parsedResponses = [], config = nu
     capturedBodyCount: apiCapture.stats?.capturedBodies ?? null,
     bodyErrorCount: apiCapture.stats?.bodyErrors ?? null,
     parsedResponseCount: parsedResponses.length,
-    parsedSeedCandidateCount: parsedResponses.filter((entry) => entry.parsed.items.length || entry.parsed.nextCursor).length,
+    parsedSeedCandidateCount: parsedResponses.filter((entry) => parsedApiEntries(entry.parsed).length || entry.parsed?.nextCursor).length,
     operations: operations.slice(0, API_CAPTURE_SAMPLE_LIMIT),
     samples: parsedSummaries.slice(-API_CAPTURE_SAMPLE_LIMIT),
     driftSamples,
@@ -3411,14 +3773,186 @@ async function collectXRelationApiUsers(session, plan, settings, apiCapture) {
   };
 }
 
-function mergePageResultWithArchive(pageResult, archive, settings) {
-  if (!archive?.items?.length) {
-    const fallbackArchive = archive ?? pageResult.archive ?? {
+function normalizeFollowedUserSeedEntry(entry = {}) {
+  if (!entry || typeof entry !== 'object') {
+    return null;
+  }
+  const handle = cleanText(entry.handle || entry.username || entry.account || entry.screenName || '');
+  const url = cleanText(entry.url || (handle ? `https://x.com/${handle}` : ''));
+  if (!handle && !url) {
+    return null;
+  }
+  return {
+    handle: handle || pathnameHandleFromUrl(url),
+    id: cleanText(entry.id || entry.userId || '') || null,
+    url,
+    label: cleanText(entry.label || entry.displayName || entry.name || handle) || null,
+    displayName: cleanText(entry.displayName || entry.name || entry.label || '') || null,
+    source: entry.source || 'followed-users-file',
+  };
+}
+
+function pathnameHandleFromUrl(url) {
+  try {
+    const parsed = new URL(String(url || ''));
+    const first = parsed.pathname.split('/').filter(Boolean)[0] || '';
+    return first ? first.replace(/^@/u, '') : null;
+  } catch {
+    return null;
+  }
+}
+
+async function loadFollowedUsersSeed(filePath, settings = {}) {
+  if (!filePath) {
+    return null;
+  }
+  const resolvedPath = path.resolve(String(filePath));
+  const rows = (await readJsonLinesFile(resolvedPath))
+    .filter((entry) => !entry?.kind || entry.kind === 'user')
+    .map(normalizeFollowedUserSeedEntry)
+    .filter(Boolean);
+  const users = mergeByKey(rows, (entry) => entry.handle?.toLowerCase() || entry.url, settings.maxUsers);
+  const runDir = path.dirname(resolvedPath);
+  const manifest = await readJsonFile(path.join(runDir, 'manifest.json')).catch(() => null);
+  const state = manifest ? null : await readJsonFile(path.join(runDir, 'state.json')).catch(() => null);
+  const archive = manifest?.archive ?? state?.archive ?? null;
+  const complete = archive?.complete === true || manifest?.completeness?.archiveStatus === 'yes';
+  return {
+    users,
+    archive: {
+      strategy: 'followed-users-file',
+      complete,
+      reason: complete ? null : (archive?.reason || manifest?.completeness?.archiveReason || 'followed-users-file-unverified'),
+      file: resolvedPath,
+      userCount: users.length,
+      sourceArchive: archive
+        ? {
+          strategy: archive.strategy ?? null,
+          complete: archive.complete ?? null,
+          reason: archive.reason ?? null,
+        }
+        : null,
+    },
+  };
+}
+
+function summarizeXRelationApiArchive(relationApiArchive, relationApiUsers = [], users = []) {
+  if (!relationApiArchive) {
+    return null;
+  }
+  return {
+    strategy: relationApiArchive.strategy,
+    complete: relationApiArchive.complete,
+    reason: relationApiArchive.reason,
+    pages: relationApiArchive.pages,
+    apiItemCount: relationApiUsers.length,
+    dedupedItemCount: users.length,
+    nextCursor: relationApiArchive.nextCursor ?? null,
+  };
+}
+
+function summarizeFollowedRelationArchive(relationApiArchive, relationApiUsers = [], users = [], followedUsersSeed = null) {
+  const apiSummary = summarizeXRelationApiArchive(relationApiArchive, relationApiUsers, users);
+  if (!followedUsersSeed?.archive) {
+    return apiSummary;
+  }
+  return {
+    ...followedUsersSeed.archive,
+    dedupedItemCount: users.length,
+    fallbackFrom: apiSummary,
+  };
+}
+
+function prefersDomForNoApiCursorFollowedPosts(plan = {}, settings = {}) {
+  return plan.siteKey === 'x'
+    && plan.action === 'followed-posts-by-date'
+    && settings.apiCursor !== true;
+}
+
+function apiMediaByItemKey(items = []) {
+  const mediaByItem = new Map();
+  for (const item of items || []) {
+    const key = item.id || item.url || null;
+    if (key && Array.isArray(item.media) && item.media.length) {
+      mediaByItem.set(String(key), item.media);
+    }
+    if (item.url && Array.isArray(item.media) && item.media.length) {
+      mediaByItem.set(String(item.url), item.media);
+    }
+  }
+  return mediaByItem;
+}
+
+function mergeDomPrimaryPageResultWithArchive(pageResult, archive, settings) {
+  const archiveItems = Array.isArray(archive?.items) ? archive.items : [];
+  const pageItems = Array.isArray(pageResult.items) ? pageResult.items : [];
+  const archiveMediaByItem = apiMediaByItemKey(archiveItems);
+  const items = pageItems.map((item) => {
+    const key = item.id || item.url || null;
+    const apiMedia = key ? archiveMediaByItem.get(String(key)) : null;
+    return apiMedia?.length ? { ...item, media: apiMedia } : item;
+  });
+  const media = mergeByKey([
+    ...items.flatMap((item) => item.media || []),
+    ...(pageResult.media || []),
+  ], (entry) => `${entry.type}:${entry.url}`, settings.maxItems * 5);
+  return {
+    ...pageResult,
+    items,
+    media,
+    archive: {
+      ...(pageResult.archive || {}),
       strategy: 'dom-scroll',
-      complete: false,
-      reason: pageResult.stopReason || 'api-cursor-disabled-or-unavailable',
+      complete: true,
+      reason: null,
+      confidence: 'dom-primary',
       pages: 0,
-    };
+      domItemCount: pageItems.length,
+      apiItemCount: archiveItems.length,
+      dedupedItemCount: items.length,
+      capture: archive?.capture ?? pageResult.archive?.capture ?? null,
+      boundarySignals: dedupeSortedStrings([
+        ...(pageResult.archive?.boundarySignals ?? []),
+        ...(archive?.boundarySignals ?? []),
+        ...(archive?.riskSignals ?? []),
+        ...(pageResult.visibilitySignals ?? []),
+        ...(pageResult.riskSignals ?? []),
+      ]),
+    },
+    riskSignals: dedupeSortedStrings([
+      ...(pageResult.riskSignals ?? []),
+      ...(archive?.riskSignals ?? []),
+    ]),
+    riskEvents: [
+      ...(pageResult.riskEvents ?? []),
+      ...(archive?.riskEvents ?? []),
+    ],
+    stopReason: pageResult.stopReason || runtimeRiskToStopReason(pickRuntimeRiskSignal(archive?.riskSignals ?? [])),
+  };
+}
+
+function mergePageResultWithArchive(pageResult, archive, settings, plan = {}) {
+  const preferDomForNoApiCursor = prefersDomForNoApiCursorFollowedPosts(plan, settings);
+  if (preferDomForNoApiCursor && (pageResult.items?.length ?? 0) > 0) {
+    return mergeDomPrimaryPageResultWithArchive(pageResult, archive, settings);
+  }
+  if (!archive?.items?.length) {
+    const noApiCursorDomEmpty = preferDomForNoApiCursor && (pageResult.items?.length ?? 0) === 0;
+    const fallbackArchive = noApiCursorDomEmpty
+      ? {
+        ...(pageResult.archive || {}),
+        strategy: 'dom-scroll',
+        complete: null,
+        reason: pageResult.stopReason || 'dom-empty',
+        pages: 0,
+        capture: archive?.capture ?? pageResult.archive?.capture ?? null,
+      }
+      : archive ?? pageResult.archive ?? {
+        strategy: 'dom-scroll',
+        complete: false,
+        reason: pageResult.stopReason || 'api-cursor-disabled-or-unavailable',
+        pages: 0,
+      };
     const domDedupedCount = fallbackArchive.dedupedItemCount
       ?? (fallbackArchive.strategy === 'dom-relation-scroll'
         ? pageResult.relations?.length ?? 0
@@ -3565,7 +4099,55 @@ async function enrichInstagramItemsFromDetails(session, config, plan, settings, 
   return enriched;
 }
 
-async function collectInstagramFollowedPostsByProfiles(session, config, plan, settings, checkpoint = null, apiCapture = null) {
+async function collectProfileDateScanAttempt(session, config, profilePlan, settings, apiCapture, profileApiDisabledAfterRateLimit, options = {}) {
+  const apiCaptureStartIndex = apiCapture?.mark?.() ?? 0;
+  await session.navigateAndWait(profilePlan.url, createWaitPolicy(settings.timeoutMs));
+  const profileResult = await collectSocialPage(session, config, profilePlan, {
+    ...settings,
+    maxScrolls: options.maxScrolls ?? settings.maxScrolls,
+    maxItems: Math.min(settings.perUserMaxItems, settings.maxItems),
+  });
+  const shouldCollectProfileApiSeed = config?.siteKey === 'x'
+    && settings.downloadMedia === true;
+  const apiProfileArchive = (settings.apiCursor || shouldCollectProfileApiSeed) && !profileApiDisabledAfterRateLimit
+    ? await collectSocialApiArchive(session, config, profilePlan, {
+      ...settings,
+      maxItems: Math.min(settings.perUserMaxItems, settings.maxItems),
+    }, apiCapture, null, {
+      seedOnly: !settings.apiCursor && shouldCollectProfileApiSeed,
+      captureStartIndex: apiCaptureStartIndex,
+      includeCheckpointItems: false,
+    })
+    : null;
+  return { profileResult, apiProfileArchive };
+}
+
+function initialProfileDateScanMaxScrolls(config, settings = {}) {
+  if (config?.siteKey === 'x' && settings.apiCursor === true) {
+    return Math.min(settings.maxScrolls, 2);
+  }
+  return settings.maxScrolls;
+}
+
+function shouldRetryEmptyXProfileDateScan(config, profileResult = {}, apiProfileArchive = null) {
+  if (config?.siteKey !== 'x') {
+    return false;
+  }
+  const profileStopReason = profileResult.stopReason || runtimeRiskToStopReason(pickRuntimeRiskSignal(profileResult.riskSignals ?? []));
+  const apiStopReason = runtimeRiskToStopReason(pickRuntimeRiskSignal(apiProfileArchive?.riskSignals ?? []));
+  if (profileStopReason || apiStopReason) {
+    return false;
+  }
+  if ((profileResult.riskSignals ?? []).length > 0 || (apiProfileArchive?.riskSignals ?? []).length > 0) {
+    return false;
+  }
+  if ((profileResult.visibilitySignals ?? []).length > 0) {
+    return false;
+  }
+  return (profileResult.items?.length ?? 0) === 0 && (apiProfileArchive?.items?.length ?? 0) === 0;
+}
+
+async function collectFollowedPostsByProfiles(session, config, plan, settings, checkpoint = null, apiCapture = null) {
   const currentAccount = plan.account || await inferCurrentAccountFromPage(session, config, plan);
   if (!currentAccount) {
     return {
@@ -3596,7 +4178,23 @@ async function collectInstagramFollowedPostsByProfiles(session, config, plan, se
     ...settings,
     maxItems: settings.maxUsers,
   });
-  const users = relationResult.relations || [];
+  const relationApiArchive = config.siteKey === 'x'
+    ? await collectXRelationApiUsers(session, relationPlan, {
+      ...settings,
+      maxItems: settings.maxUsers,
+    }, apiCapture)
+    : null;
+  const relationApiUsers = Array.isArray(relationApiArchive?.users) ? relationApiArchive.users : [];
+  const followedUsersSeed = await loadFollowedUsersSeed(settings.followedUsersFile, settings);
+  const followedUsersFileUsers = Array.isArray(followedUsersSeed?.users) ? followedUsersSeed.users : [];
+  const useFollowedUsersSeedOnly = followedUsersFileUsers.length > 0 && followedUsersSeed?.archive?.complete === true;
+  const users = useFollowedUsersSeedOnly
+    ? mergeByKey(followedUsersFileUsers, (entry) => entry.handle?.toLowerCase() || entry.url, settings.maxUsers)
+    : mergeByKey([
+      ...(relationResult.relations || []),
+      ...relationApiUsers,
+      ...followedUsersFileUsers,
+    ], (entry) => entry.handle?.toLowerCase() || entry.url, settings.maxUsers);
   const previousArchive = settings.resume ? checkpoint?.previousState?.archive : null;
   const collectedItems = settings.resume ? [...(checkpoint?.previousItems || [])] : [];
   const collectedMedia = collectedItems.flatMap((entry) => entry.media || []);
@@ -3604,7 +4202,14 @@ async function collectInstagramFollowedPostsByProfiles(session, config, plan, se
     ? [...previousArchive.scannedUsers]
     : [];
   const scannedHandles = new Set(scannedUsers.map((entry) => cleanText(entry?.handle || '').toLowerCase()).filter(Boolean));
-  let scanStopReason = relationResult.stopReason || runtimeRiskToStopReason(pickRuntimeRiskSignal(relationResult.riskSignals ?? []));
+  let profileApiDisabledAfterRateLimit = scannedUsers.some((entry) => (
+    entry?.apiReason === 'api-rate-limited'
+    || (entry?.visibilitySignals ?? []).includes('api-rate-limited-dom-fallback')
+  ));
+  let scanStopReason = relationResult.stopReason || runtimeRiskToStopReason(pickRuntimeRiskSignal([
+    ...(relationResult.riskSignals ?? []),
+    ...(relationApiArchive?.riskSignals ?? []),
+  ]));
   for (const user of users.slice(0, settings.maxUsers)) {
     if (scanStopReason || collectedItems.length >= settings.maxItems) {
       break;
@@ -3622,23 +4227,39 @@ async function collectInstagramFollowedPostsByProfiles(session, config, plan, se
       account,
       url: buildUrlFromTemplate(config, config.routes.posts, account),
     };
-    const apiCaptureStartIndex = apiCapture?.mark?.() ?? 0;
-    await session.navigateAndWait(profilePlan.url, createWaitPolicy(settings.timeoutMs));
-    const profileResult = await collectSocialPage(session, config, profilePlan, {
-      ...settings,
-      maxItems: Math.min(settings.perUserMaxItems, settings.maxItems),
-    });
+    let { profileResult, apiProfileArchive } = await collectProfileDateScanAttempt(
+      session,
+      config,
+      profilePlan,
+      settings,
+      apiCapture,
+      profileApiDisabledAfterRateLimit,
+      { maxScrolls: initialProfileDateScanMaxScrolls(config, settings) },
+    );
+    let emptyRetryCount = 0;
+    if (shouldRetryEmptyXProfileDateScan(config, profileResult, apiProfileArchive)) {
+      emptyRetryCount += 1;
+      await sleep(Math.max(settings.scrollWaitMs, 1_500));
+      ({ profileResult, apiProfileArchive } = await collectProfileDateScanAttempt(
+        session,
+        config,
+        profilePlan,
+        settings,
+        apiCapture,
+        profileApiDisabledAfterRateLimit,
+        { maxScrolls: settings.maxScrolls },
+      ));
+    }
     let profileStopReason = profileResult.stopReason || runtimeRiskToStopReason(pickRuntimeRiskSignal(profileResult.riskSignals ?? []));
-    const apiProfileArchive = settings.apiCursor
-      ? await collectSocialApiArchive(session, config, profilePlan, {
-        ...settings,
-        maxItems: Math.min(settings.perUserMaxItems, settings.maxItems),
-      }, apiCapture, null, {
-        captureStartIndex: apiCaptureStartIndex,
-        includeCheckpointItems: false,
-      })
-      : null;
-    profileStopReason = profileStopReason || runtimeRiskToStopReason(pickRuntimeRiskSignal(apiProfileArchive?.riskSignals ?? []));
+    const apiProfileRiskSignal = pickRuntimeRiskSignal(apiProfileArchive?.riskSignals ?? []);
+    const apiProfileStopReason = runtimeRiskToStopReason(apiProfileRiskSignal);
+    const apiRateLimitedDomFallback = apiProfileStopReason === 'rate-limited' && !profileStopReason;
+    if (apiRateLimitedDomFallback) {
+      profileApiDisabledAfterRateLimit = true;
+    } else {
+      profileStopReason = profileStopReason || apiProfileStopReason;
+    }
+    const profileTimelineLoadFailed = profileStopReason === 'timeline-load-error';
     const apiMatchedItems = (apiProfileArchive?.items || [])
       .filter((entry) => itemMatchesDateWindow(entry, plan))
       .map((entry) => ({
@@ -3656,7 +4277,7 @@ async function collectInstagramFollowedPostsByProfiles(session, config, plan, se
         })),
     ];
     matchedItems = mergeByKey(matchedItems, (entry) => entry.id || entry.url || `${entry.sourceAccount}:${entry.text}`, settings.perUserMaxItems);
-    if (matchedItems.length === 0 && (profileResult.items || []).some((entry) => entry.url && !entry.timestamp)) {
+    if (config.siteKey === 'instagram' && matchedItems.length === 0 && (profileResult.items || []).some((entry) => entry.url && !entry.timestamp)) {
       matchedItems = await enrichInstagramItemsFromDetails(session, config, plan, settings, account, profileResult.items || []);
     }
     collectedItems.push(...matchedItems);
@@ -3669,14 +4290,18 @@ async function collectInstagramFollowedPostsByProfiles(session, config, plan, se
       apiItems: apiProfileArchive?.items?.length ?? 0,
       apiReason: apiProfileArchive?.reason ?? null,
       matchedItems: matchedItems.length,
-      visibilitySignals: profileResult.visibilitySignals ?? [],
+      visibilitySignals: dedupeSortedStrings([
+        ...(profileResult.visibilitySignals ?? []),
+        ...(apiRateLimitedDomFallback ? ['api-rate-limited-dom-fallback'] : []),
+      ]),
       riskSignals: dedupeSortedStrings([
         ...(profileResult.riskSignals ?? []),
-        ...(apiProfileArchive?.riskSignals ?? []),
+        ...(apiRateLimitedDomFallback ? [] : (apiProfileArchive?.riskSignals ?? [])),
       ]),
       stopReason: profileStopReason ?? null,
+      emptyRetryCount,
     });
-    if (profileStopReason) {
+    if (profileStopReason && !profileTimelineLoadFailed) {
       scanStopReason = profileStopReason;
     }
     scannedHandles.add(cleanText(account || '').toLowerCase());
@@ -3704,32 +4329,53 @@ async function collectInstagramFollowedPostsByProfiles(session, config, plan, se
   const boundarySignals = dedupeSortedStrings([
     ...(relationResult.visibilitySignals ?? []),
     ...(relationResult.riskSignals ?? []),
+    ...(relationApiArchive?.riskSignals ?? []),
     ...scannedUsers.flatMap((entry) => [...(entry.visibilitySignals ?? []), ...(entry.riskSignals ?? [])]),
   ]);
   const boundaryCounts = {
     privateOrUnavailable: scannedUsers.filter((entry) => (entry.visibilitySignals ?? []).some((signal) => ['private-account', 'deleted-or-unavailable', 'age-or-region-restricted'].includes(signal))).length,
     riskBlocked: scannedUsers.filter((entry) => (entry.riskSignals ?? []).length || entry.stopReason).length,
     noVisibleItems: scannedUsers.filter((entry) => entry.visibleItems === 0 && entry.apiItems === 0).length,
-    missingMatchedItems: scannedUsers.filter((entry) => entry.matchedItems === 0).length,
+    missingMatchedItems: scannedUsers.filter((entry) => entry.matchedItems === 0 && ((entry.visibleItems ?? 0) > 0 || (entry.apiItems ?? 0) > 0)).length,
   };
+  const relationComplete = relationApiArchive?.complete === true
+    || relationResult.archive?.complete === true
+    || followedUsersSeed?.archive?.complete === true;
+  const scannedAllUsers = users.length === 0
+    ? relationComplete
+    : scannedUsers.length >= Math.min(users.length, settings.maxUsers);
+  const boundedByMaxUsers = users.length >= settings.maxUsers && relationComplete !== true;
+  const boundedByMaxItems = items.length >= settings.maxItems;
+  const archiveComplete = Boolean(
+    relationComplete
+    && scannedAllUsers
+    && !scanStopReason
+    && !boundedByMaxUsers
+    && !boundedByMaxItems
+    && boundarySignals.length === 0,
+  );
   const archiveReason = scanStopReason
     ? scanStopReason
-    : users.length >= settings.maxUsers
+    : boundedByMaxUsers
       ? 'max-users'
-      : items.length >= settings.maxItems
+      : boundedByMaxItems
         ? 'max-items'
         : boundarySignals.length > 0
           ? 'platform-boundary-signals'
-          : 'unverified-following-pagination';
+          : archiveComplete
+            ? null
+            : 'unverified-following-pagination';
   const confidence = scanStopReason || boundaryCounts.riskBlocked > 0
     ? 'risk-blocked'
     : boundaryCounts.privateOrUnavailable > 0
       ? 'private-or-unavailable'
       : items.some((entry) => !entry.timestamp) || boundaryCounts.missingMatchedItems > 0
         ? 'missing-detail-time'
-        : users.length >= settings.maxUsers
+        : boundedByMaxUsers
           ? 'bounded-by-max-users'
-          : 'verified-complete';
+          : archiveComplete
+            ? 'verified-complete'
+            : 'unverified-following-pagination';
   return {
     finalUrl: relationResult.finalUrl,
     title: relationResult.title,
@@ -3750,6 +4396,7 @@ async function collectInstagramFollowedPostsByProfiles(session, config, plan, se
     ]),
     riskSignals: dedupeSortedStrings([
       ...(relationResult.riskSignals ?? []),
+      ...(relationApiArchive?.riskSignals ?? []),
       ...scannedUsers.flatMap((entry) => entry.riskSignals ?? []),
     ]),
     riskEvents: [
@@ -3758,14 +4405,47 @@ async function collectInstagramFollowedPostsByProfiles(session, config, plan, se
     stopReason: scanStopReason,
     archive: {
       strategy: 'followed-profile-date-scan',
-      complete: false,
+      complete: archiveComplete,
       reason: archiveReason,
       confidence,
       boundarySignals,
       boundaryCounts,
       scannedUsers,
+      relationArchive: summarizeFollowedRelationArchive(relationApiArchive, relationApiUsers, users, followedUsersSeed),
     },
   };
+}
+
+function shouldUseFollowedProfileDateScan(config, plan, settings, pageResult = null) {
+  if (plan.action !== 'followed-posts-by-date') {
+    return false;
+  }
+  const mode = String(settings.followedDateMode || '').toLowerCase();
+  const profileScanModes = new Set(['followed-profile-date-scan', 'profile-date-scan', 'profile-scan']);
+  if (config.siteKey === 'instagram') {
+    return profileScanModes.has(mode) || !new Set(['home-feed', 'api-feed', 'home-feed-api']).has(mode);
+  }
+  if (config.siteKey !== 'x') {
+    return false;
+  }
+  if (new Set(['search-only', 'filter-follows', 'filter-follows-search']).has(mode)) {
+    return false;
+  }
+  if (profileScanModes.has(mode)) {
+    return true;
+  }
+  if (!pageResult) {
+    return false;
+  }
+  if ((pageResult.items?.length ?? 0) > 0) {
+    return false;
+  }
+  if (runtimeRiskToStopReason(pickRuntimeRiskSignal(pageResult.riskSignals ?? []))) {
+    return false;
+  }
+  return ['dom-empty', 'no-results', 'no-api-seed-captured', 'no-parseable-api-seed', 'target-empty'].includes(
+    String(pageResult.archive?.reason || pageResult.stopReason || ''),
+  );
 }
 
 function selectResultPayload(plan, pageResult) {
@@ -3828,7 +4508,22 @@ function mergeCheckpointItemsIntoPayload(payload, checkpoint, settings) {
   };
 }
 
-function summarizeRuntimeRisk(pageResult = {}, settings = {}) {
+function riskStateForRuntimeRisk(pageResult = {}, plan = {}, settings = {}, riskSummary = {}) {
+  if (riskSummary.rateLimited !== true) {
+    return null;
+  }
+  const taskAction = settings.fullArchive ? 'full-archive' : (plan.action ?? 'action');
+  return normalizeRiskTransition({
+    from: 'normal',
+    state: 'rate_limited',
+    reasonCode: 'request-burst',
+    siteKey: plan.siteKey,
+    taskId: `${plan.siteKey ?? 'social'}:${taskAction}`,
+    scope: String(pageResult.archive?.reason ?? riskSummary.stopReason ?? '').startsWith('api-') ? 'api' : 'profile',
+  });
+}
+
+function summarizeRuntimeRisk(pageResult = {}, settings = {}, plan = {}) {
   const riskSignals = dedupeSortedStrings([
     ...(pageResult.riskSignals ?? []),
     ...(pageResult.archive?.boundarySignals ?? []).filter((signal) => ['challenge', 'login-wall', 'rate-limited'].includes(signal)),
@@ -3846,6 +4541,10 @@ function summarizeRuntimeRisk(pageResult = {}, settings = {}) {
     : rateLimited
       ? 'pause-and-retry-later'
       : null;
+  const riskState = riskStateForRuntimeRisk(pageResult, plan, settings, {
+    rateLimited,
+    stopReason,
+  });
   return {
     riskSignals,
     stopReason,
@@ -3858,6 +4557,7 @@ function summarizeRuntimeRisk(pageResult = {}, settings = {}) {
     rateLimited,
     hardStop,
     suggestedAction,
+    riskState,
   };
 }
 
@@ -4017,6 +4717,98 @@ function renderMarkdownReport(result) {
     lines.push('');
   }
   return lines.join('\n').trimEnd() + '\n';
+}
+
+function socialActionAuthConfirmed(authResult = null) {
+  const status = normalizeText(authResult?.status);
+  return ['already-authenticated', 'authenticated'].includes(status)
+    || authResult?.loginState?.identityConfirmed === true
+    || authResult?.identityConfirmed === true
+    || authResult?.loggedIn === true;
+}
+
+function shouldRecordSocialActionSessionReuse({ plan = {}, authContext = {}, authResult = null, finalResult = null, closeSummary = null } = {}) {
+  if (plan.requiresAuth !== true || !authContext.userDataDir || authContext.reuseLoginState === false) {
+    return false;
+  }
+  if (!socialActionAuthConfirmed(authResult)) {
+    return false;
+  }
+  if (authResult?.challengeRequired === true || finalResult?.runtimeRisk?.authExpired === true) {
+    return false;
+  }
+  const shutdownMode = normalizeText(closeSummary?.shutdownMode);
+  if (shutdownMode && !['graceful', 'forced'].includes(shutdownMode)) {
+    return false;
+  }
+  return true;
+}
+
+async function recordSocialActionSessionReuse({
+  plan = {},
+  authContext = {},
+  authResult = null,
+  finalResult = null,
+  closeSummary = null,
+  settings = {},
+} = {}, deps = {}) {
+  if (!shouldRecordSocialActionSessionReuse({ plan, authContext, authResult, finalResult, closeSummary })) {
+    return null;
+  }
+  const userDataDir = authContext.userDataDir;
+  const readState = deps.readAuthSessionState ?? readAuthSessionState;
+  const writeState = deps.writeAuthSessionState ?? writeAuthSessionState;
+  const previousState = await readState(userDataDir) ?? {};
+  const previousCounts = previousState.counts ?? {};
+  const now = deps.now instanceof Date ? deps.now : new Date();
+  const nowIso = now.toISOString();
+  const authPolicy = resolveAuthSessionPolicy(authContext.authConfig ?? {});
+  const keepaliveIntervalMinutes = authPolicy.keepaliveIntervalMinutes;
+  const nextSuggestedKeepaliveAt = new Date(now.getTime() + (keepaliveIntervalMinutes * 60_000)).toISOString();
+  const persistedState = {
+    updatedAt: nowIso,
+    keepaliveIntervalMinutes,
+    lastHealthyAt: nowIso,
+    lastAuthenticatedAt: nowIso,
+    lastKeepaliveAt: cleanText(previousState.lastKeepaliveAt) || null,
+    lastLoginAt: normalizeText(authResult?.status) === 'authenticated'
+      ? nowIso
+      : cleanText(previousState.lastLoginAt) || null,
+    lastSessionReuseVerifiedAt: nowIso,
+    nextSuggestedKeepaliveAt,
+    lastRiskAt: cleanText(previousState.lastRiskAt) || null,
+    lastRiskCauseCode: cleanText(previousState.lastRiskCauseCode) || null,
+    lastRiskAction: cleanText(previousState.lastRiskAction) || null,
+    lastAntiCrawlSignals: Array.isArray(previousState.lastAntiCrawlSignals)
+      ? previousState.lastAntiCrawlSignals.filter(Boolean)
+      : [],
+    lastWarmupAt: cleanText(previousState.lastWarmupAt) || null,
+    lastWarmupCompleted: previousState.lastWarmupCompleted === true,
+    lastWarmupUrls: Array.isArray(previousState.lastWarmupUrls)
+      ? previousState.lastWarmupUrls.filter(Boolean)
+      : [],
+    lastBrowserShutdownMode: normalizeText(closeSummary?.shutdownMode) || null,
+    networkIdentityFingerprint: cleanText(previousState.networkIdentityFingerprint) || null,
+    profileQuarantined: previousState.profileQuarantined === true,
+    counts: {
+      successfulKeepalives: Number(previousCounts.successfulKeepalives ?? 0),
+      successfulLogins: Number(previousCounts.successfulLogins ?? 0) + (
+        normalizeText(authResult?.status) === 'authenticated' ? 1 : 0
+      ),
+      sessionReuseVerifications: Number(previousCounts.sessionReuseVerifications ?? 0) + 1,
+      failedKeepalives: Number(previousCounts.failedKeepalives ?? 0),
+      socialActionSessionReuses: Number(previousCounts.socialActionSessionReuses ?? 0) + 1,
+    },
+  };
+  await writeState(userDataDir, persistedState);
+  return {
+    status: 'recorded',
+    operation: plan.action,
+    profileRef: authContext.userDataDir ? 'persistent-profile' : 'none',
+    shutdownMode: closeSummary?.shutdownMode ?? null,
+    nextSuggestedKeepaliveAt,
+    timeoutMs: settings.timeoutMs ?? null,
+  };
 }
 
 function buildSocialSessionGate(result = {}, { requiresAuth = false } = {}) {
@@ -4213,21 +5005,29 @@ function createArtifactSlug(plan) {
 }
 
 function artifactPathSummary(layout) {
-  return {
+  const artifacts = normalizeArtifactReferenceSet({
     runDir: layout.runDir,
     manifest: layout.manifestPath,
+    manifestRedactionAudit: layout.manifestRedactionAuditPath,
     items: layout.itemsJsonlPath,
     mediaDir: layout.mediaDir,
     state: layout.statePath,
     report: layout.reportPath,
+    reportRedactionAudit: layout.reportRedactionAuditPath,
     apiCapture: layout.apiCapturePath,
+    apiCaptureRedactionAudit: layout.apiCaptureRedactionAuditPath,
     apiDriftSamples: layout.apiDriftSamplesPath,
+    apiDriftSamplesRedactionAudit: layout.apiDriftSamplesRedactionAuditPath,
+    socialRiskBlockedLifecycleEvent: layout.socialRiskBlockedLifecycleEventPath,
+    socialRiskBlockedLifecycleEventRedactionAudit: layout.socialRiskBlockedLifecycleEventRedactionAuditPath,
     downloads: layout.downloadsJsonlPath,
     mediaManifest: layout.mediaHashManifestPath,
     mediaQueue: layout.mediaQueuePath,
     indexCsv: layout.indexCsvPath,
     indexHtml: layout.indexHtmlPath,
-  };
+  });
+  assertSchemaCompatible('ArtifactReferenceSet', artifacts);
+  return artifacts;
 }
 
 function buildSocialArtifactLayout(plan, settings) {
@@ -4237,12 +5037,18 @@ function buildSocialArtifactLayout(plan, settings) {
   return {
     runDir,
     manifestPath: path.join(runDir, 'manifest.json'),
+    manifestRedactionAuditPath: path.join(runDir, 'manifest.redaction-audit.json'),
     itemsJsonlPath: path.join(runDir, 'items.jsonl'),
     mediaDir: path.join(runDir, 'media'),
     statePath: path.join(runDir, 'state.json'),
     reportPath: path.join(runDir, 'report.md'),
+    reportRedactionAuditPath: path.join(runDir, 'report.redaction-audit.json'),
     apiCapturePath: path.join(runDir, 'api-capture-debug.json'),
+    apiCaptureRedactionAuditPath: path.join(runDir, 'api-capture-debug.redaction-audit.json'),
     apiDriftSamplesPath: path.join(runDir, 'api-drift-samples.json'),
+    apiDriftSamplesRedactionAuditPath: path.join(runDir, 'api-drift-samples.redaction-audit.json'),
+    socialRiskBlockedLifecycleEventPath: path.join(runDir, 'social-action-risk-blocked.lifecycle-event.json'),
+    socialRiskBlockedLifecycleEventRedactionAuditPath: path.join(runDir, 'social-action-risk-blocked.lifecycle-event.redaction-audit.json'),
     downloadsJsonlPath: path.join(runDir, 'downloads.jsonl'),
     mediaHashManifestPath: path.join(runDir, 'media-manifest.json'),
     mediaQueuePath: path.join(runDir, 'media-queue.json'),
@@ -4355,6 +5161,12 @@ function buildSocialActionRecoveryCommand(result, layout, extraArgs = []) {
   }
   if (plan.date) {
     args.push('--date', plan.date);
+  }
+  if (plan.fromDate) {
+    args.push('--from-date', plan.fromDate);
+  }
+  if (plan.toDate) {
+    args.push('--to-date', plan.toDate);
   }
   if (plan.query) {
     args.push('--query', plan.query);
@@ -4701,6 +5513,8 @@ function summarizeCompleteness(result) {
   const archiveReason = archive?.reason ?? null;
   const softArchiveReasons = new Set([
     'api-seed-only',
+    'dom-empty',
+    'no-results',
     'soft-cursor-exhausted',
   ]);
   const archiveBoundedBy = archive?.boundedBy || boundedReasonFromArchiveReason(archiveReason);
@@ -4834,7 +5648,11 @@ function summarizeRunOutcome(result, settings) {
       resumable: false,
     };
   }
-  if ((settings.fullArchive || result.plan?.action === 'followed-posts-by-date') && archive && archive.complete !== true) {
+  const apiCursorDisabledFollowedPosts = result.plan?.action === 'followed-posts-by-date'
+    && settings.apiCursor !== true;
+  const requiresArchiveComplete = (settings.fullArchive && !apiCursorDisabledFollowedPosts)
+    || (result.plan?.action === 'followed-posts-by-date' && settings.apiCursor === true);
+  if (requiresArchiveComplete && archive && archive.complete !== true) {
     return {
       ok: false,
       status: 'incomplete',
@@ -4854,7 +5672,7 @@ function summarizeRunOutcome(result, settings) {
     return {
       ok: true,
       status: 'degraded',
-      reason: result.completeness.driftReasons?.[0] || result.completeness.platformBoundarySignals?.[0] || null,
+      reason: result.completeness.driftReasons?.[0] || result.completeness.platformBoundarySignals?.[0] || result.completeness.archiveReason || null,
       resumable: Boolean(archive?.nextCursor),
     };
   }
@@ -4948,7 +5766,165 @@ function createCheckpointWriter(layout, plan, settings, checkpoint) {
   };
 }
 
-async function writeSocialArtifacts(finalResult, layout, checkpointWriter) {
+export function createSocialArtifactRedactionFailure(error, { artifactKind = 'artifact' } = {}) {
+  const reason = reasonCodeSummary('redaction-failed');
+  const causeSummary = Object.fromEntries(Object.entries(redactValue({
+    name: error instanceof Error ? error.name : undefined,
+    code: error && typeof error === 'object' ? error.code : undefined,
+  }).value).filter(([, value]) => value !== undefined));
+  const failure = new Error(`Redaction failed for ${artifactKind}; persistent artifact write blocked`);
+  failure.name = 'SocialArtifactRedactionFailure';
+  failure.code = reason.code;
+  failure.reasonCode = reason.code;
+  failure.failureMode = 'redaction-failed';
+  failure.family = reason.family;
+  failure.retryable = reason.retryable;
+  failure.cooldownNeeded = reason.cooldownNeeded;
+  failure.isolationNeeded = reason.isolationNeeded;
+  failure.manualRecoveryNeeded = reason.manualRecoveryNeeded;
+  failure.degradable = reason.degradable;
+  failure.artifactWriteAllowed = reason.artifactWriteAllowed;
+  failure.catalogAction = reason.catalogAction;
+  failure.artifactKind = artifactKind;
+  failure.causeSummary = causeSummary;
+  return failure;
+}
+
+export async function writeRedactedJsonArtifactWithAudit(
+  artifactPath,
+  auditPath,
+  payload,
+  { artifactKind = 'artifact' } = {},
+) {
+  let prepared;
+  try {
+    prepared = prepareRedactedArtifactJsonWithAudit(payload);
+  } catch (error) {
+    throw createSocialArtifactRedactionFailure(error, { artifactKind });
+  }
+  await writeTextFile(artifactPath, prepared.json);
+  await writeTextFile(auditPath, prepared.auditJson);
+}
+
+function externalReportMarkdownPath(reportPath) {
+  return /\.json$/iu.test(reportPath) ? reportPath.replace(/\.json$/iu, '.md') : `${reportPath}.md`;
+}
+
+function externalReportAuditPath(reportPath) {
+  return /\.json$/iu.test(reportPath)
+    ? reportPath.replace(/\.json$/iu, '.redaction-audit.json')
+    : `${reportPath}.redaction-audit.json`;
+}
+
+function externalReportMarkdownAuditPath(markdownPath) {
+  return `${markdownPath}.redaction-audit.json`;
+}
+
+function prepareRedactedMarkdownArtifact(markdown, { artifactKind = 'social-report-markdown' } = {}) {
+  try {
+    const redactedMarkdown = redactValue(String(markdown ?? ''));
+    const markdownText = String(redactedMarkdown.value ?? '');
+    assertNoForbiddenPatterns(markdownText);
+    const audit = prepareRedactedArtifactJsonWithAudit(redactedMarkdown.audit);
+    return {
+      markdownText,
+      auditJson: audit.json,
+    };
+  } catch (error) {
+    throw createSocialArtifactRedactionFailure(error, { artifactKind });
+  }
+}
+
+export async function writeExternalSocialReportArtifacts(reportPath, finalResult) {
+  const markdownPath = externalReportMarkdownPath(reportPath);
+  const jsonAuditPath = externalReportAuditPath(reportPath);
+  const markdownAuditPath = externalReportMarkdownAuditPath(markdownPath);
+  let preparedJson;
+  let preparedMarkdown;
+  try {
+    preparedJson = prepareRedactedArtifactJsonWithAudit(finalResult);
+    const markdown = finalResult.markdown || renderMarkdownReport(finalResult);
+    preparedMarkdown = prepareRedactedMarkdownArtifact(markdown, { artifactKind: 'external-social-report' });
+  } catch (error) {
+    throw createSocialArtifactRedactionFailure(error, { artifactKind: 'external-social-report' });
+  }
+  await writeTextFile(reportPath, preparedJson.json);
+  await writeTextFile(jsonAuditPath, preparedJson.auditJson);
+  await writeTextFile(markdownPath, preparedMarkdown.markdownText);
+  await writeTextFile(markdownAuditPath, preparedMarkdown.auditJson);
+  return {
+    reportPath,
+    reportRedactionAuditPath: jsonAuditPath,
+    markdownReportPath: markdownPath,
+    markdownRedactionAuditPath: markdownAuditPath,
+  };
+}
+
+export async function writeInternalSocialReportArtifact(reportPath, auditPath, markdown) {
+  const prepared = prepareRedactedMarkdownArtifact(markdown, { artifactKind: 'internal-social-report' });
+  await writeTextFile(reportPath, prepared.markdownText);
+  await writeTextFile(auditPath, prepared.auditJson);
+  return {
+    reportPath,
+    reportRedactionAuditPath: auditPath,
+  };
+}
+
+function capabilityHookMatchSummaryForLifecycleEvent(lifecycleEvent, {
+  capabilityHookRegistry,
+  capabilityHooks,
+} = {}) {
+  const hooks = capabilityHookRegistry ?? capabilityHooks;
+  if (!hooks) {
+    return undefined;
+  }
+  return matchCapabilityHooksForLifecycleEvent(hooks, lifecycleEvent);
+}
+
+function socialActionTaskType(finalResult = {}) {
+  const taskId = String(finalResult.runtimeRisk?.riskState?.taskId ?? '');
+  const [, taskType] = taskId.split(':');
+  return taskType || finalResult.plan?.action || 'social-action';
+}
+
+function buildSocialRiskBlockedLifecycleEvent(finalResult = {}, layout, hookOptions = {}) {
+  const riskState = finalResult.runtimeRisk?.riskState;
+  if (finalResult.runtimeRisk?.hardStop !== true || !riskState) {
+    return null;
+  }
+  let lifecycleEvent = normalizeLifecycleEvent({
+    eventType: 'social.action.risk_blocked',
+    traceId: path.basename(layout.runDir),
+    correlationId: riskState.taskId,
+    taskId: riskState.taskId,
+    siteKey: finalResult.siteKey,
+    taskType: socialActionTaskType(finalResult),
+    adapterVersion: finalResult.plan?.adapterVersion ?? 'social-action-router-v1',
+    reasonCode: riskState.reasonCode,
+    createdAt: finalResult.generatedAt,
+    details: {
+      status: finalResult.outcome?.status,
+      reason: finalResult.outcome?.reason,
+      stopReason: finalResult.runtimeRisk?.stopReason,
+      riskSignals: finalResult.runtimeRisk?.riskSignals ?? [],
+      riskState,
+    },
+  });
+  const capabilityHookMatches = capabilityHookMatchSummaryForLifecycleEvent(lifecycleEvent, hookOptions);
+  if (capabilityHookMatches) {
+    lifecycleEvent = normalizeLifecycleEvent({
+      ...lifecycleEvent,
+      details: {
+        ...lifecycleEvent.details,
+        capabilityHookMatches,
+      },
+    });
+  }
+  assertSchemaCompatible('LifecycleEvent', lifecycleEvent);
+  return lifecycleEvent;
+}
+
+async function writeSocialArtifacts(finalResult, layout, checkpointWriter, hookOptions = {}) {
   await ensureDir(layout.runDir);
   await ensureDir(layout.mediaDir);
   const rows = extractArtifactRows(finalResult);
@@ -4960,27 +5936,41 @@ async function writeSocialArtifacts(finalResult, layout, checkpointWriter) {
     await writeJsonLines(layout.downloadsJsonlPath, finalResult.download.downloads ?? []);
     await writeJsonFile(layout.mediaHashManifestPath, mediaValidation);
   }
-  await writeTextFile(layout.reportPath, finalResult.markdown || renderMarkdownReport(finalResult));
+  await writeInternalSocialReportArtifact(
+    layout.reportPath,
+    layout.reportRedactionAuditPath,
+    finalResult.markdown || renderMarkdownReport(finalResult),
+  );
   await writeTextFile(layout.indexCsvPath, renderSocialIndexCsv(finalResult, layout));
   await writeTextFile(layout.indexHtmlPath, renderSocialIndexHtml(finalResult, layout));
   if (finalResult.result?.archive?.capture) {
-    await writeJsonFile(layout.apiCapturePath, {
-      schemaVersion: ARTIFACT_SCHEMA_VERSION,
-      generatedAt: finalResult.generatedAt,
-      siteKey: finalResult.siteKey,
-      plan: safePlanForArtifact(finalResult.plan),
-      archiveReason: finalResult.result.archive.reason ?? null,
-      capture: finalResult.result.archive.capture,
-    });
-    if (finalResult.result.archive.capture.rawDriftSamples?.length) {
-      await writeJsonFile(layout.apiDriftSamplesPath, {
+    await writeRedactedJsonArtifactWithAudit(
+      layout.apiCapturePath,
+      layout.apiCaptureRedactionAuditPath,
+      {
         schemaVersion: ARTIFACT_SCHEMA_VERSION,
         generatedAt: finalResult.generatedAt,
         siteKey: finalResult.siteKey,
         plan: safePlanForArtifact(finalResult.plan),
         archiveReason: finalResult.result.archive.reason ?? null,
-        samples: finalResult.result.archive.capture.rawDriftSamples,
-      });
+        capture: finalResult.result.archive.capture,
+      },
+      { artifactKind: 'api-capture-debug' },
+    );
+    if (finalResult.result.archive.capture.rawDriftSamples?.length) {
+      await writeRedactedJsonArtifactWithAudit(
+        layout.apiDriftSamplesPath,
+        layout.apiDriftSamplesRedactionAuditPath,
+        {
+          schemaVersion: ARTIFACT_SCHEMA_VERSION,
+          generatedAt: finalResult.generatedAt,
+          siteKey: finalResult.siteKey,
+          plan: safePlanForArtifact(finalResult.plan),
+          archiveReason: finalResult.result.archive.reason ?? null,
+          samples: finalResult.result.archive.capture.rawDriftSamples,
+        },
+        { artifactKind: 'api-drift-samples' },
+      );
     }
   }
   const stateStatus = finalResult.ok
@@ -5052,11 +6042,17 @@ async function writeSocialArtifacts(finalResult, layout, checkpointWriter) {
       },
     } : null,
   };
-  await writeJsonFile(layout.manifestPath, manifest);
-  return {
-    ...artifactPathSummary(layout),
-    counts,
-  };
+  const manifestPrepared = prepareRedactedArtifactJsonWithAudit(manifest);
+  await writeTextFile(layout.manifestPath, manifestPrepared.json);
+  await writeTextFile(layout.manifestRedactionAuditPath, manifestPrepared.auditJson);
+  const riskBlockedLifecycleEvent = buildSocialRiskBlockedLifecycleEvent(finalResult, layout, hookOptions);
+  if (riskBlockedLifecycleEvent) {
+    await writeLifecycleEventArtifact(riskBlockedLifecycleEvent, {
+      eventPath: layout.socialRiskBlockedLifecycleEventPath,
+      auditPath: layout.socialRiskBlockedLifecycleEventRedactionAuditPath,
+    });
+  }
+  return artifactPathSummary(layout);
 }
 
 function normalizeComparableUrl(value) {
@@ -5189,6 +6185,7 @@ function normalizeRunSettings(plan, options = {}) {
     maxDetailPages: Math.max(0, toNumber(options.maxDetailPages, DEFAULT_MAX_DETAIL_PAGES)),
     perUserMaxItems: Math.max(1, toNumber(options.perUserMaxItems, DEFAULT_MAX_ITEMS)),
     maxMediaDownloads: Math.max(1, toNumber(options.maxMediaDownloads, DEFAULT_MAX_MEDIA_DOWNLOADS)),
+    followedUsersFile: options.followedUsersFile ? path.resolve(String(options.followedUsersFile)) : null,
     mediaDownloadConcurrency: Math.max(1, Math.min(32, toNumber(options.mediaDownloadConcurrency, DEFAULT_MEDIA_DOWNLOAD_CONCURRENCY))),
     mediaDownloadRetries: Math.max(0, Math.min(10, toNumber(options.mediaDownloadRetries, DEFAULT_MEDIA_DOWNLOAD_RETRIES))),
     mediaDownloadBackoffMs: Math.max(0, toNumber(options.mediaDownloadBackoffMs, DEFAULT_MEDIA_DOWNLOAD_BACKOFF_MS)),
@@ -5289,10 +6286,13 @@ export async function runSocialAction(options = {}, deps = {}) {
     requiresAuth: plan.requiresAuth === true,
   });
   if (initialSessionGate.status === 'blocked') {
+    const loadedCheckpoint = await loadSocialCheckpoint(artifactLayout, settings);
+    const checkpoint = createCheckpointWriter(artifactLayout, plan, settings, loadedCheckpoint);
     const blockedResult = {
       ok: false,
       siteKey: plan.siteKey,
       dryRun: false,
+      generatedAt: new Date().toISOString(),
       plan,
       reasonCode: 'session-gate-blocked',
       outcome: {
@@ -5305,6 +6305,11 @@ export async function runSocialAction(options = {}, deps = {}) {
       artifacts: artifactPathSummary(artifactLayout),
     };
     blockedResult.markdown = renderMarkdownReport(blockedResult);
+    blockedResult.recoveryRunbook = buildRecoveryRunbook(blockedResult, artifactLayout);
+    blockedResult.artifacts = await writeSocialArtifacts(blockedResult, artifactLayout, checkpoint, {
+      capabilityHookRegistry: deps.capabilityHookRegistry,
+      capabilityHooks: deps.capabilityHooks,
+    });
     return blockedResult;
   }
 
@@ -5325,6 +6330,9 @@ export async function runSocialAction(options = {}, deps = {}) {
   const checkpoint = createCheckpointWriter(artifactLayout, plan, settings, loadedCheckpoint);
   let session = null;
   let apiCapture = null;
+  let authResult = null;
+  let finalResult = null;
+  let sessionCloseSummary = null;
   try {
     await ensureDir(artifactLayout.runDir);
     await ensureDir(artifactLayout.mediaDir);
@@ -5393,7 +6401,7 @@ export async function runSocialAction(options = {}, deps = {}) {
         media: 0,
       },
     });
-    const authResult = plan.requiresAuth
+    authResult = plan.requiresAuth
       ? await runtime.ensureAuthenticatedSession(session, initialNavigationUrl, settings, { authContext })
       : null;
     await checkpoint.write({
@@ -5435,13 +6443,8 @@ export async function runSocialAction(options = {}, deps = {}) {
     }
     let surfacePreparation = null;
     let pageResult = null;
-    const instagramApiFeedModes = new Set(['home-feed', 'api-feed', 'home-feed-api']);
-    if (
-      executionPlan.siteKey === 'instagram'
-      && executionPlan.action === 'followed-posts-by-date'
-      && !instagramApiFeedModes.has(settings.followedDateMode)
-    ) {
-      pageResult = await collectInstagramFollowedPostsByProfiles(session, config, executionPlan, settings, checkpoint, apiCapture);
+    if (shouldUseFollowedProfileDateScan(config, executionPlan, settings)) {
+      pageResult = await collectFollowedPostsByProfiles(session, config, executionPlan, settings, checkpoint, apiCapture);
       surfacePreparation = pageResult.surfacePreparation ?? null;
     } else {
       await checkpoint.write({
@@ -5481,13 +6484,14 @@ export async function runSocialAction(options = {}, deps = {}) {
           apiArchive = instagramFeedArchive;
         }
       }
-      pageResult = mergePageResultWithArchive(domPageResult, apiArchive, settings);
+      pageResult = mergePageResultWithArchive(domPageResult, apiArchive, settings, executionPlan);
       if (config.siteKey === 'x' && isSocialRelationAction(executionPlan.action)) {
         const relationApi = await collectXRelationApiUsers(session, executionPlan, settings, apiCapture);
         if (relationApi) {
+          const relationApiUsers = Array.isArray(relationApi.users) ? relationApi.users : [];
           pageResult = {
             ...pageResult,
-            relations: relationApi.users?.length ? relationApi.users : pageResult.relations,
+            relations: relationApiUsers.length ? relationApiUsers : pageResult.relations,
             archive: {
               ...(pageResult.archive || {}),
               strategy: relationApi.strategy,
@@ -5496,8 +6500,8 @@ export async function runSocialAction(options = {}, deps = {}) {
               bounded: relationApi.bounded,
               boundedBy: relationApi.boundedBy,
               pages: relationApi.pages,
-              apiItemCount: relationApi.users.length,
-              dedupedItemCount: relationApi.users.length || pageResult.relations?.length || 0,
+              apiItemCount: relationApiUsers.length,
+              dedupedItemCount: relationApiUsers.length || pageResult.relations?.length || 0,
               seedUrl: relationApi.seedUrl ?? null,
               requestTemplate: relationApi.requestTemplate ?? null,
               nextCursor: relationApi.nextCursor ?? null,
@@ -5517,6 +6521,30 @@ export async function runSocialAction(options = {}, deps = {}) {
             ],
           };
         }
+      }
+      if (shouldUseFollowedProfileDateScan(config, executionPlan, settings, pageResult)) {
+        const fallbackResult = await collectFollowedPostsByProfiles(session, config, executionPlan, settings, checkpoint, apiCapture);
+        pageResult = {
+          ...fallbackResult,
+          archive: {
+            ...(fallbackResult.archive || {}),
+            fallbackFrom: {
+              strategy: pageResult.archive?.strategy ?? null,
+              reason: pageResult.archive?.reason ?? null,
+              domItemCount: pageResult.archive?.domItemCount ?? pageResult.items?.length ?? 0,
+              apiItemCount: pageResult.archive?.apiItemCount ?? 0,
+            },
+          },
+          riskSignals: dedupeSortedStrings([
+            ...(pageResult.riskSignals ?? []),
+            ...(fallbackResult.riskSignals ?? []),
+          ]),
+          riskEvents: [
+            ...(pageResult.riskEvents ?? []),
+            ...(fallbackResult.riskEvents ?? []),
+          ],
+        };
+        surfacePreparation = fallbackResult.surfacePreparation ?? surfacePreparation;
       }
     }
     const resultPayload = mergeCheckpointItemsIntoPayload(
@@ -5540,7 +6568,10 @@ export async function runSocialAction(options = {}, deps = {}) {
         pageUrl: mediaEntry.pageUrl ?? item.url ?? null,
         mediaIndex: mediaEntry.mediaIndex ?? mediaIndex,
       })));
-      const media = itemMedia.length ? itemMedia : (resultPayload.media || pageResult.media || []);
+      const media = filterSocialDownloadMediaCandidates(
+        itemMedia.length ? itemMedia : (resultPayload.media || pageResult.media || []),
+        executionPlan,
+      );
       const mediaOutDir = artifactLayout.mediaDir;
       const maxMediaDownloads = Math.min(media.length || settings.maxItems, settings.maxMediaDownloads);
       const downloadResult = await executeMediaDownloads({
@@ -5578,7 +6609,7 @@ export async function runSocialAction(options = {}, deps = {}) {
       };
     }
 
-    const finalResult = {
+    finalResult = {
       ok: true,
       siteKey: executionPlan.siteKey,
       generatedAt: new Date().toISOString(),
@@ -5589,7 +6620,7 @@ export async function runSocialAction(options = {}, deps = {}) {
       download,
       metrics: session.getMetrics?.() ?? null,
     };
-    finalResult.runtimeRisk = summarizeRuntimeRisk(resultPayload, settings);
+    finalResult.runtimeRisk = summarizeRuntimeRisk(resultPayload, settings, executionPlan);
     finalResult.authHealth = summarizeSocialAuthHealth(executionPlan, settings, authContext, authResult, finalResult.runtimeRisk);
     finalResult.sessionProvider = sessionMetadata.sessionProvider;
     finalResult.sessionHealth = sessionMetadata.sessionHealth ?? null;
@@ -5601,10 +6632,12 @@ export async function runSocialAction(options = {}, deps = {}) {
     finalResult.ok = finalResult.outcome.ok;
     finalResult.recoveryRunbook = buildRecoveryRunbook({ ...finalResult, _settings: settings }, artifactLayout);
     finalResult.markdown = renderMarkdownReport(finalResult);
-    finalResult.artifacts = await writeSocialArtifacts(finalResult, artifactLayout, checkpoint);
+    finalResult.artifacts = await writeSocialArtifacts(finalResult, artifactLayout, checkpoint, {
+      capabilityHookRegistry: deps.capabilityHookRegistry,
+      capabilityHooks: deps.capabilityHooks,
+    });
     if (settings.reportPath) {
-      await writeJsonFile(settings.reportPath, finalResult);
-      await writeTextFile(settings.reportPath.replace(/\.json$/iu, '.md'), finalResult.markdown);
+      await writeExternalSocialReportArtifacts(settings.reportPath, finalResult);
     }
     return finalResult;
   } catch (error) {
@@ -5617,7 +6650,21 @@ export async function runSocialAction(options = {}, deps = {}) {
   } finally {
     apiCapture?.dispose?.();
     if (session) {
-      await session.close();
+      sessionCloseSummary = await session.close();
+      const authSessionRecord = await recordSocialActionSessionReuse({
+        plan: finalResult?.plan ?? plan,
+        authContext,
+        authResult,
+        finalResult,
+        closeSummary: sessionCloseSummary,
+        settings,
+      }, deps).catch((error) => ({
+        status: 'skipped',
+        reason: normalizeText(error?.message) || 'auth-session-record-failed',
+      }));
+      if (finalResult && authSessionRecord) {
+        finalResult.authSessionRecord = authSessionRecord;
+      }
     }
   }
 }
@@ -5658,6 +6705,7 @@ Options:
   --max-items <n>                   Limit archive or content items.
   --max-media-downloads <n>         Limit downloaded media files.
   --max-users <n>                   Limit relation/followed scans.
+  --followed-users-file <path>      Reuse a verified followed-users items.jsonl as the relation seed.
   --run-dir <dir>                   Exact artifact run directory.
   --out-dir <dir>                   Artifact output root.
   --resume                          Resume from existing checkpoint state.
@@ -5740,6 +6788,7 @@ export function parseSocialActionArgs(argv = process.argv.slice(2), defaults = {
     maxScrolls: lastFlagValue(flags, 'max-scrolls'),
     maxApiPages: lastFlagValue(flags, 'max-api-pages'),
     maxUsers: lastFlagValue(flags, 'max-users'),
+    followedUsersFile: lastFlagValue(flags, 'followed-users-file', lastFlagValue(flags, 'following-file')),
     maxDetailPages: lastFlagValue(flags, 'max-detail-pages'),
     perUserMaxItems: lastFlagValue(flags, 'per-user-max-items'),
     maxMediaDownloads: lastFlagValue(flags, 'max-media-downloads'),

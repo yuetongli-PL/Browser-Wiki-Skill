@@ -5,6 +5,7 @@ import process from 'node:process';
 import { normalizeText } from '../../shared/normalize.mjs';
 import book22BiquModule from './site-modules/22biqu.mjs';
 import bilibiliModule from './site-modules/bilibili.mjs';
+import bz888Module from './site-modules/bz888.mjs';
 import {
   buildGenericLegacyArgs,
   resolveEntrypoint,
@@ -17,6 +18,26 @@ import {
   createDownloadPlan as createRegistryDownloadPlan,
   resolveDownloadResources as resolveRegistryDownloadResources,
 } from './registry.mjs';
+
+const SITE_RESOLVER_DEP_KEYS = Object.freeze([
+  'resolveBilibiliApiEvidence',
+  'resolveDouyinMediaBatch',
+  'enumerateDouyinAuthorVideos',
+  'queryDouyinFollow',
+  'queryXiaohongshuFollow',
+  'resolveXiaohongshuFreshEvidence',
+]);
+
+export function resolverDependenciesFromRuntime(options = {}, deps = {}) {
+  const result = {};
+  for (const key of SITE_RESOLVER_DEP_KEYS) {
+    const value = deps[key] ?? options[key];
+    if (typeof value === 'function') {
+      result[key] = value;
+    }
+  }
+  return result;
+}
 
 function buildLegacyCommandWithSiteModule(siteModule, plan, sessionLease = null, request = {}, options = {}) {
   const workspaceRoot = options.workspaceRoot ?? process.cwd();
@@ -66,6 +87,7 @@ function createRegistryBackedSiteModule(siteModule) {
 
 const SITE_MODULES = Object.freeze(Object.fromEntries([
   book22BiquModule,
+  bz888Module,
   bilibiliModule,
   douyinModule,
   xiaohongshuModule,

@@ -3,6 +3,7 @@
 import {
   addCommonProfileFlags,
   addLoginFlags,
+  createNativeResolutionMiss,
   legacyItems,
   normalizeText,
   normalizePositiveInteger,
@@ -10,6 +11,11 @@ import {
   resolveNativeResourceSeeds,
   toArray,
 } from './common.mjs';
+import {
+  normalizeDownloadResourceConsumerHeaders,
+  normalizeSessionLeasePageFetchHeaders,
+  normalizeSessionLeaseConsumerHeaders,
+} from '../contracts.mjs';
 
 export const siteKey = 'xiaohongshu';
 
@@ -181,8 +187,8 @@ function metadataObject(request = {}) {
 }
 
 function headerFreshnessEvidence(request = {}, sessionLease = null) {
-  const requestHeaderNames = isObject(request.headers) ? Object.keys(request.headers).sort() : [];
-  const sessionHeaderNames = isObject(sessionLease?.headers) ? Object.keys(sessionLease.headers).sort() : [];
+  const requestHeaderNames = Object.keys(normalizeDownloadResourceConsumerHeaders(request.headers)).sort();
+  const sessionHeaderNames = Object.keys(normalizeSessionLeasePageFetchHeaders(sessionLease)).sort();
   const resolverHeaderNames = ['User-Agent'];
   const allHeaderNames = [...new Set([...requestHeaderNames, ...sessionHeaderNames, ...resolverHeaderNames])].sort();
   const requiredHeaderNames = [...new Set([
@@ -198,7 +204,6 @@ function headerFreshnessEvidence(request = {}, sessionLease = null) {
       : 'unknown';
   return {
     contractVersion: 'xiaohongshu-header-freshness-v1',
-    sessionStatus: firstText(sessionLease?.status) || undefined,
     headerNames: allHeaderNames,
     requestHeaderNames,
     sessionHeaderNames,
@@ -252,7 +257,7 @@ function noteMetadataFromFacts(facts = {}, request = {}, plan = {}) {
   };
 }
 
-function seedFromXiaohongshuAsset(asset = {}, mediaType = 'image', index = 0, note = {}, sourceType = 'page-facts') {
+export function createXiaohongshuAssetResourceSeed(asset = {}, mediaType = 'image', index = 0, note = {}, sourceType = 'page-facts') {
   const url = mediaType === 'video' ? videoUrl(asset) : imageUrl(asset);
   if (!url) {
     return null;
@@ -267,6 +272,7 @@ function seedFromXiaohongshuAsset(asset = {}, mediaType = 'image', index = 0, no
     sourceUrl: note.sourceUrl,
     referer: note.sourceUrl,
     groupId: firstText(note.noteId, note.noteTitle),
+    headers: normalizeDownloadResourceConsumerHeaders(asset.headers ?? asset.downloadHeaders),
     metadata: {
       noteId: note.noteId || undefined,
       noteTitle: note.noteTitle || undefined,
@@ -305,8 +311,8 @@ function seedsFromPageFacts(facts = {}, request = {}, plan = {}, sourceType = 'p
     ...toArray(facts.note?.video),
   ];
   return [
-    ...images.map((asset, index) => seedFromXiaohongshuAsset(asset, 'image', index, note, sourceType)),
-    ...videos.map((asset, index) => seedFromXiaohongshuAsset(asset, 'video', index, note, sourceType)),
+    ...images.map((asset, index) => createXiaohongshuAssetResourceSeed(asset, 'image', index, note, sourceType)),
+    ...videos.map((asset, index) => createXiaohongshuAssetResourceSeed(asset, 'video', index, note, sourceType)),
   ].filter(Boolean);
 }
 
@@ -337,8 +343,8 @@ function seedsFromFixtureHtml(html, request = {}, plan = {}, sourceType = 'fixtu
   const imageUrls = mediaUrlsFromHtml(html, /<(?:img|meta)\b[^>]*(?:src|content)=["']([^"']+\.(?:jpg|jpeg|png|webp|gif)(?:\?[^"']*)?)["'][^>]*>/giu);
   const videoUrls = mediaUrlsFromHtml(html, /<(?:video|source|meta)\b[^>]*(?:src|content)=["']([^"']+\.(?:mp4|m3u8|mov|webm)(?:\?[^"']*)?)["'][^>]*>/giu);
   return [
-    ...imageUrls.map((url, index) => seedFromXiaohongshuAsset({ url, id: `html-image-${index + 1}` }, 'image', index, note, sourceType)),
-    ...videoUrls.map((url, index) => seedFromXiaohongshuAsset({ url, id: `html-video-${index + 1}` }, 'video', index, note, sourceType)),
+    ...imageUrls.map((url, index) => createXiaohongshuAssetResourceSeed({ url, id: `html-image-${index + 1}` }, 'image', index, note, sourceType)),
+    ...videoUrls.map((url, index) => createXiaohongshuAssetResourceSeed({ url, id: `html-video-${index + 1}` }, 'video', index, note, sourceType)),
   ].filter(Boolean);
 }
 
@@ -404,6 +410,31 @@ async function responseToText(response) {
   return firstText(response.body, response.data);
 }
 
+function isXiaohongshuErrorOrRiskPage(response = null, html = '', requestedUrl = '') {
+  const finalUrl = firstText(response?.url, requestedUrl);
+  try {
+    const parsed = new URL(finalUrl);
+    if (
+      parsed.hostname === 'www.xiaohongshu.com'
+      && (
+        parsed.pathname === '/404'
+        || parsed.pathname.startsWith('/404/')
+        || parsed.searchParams.has('error_code')
+        || parsed.searchParams.has('verifyMsg')
+      )
+    ) {
+      return true;
+    }
+  } catch {
+    // Non-URL test fixtures fall through to HTML markers.
+  }
+  const loweredHtml = String(html ?? '').toLowerCase();
+  return loweredHtml.includes("this page isn't available right now")
+    || loweredHtml.includes('sorry, this page is not available right now')
+    || loweredHtml.includes('error_code=300031')
+    || loweredHtml.includes('verifymsg=');
+}
+
 async function fetchedHtmlEvidence(request = {}, plan = {}, sessionLease = null, context = {}) {
   const url = inputUrl(request, plan);
   const fetchState = pageFetchState(request, context);
@@ -416,8 +447,8 @@ async function fetchedHtmlEvidence(request = {}, plan = {}, sessionLease = null,
       headers: {
         Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'User-Agent': 'Mozilla/5.0 Browser-Wiki-Skill native resolver',
-        ...(isObject(sessionLease?.headers) ? sessionLease.headers : {}),
-        ...(isObject(request.headers) ? request.headers : {}),
+        ...normalizeSessionLeasePageFetchHeaders(sessionLease),
+        ...normalizeDownloadResourceConsumerHeaders(request.headers),
       },
       redirect: 'follow',
     });
@@ -428,6 +459,15 @@ async function fetchedHtmlEvidence(request = {}, plan = {}, sessionLease = null,
         fetchSource: fetchState.source === 'network-fetch' ? 'network-fetch' : 'injected-fetch',
         networkGateUsed: fetchState.source === 'network-fetch',
         fetchedUrlPresent: Boolean(firstText(response?.url, url)),
+      };
+    }
+    if (isXiaohongshuErrorOrRiskPage(response, html, url)) {
+      return {
+        seeds: [],
+        fetchSource: fetchState.source === 'network-fetch' ? 'network-fetch' : 'injected-fetch',
+        networkGateUsed: fetchState.source === 'network-fetch',
+        fetchedUrlPresent: Boolean(firstText(response?.url, url)),
+        blockedReason: 'xiaohongshu-risk-or-error-page',
       };
     }
     return {
@@ -500,6 +540,67 @@ function callableFromContext(context = {}, name) {
   ].find((candidate) => typeof candidate === 'function') ?? null;
 }
 
+function freshEvidenceProducer(context = {}) {
+  return callableFromContext(context, 'resolveXiaohongshuFreshEvidence');
+}
+
+function resourceSeedsFromFreshEvidence(evidence = {}) {
+  return toArray(evidence.resourceSeeds ?? evidence.resources)
+    .filter((seed) => isObject(seed) || typeof seed === 'string');
+}
+
+function pageFactsFromFreshEvidence(evidence = {}) {
+  return [
+    evidence.pageFacts,
+    ...toArray(evidence.pageFactsList),
+  ].filter(isObject);
+}
+
+async function freshEvidenceFromProducer(request = {}, plan = {}, sessionLease = null, context = {}) {
+  const producer = freshEvidenceProducer(context);
+  const url = inputUrl(request, plan);
+  if (!producer || !url || !isXiaohongshuPageUrl(url)) {
+    return null;
+  }
+  const evidence = await producer(url, {
+    request,
+    plan,
+    sessionLease,
+    allowNetworkResolve: context.allowNetworkResolve === true,
+    profilePath: request.profilePath ?? context.profilePath ?? context.options?.profilePath,
+    browserPath: request.browserPath ?? context.browserPath ?? context.options?.browserPath,
+    browserProfileRoot: request.browserProfileRoot ?? context.browserProfileRoot ?? context.options?.browserProfileRoot,
+    userDataDir: request.userDataDir ?? context.userDataDir ?? context.options?.userDataDir,
+    timeoutMs: request.timeoutMs ?? context.timeoutMs ?? context.options?.timeoutMs,
+    headless: request.headless ?? context.headless ?? context.options?.headless,
+    reuseLoginState: request.reuseLoginState,
+    maxItems: request.maxItems ?? request.limit ?? plan.policy?.maxItems ?? 1,
+  }, context);
+  if (!isObject(evidence)) {
+    return null;
+  }
+  const seeds = resourceSeedsFromFreshEvidence(evidence);
+  if (seeds.length > 0) {
+    return {
+      seeds,
+      resolvedNotes: Number(evidence.resolution?.resolvedNotes ?? evidence.pageFactsList?.length ?? 1) || 1,
+      headerFreshness: evidence.headerFreshness,
+      status: firstText(evidence.status),
+    };
+  }
+  const factSeeds = pageFactsFromFreshEvidence(evidence)
+    .flatMap((facts) => seedsFromPageFacts(facts, request, plan, 'fresh-page-evidence'));
+  if (factSeeds.length > 0) {
+    return {
+      seeds: factSeeds,
+      resolvedNotes: Number(evidence.resolution?.resolvedNotes ?? evidence.pageFactsList?.length ?? 1) || 1,
+      headerFreshness: evidence.headerFreshness,
+      status: firstText(evidence.status),
+    };
+  }
+  return null;
+}
+
 function resultNotes(value = {}) {
   if (Array.isArray(value)) {
     return value;
@@ -564,6 +665,16 @@ async function requestWithPageResolverSeeds(request = {}, plan = {}, sessionLeas
       sourceType: 'page-facts',
       resolvedNotes: pageFactCandidates(request).length,
       headerFreshness,
+    });
+  }
+
+  const freshEvidence = await freshEvidenceFromProducer(request, plan, sessionLease, context);
+  if (freshEvidence?.seeds?.length > 0) {
+    return requestWithSeeds(request, freshEvidence.seeds, {
+      sourceType: 'fresh-page-evidence',
+      resolvedNotes: freshEvidence.resolvedNotes,
+      headerFreshness: isObject(freshEvidence.headerFreshness) ? freshEvidence.headerFreshness : headerFreshness,
+      freshEvidenceStatus: freshEvidence.status || undefined,
     });
   }
 
@@ -657,6 +768,23 @@ export async function resolveResources(plan, sessionLease = null, context = {}) 
   const seededRequest = requestWithPayloadSeeds(context.request ?? {}, plan)
     ?? await requestWithPageResolverSeeds(context.request ?? {}, plan, sessionLease, context);
   if (!seededRequest) {
+    const request = context.request ?? {};
+    const url = inputUrl(request, plan);
+    if (context.allowNetworkResolve === true && isXiaohongshuPageUrl(url)) {
+      const headerFreshness = headerFreshnessEvidence(request, sessionLease);
+      return createNativeResolutionMiss(siteKey, plan, {
+        method: nativeSeedResolverOptions.method,
+        reason: headerFreshness.cookieEvidence
+          ? 'xiaohongshu-native-page-unresolved'
+          : 'xiaohongshu-session-or-header-evidence-required',
+        expectedCount: 1,
+        resolution: {
+          sourceType: 'page-fetch',
+          headerFreshness,
+          networkGateUsed: true,
+        },
+      });
+    }
     return null;
   }
   const seededResolved = resolveNativeResourceSeeds(siteKey, plan, sessionLease, {

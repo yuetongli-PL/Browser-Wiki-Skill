@@ -6,6 +6,7 @@ import path from 'node:path';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 
 import {
+  DEFAULT_GRACEFUL_EXIT_TIMEOUT_MS,
   cleanupUserDataDir,
   parseDevToolsActivePortContent,
   shutdownBrowser,
@@ -38,6 +39,10 @@ test('cleanupUserDataDir ignores persistent transient cleanup errors', async () 
   });
 
   assert.equal(attempts, 6);
+});
+
+test('shutdownBrowser gives persistent profiles enough time for graceful Chrome exit', () => {
+  assert.equal(DEFAULT_GRACEFUL_EXIT_TIMEOUT_MS, 15_000);
 });
 
 function createFakeBrowserProcess() {

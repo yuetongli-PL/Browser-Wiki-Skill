@@ -4,8 +4,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { mkdtemp, rm } from 'node:fs/promises';
 
-import { runPipeline } from '../../src/entrypoints/pipeline/run-pipeline.mjs';
+import { pipelineCliJson, runPipeline } from '../../src/entrypoints/pipeline/run-pipeline.mjs';
 import { PIPELINE_STAGE_SPECS } from '../../src/pipeline/engine/stage-spec.mjs';
+import { reasonCodeSummary } from '../../src/sites/capability/reason-codes.mjs';
 
 function buildStageDir(workspace, name) {
   return path.join(workspace, name);
@@ -93,6 +94,69 @@ function createSuccessfulStageImpls(workspace, overrides = {}) {
     ...overrides,
   };
 }
+
+test('pipeline CLI JSON stdout redacts sensitive diagnostics', () => {
+  const output = pipelineCliJson({
+    inputUrl: 'https://example.com/?access_token=synthetic-pipeline-stdout-access',
+    status: 'blocked',
+    authKeepalive: {
+      sessionHealthSummary: {
+        warning: 'Authorization: Bearer synthetic-pipeline-stdout-auth',
+      },
+    },
+    riskRecovery: {
+      keepaliveReport: {
+        error: 'csrf=synthetic-pipeline-stdout-csrf',
+      },
+    },
+  });
+
+  assert.doesNotMatch(
+    output,
+    /synthetic-pipeline-stdout-|access_token=|Authorization: Bearer|csrf=/iu,
+  );
+  const parsed = JSON.parse(output);
+  assert.equal(parsed.inputUrl, 'https://example.com/?[REDACTED]');
+  assert.equal(parsed.authKeepalive.sessionHealthSummary.warning, 'Authorization: [REDACTED]');
+  assert.equal(parsed.riskRecovery.keepaliveReport.error, '[REDACTED]');
+});
+
+test('pipeline CLI JSON stdout fails closed without raw cause exposure', () => {
+  const recovery = reasonCodeSummary('redaction-failed');
+  const payload = {
+    toJSON() {
+      throw new Error(
+        'Cookie: synthetic-pipeline-stdout-cookie refresh_token=synthetic-pipeline-stdout-refresh',
+      );
+    },
+  };
+
+  assert.throws(
+    () => pipelineCliJson(payload),
+    (error) => {
+      assert.equal(error.name, 'PipelineCliSummaryRedactionFailure');
+      assert.equal(error.reasonCode, 'redaction-failed');
+      assert.equal(error.retryable, recovery.retryable);
+      assert.equal(error.cooldownNeeded, recovery.cooldownNeeded);
+      assert.equal(error.isolationNeeded, recovery.isolationNeeded);
+      assert.equal(error.manualRecoveryNeeded, recovery.manualRecoveryNeeded);
+      assert.equal(error.degradable, recovery.degradable);
+      assert.equal(error.artifactWriteAllowed, recovery.artifactWriteAllowed);
+      assert.equal(error.catalogAction, recovery.catalogAction);
+      assert.equal(error.diagnosticWriteAllowed, false);
+      assert.equal(Object.hasOwn(error, 'cause'), false);
+      assert.deepEqual(error.causeSummary, {
+        name: 'Error',
+        code: null,
+      });
+      assert.doesNotMatch(
+        `${error.message}\n${JSON.stringify(error)}`,
+        /synthetic-pipeline-stdout-|Cookie:|refresh_token=/iu,
+      );
+      return true;
+    },
+  );
+});
 
 test('runPipeline smoke test wires stages in order and passes derived paths', async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-run-pipeline-'));
@@ -812,10 +876,23 @@ test('runPipeline blocks after one Xiaohongshu keepalive retry when capture stay
     assert.equal(result.kbDir, null);
     assert.equal(result.skillDir, null);
     assert.equal(result.riskRecovery?.status, 'still-blocked');
+    assert.equal(result.riskRecovery?.reasonCode, 'anti-crawl-verify');
+    assert.deepEqual(result.riskRecovery?.recovery, reasonCodeSummary('anti-crawl-verify'));
     assert.equal(result.antiCrawlReasonCode, 'anti-crawl-verify');
     assert.deepEqual(result.antiCrawlSignals, ['ip-risk', 'risk-control', 'verify']);
     assert.equal(result.riskCauseCode, 'browser-fingerprint-risk');
     assert.equal(result.riskAction, 'use-visible-browser-warmup');
+    assert.equal(result.riskState.state, 'captcha_required');
+    assert.equal(result.riskState.reasonCode, 'anti-crawl-verify');
+    assert.equal(result.riskState.siteKey, 'xiaohongshu');
+    assert.equal(result.riskState.scope, 'pipeline-restriction');
+    assert.equal(result.riskState.transition.from, 'normal');
+    assert.equal(result.riskState.transition.to, 'captcha_required');
+    assert.equal(result.riskState.transition.observedAt, result.generatedAt);
+    assert.equal(result.riskState.recovery.cooldownNeeded, true);
+    assert.equal(result.riskState.recovery.isolationNeeded, true);
+    assert.equal(result.riskState.recovery.manualRecoveryNeeded, true);
+    assert.equal(result.riskState.recovery.artifactWriteAllowed, true);
     assert.equal(result.stages.capture.status, 'success');
     assert.equal(result.stages.expanded.status, 'skipped');
   } finally {

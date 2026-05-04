@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
 import { parseArgs } from '../../src/entrypoints/sites/download.mjs';
@@ -150,6 +150,7 @@ function createReady22BiquLease(purpose = 'download:book') {
     riskSignals: [],
     purpose,
     headers: {
+      'User-Agent': 'Browser-Wiki-Skill 22biqu test fixture',
       Cookie: 'fixture-session=1',
     },
   };
@@ -195,6 +196,38 @@ test('22biqu native dry-run resolves an ordinary book URL from local book-conten
   assert.equal(resolved.metadata.bookContent.bookId, 'fixture-book');
   assert.equal(resolved.completeness.complete, true);
   assert.equal(resolved.completeness.reason, '22biqu-book-content-provided');
+});
+
+test('22biqu native resolver honors max-items for bounded live execute validation', async (t) => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-22biqu-native-bounded-'));
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+
+  const { plan, resolved } = await resolve22Biqu({
+    site: '22biqu',
+    input: 'https://www.22biqu.com/biqu123/',
+    chapters: [
+      { chapterIndex: 1, href: '1.html', title: 'Chapter One' },
+      { chapterIndex: 2, href: '2.html', title: 'Chapter Two' },
+      { chapterIndex: 3, href: '3.html', title: 'Chapter Three' },
+    ],
+    dryRun: false,
+    maxItems: 2,
+  });
+
+  assert.equal(plan.policy.maxItems, 2);
+  assert.equal(resolved.resources.length, 2);
+  assert.deepEqual(resolved.resources.map((resource) => resource.url), [
+    'https://www.22biqu.com/biqu123/1.html',
+    'https://www.22biqu.com/biqu123/2.html',
+  ]);
+  assert.equal(resolved.completeness.expectedCount, 3);
+  assert.equal(resolved.completeness.resolvedCount, 2);
+  assert.equal(resolved.completeness.complete, false);
+  assert.equal(resolved.completeness.reason, '22biqu-chapters-bounded-by-max-items');
+  assert.deepEqual(resolved.metadata.boundedByMaxItems, {
+    maxItems: 2,
+    fullChapterCount: 3,
+  });
 });
 
 test('22biqu native dry-run resolves an ordinary book title from a compiled knowledge-base fixture root', async (t) => {
@@ -257,6 +290,34 @@ test('22biqu native dry-run resolves directory HTML fixture chapters by URL', as
   assert.match(resolved.metadata.resolver.method, /^native-22biqu-/u);
   assert.equal(resolved.metadata.bookContent.bookId, 'directory-html-book');
   assert.equal(resolved.completeness.complete, true);
+});
+
+test('22biqu directory resolver preserves bounded max-items reason', async (t) => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-22biqu-native-html-bounded-'));
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  const html = createDirectoryHtmlFixture();
+
+  const { resolved } = await resolve22Biqu({
+    site: '22biqu',
+    input: 'https://www.22biqu.com/biqu456/',
+    dryRun: true,
+    maxItems: 2,
+    mockFetchImpl: async () => ({
+      ok: true,
+      text: async () => html,
+    }),
+  });
+
+  assert.equal(resolved.resources.length, 2);
+  assert.equal(resolved.metadata.directory.chapterCount, 4);
+  assert.deepEqual(resolved.metadata.boundedByMaxItems, {
+    maxItems: 2,
+    fullChapterCount: 4,
+  });
+  assert.equal(resolved.completeness.expectedCount, 4);
+  assert.equal(resolved.completeness.resolvedCount, 2);
+  assert.equal(resolved.completeness.complete, false);
+  assert.equal(resolved.completeness.reason, '22biqu-chapters-bounded-by-max-items');
 });
 
 test('22biqu native dry-run resolves directory HTML fixture chapters by book title', async (t) => {
@@ -389,7 +450,9 @@ test('22biqu runner passes request mockFetchImpl into native directory resolver'
   });
 
   assert.deepEqual(fetchCalls.map((entry) => entry.url), ['https://www.22biqu.com/biqu456/']);
-  assert.equal(fetchCalls[0].headers.Cookie, 'fixture-session=1');
+  assert.equal(fetchCalls[0].headers['User-Agent'], 'Browser-Wiki-Skill 22biqu test fixture');
+  assert.equal(fetchCalls[0].headers.Cookie, undefined);
+  assert.equal(fetchCalls[0].headers.cookie, undefined);
   assert.equal(result.resolvedTask.resources.length, 4);
   assert.deepEqual(result.resolvedTask.resources.map((resource) => resource.url), [
     'https://www.22biqu.com/biqu456/1.html',
@@ -401,6 +464,10 @@ test('22biqu runner passes request mockFetchImpl into native directory resolver'
   assert.equal(result.resolvedTask.metadata.directory.source, 'fetchImpl');
   assert.equal(result.manifest.status, 'skipped');
   assert.equal(result.manifest.reason, 'dry-run');
+  assert.doesNotMatch(
+    await readFile(result.manifest.artifacts.manifest, 'utf8'),
+    /fixture-session|Cookie|cookie/u,
+  );
 });
 
 test('22biqu runner resolveNetwork option allows global fetch directory resolution', async (t) => {

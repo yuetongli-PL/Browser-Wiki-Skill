@@ -1,10 +1,13 @@
 import importlib.util
+import asyncio
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+import httpx
 
 def load_internal_module(module_name: str, relative_path: str):
     module_path = Path(__file__).resolve().parents[2] / relative_path
@@ -50,6 +53,14 @@ class DownloadBookTests(unittest.TestCase):
             loaded = download_book.load_json(payload_path)
 
             self.assertEqual(loaded["host"], "www.22biqu.com")
+
+    def test_resolve_profile_path_ignores_redacted_registry_value(self):
+        resolved = download_book.resolve_profile_path("[REDACTED]", "www.bz888888888.com")
+
+        self.assertEqual(
+            resolved,
+            Path(download_book.REPO_ROOT) / "profiles" / "www.bz888888888.com.json",
+        )
 
     def test_validate_artifact_accepts_full_pretty_txt(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -107,6 +118,135 @@ class DownloadBookTests(unittest.TestCase):
         self.assertIn("第1章 初入\n\n", rendered)
         self.assertIn("第一段", rendered)
         self.assertIn("第二段", rendered)
+
+
+    def test_ocr_rejects_access_control_images_before_fetch(self):
+        class RejectingClient:
+            async def get(self, url):
+                raise AssertionError(f"access-control image should not be fetched: {url}")
+
+        async def run_case():
+            return await download_book.ocr_image_text(
+                RejectingClient(),
+                "https://www.bz888888888.com/cdn-cgi/challenge-platform/captcha.png",
+                '<img src="/cdn-cgi/challenge-platform/captcha.png" alt="captcha verification">',
+                {"enabled": True, "textAttributes": ["alt"]},
+            )
+
+        text, source = asyncio.run(run_case())
+
+        self.assertEqual(text, "")
+        self.assertEqual(source, "access-control-image")
+
+    def test_ocr_allows_public_chapter_body_attribute_text(self):
+        class RejectingClient:
+            async def get(self, url):
+                raise AssertionError(f"attribute OCR should not fetch image: {url}")
+
+        async def run_case():
+            return await download_book.ocr_image_text(
+                RejectingClient(),
+                "https://www.bz888888888.com/book/123/chapter-body-1.png",
+                '<img src="/book/123/chapter-body-1.png" data-ocr-text="public chapter line">',
+                {"enabled": True, "textAttributes": ["data-ocr-text", "alt"]},
+            )
+
+        text, source = asyncio.run(run_case())
+
+        self.assertEqual(text, "public chapter line")
+        self.assertEqual(source, "attribute")
+
+    def test_fetch_html_reports_cloudflare_challenge_reason(self):
+        class ChallengeClient:
+            async def request(self, method, url, data=None):
+                request = httpx.Request(method, url)
+                return httpx.Response(
+                    403,
+                    request=request,
+                    headers={
+                        "server": "cloudflare",
+                        "cf-mitigated": "challenge",
+                    },
+                    text="<html><title>Just a moment...</title></html>",
+                )
+
+        async def run_case():
+            return await download_book.fetch_html(
+                ChallengeClient(),
+                "https://www.bz888888888.com/ss/",
+                method="POST",
+                data={"searchkey": "玄牝之门"},
+            )
+
+        with self.assertRaisesRegex(RuntimeError, r"blocked-by-cloudflare-challenge: HTTP 403"):
+            asyncio.run(run_case())
+
+    def test_resolve_book_target_uses_profile_search_candidates(self):
+        class SearchClient:
+            def __init__(self):
+                self.requests = []
+
+            async def request(self, method, url, data=None):
+                self.requests.append({"method": method, "url": url, "data": data})
+                request = httpx.Request(method, url)
+                return httpx.Response(
+                    200,
+                    request=request,
+                    text='<html><body><a href="/book/123/">玄牝之门</a></body></html>',
+                )
+
+        async def run_case():
+            client = SearchClient()
+            resolved = await download_book.resolve_book_target(
+                client,
+                {
+                    "baseUrl": "https://www.bz888888888.com/",
+                    "profile": {
+                        "search": {
+                            "knownQueries": [],
+                            "requestCandidates": [{
+                                "method": "GET",
+                                "path": "/custom-search/",
+                                "query": {"searchkey": "{query}"},
+                            }],
+                            "resultBookSelectors": ["a[href]"],
+                            "resultTitleSelectors": ["title"],
+                        },
+                        "bookDetail": {
+                            "bookUrlPatterns": ["/book/\\d+/?$"],
+                        },
+                    },
+                },
+                "玄牝之门",
+                None,
+            )
+            return client.requests, resolved
+
+        requests, resolved = asyncio.run(run_case())
+
+        self.assertEqual(requests[0]["method"], "GET")
+        self.assertIn("/custom-search/?searchkey=", requests[0]["url"])
+        self.assertNotIn("/ss/", requests[0]["url"])
+        self.assertEqual(resolved["bookUrl"], "https://www.bz888888888.com/book/123/")
+        self.assertEqual(resolved["mode"], "search")
+
+    def test_run_generated_crawler_preserves_stable_block_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            crawler_script = Path(tmp) / "crawler.py"
+            crawler_script.write_text(
+                "import sys\n"
+                "sys.stderr.write('blocked-by-cloudflare-challenge: HTTP 403 at https://example.test/ss/\\n')\n"
+                "raise SystemExit(1)\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, r"blocked-by-cloudflare-challenge: HTTP 403"):
+                download_book.run_generated_crawler(
+                    crawler_script=crawler_script,
+                    book_title="玄牝之门",
+                    book_url=None,
+                    out_dir=Path(tmp),
+                )
 
 
 if __name__ == "__main__":

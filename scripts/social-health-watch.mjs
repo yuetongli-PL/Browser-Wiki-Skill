@@ -1,10 +1,11 @@
 // @ts-check
 
 import { spawn } from 'node:child_process';
-import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
+
+import { writeSocialManifestJsonWithAudit } from '../tools/social-redaction.mjs';
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(MODULE_DIR, '..');
@@ -223,9 +224,8 @@ function runCommand(entry, timeoutMs) {
 }
 
 async function writeManifest(plan) {
-  await mkdir(plan.runDir, { recursive: true });
   const manifestPath = path.join(plan.runDir, 'manifest.json');
-  await writeFile(manifestPath, `${JSON.stringify(plan, null, 2)}\n`, 'utf8');
+  await writeSocialManifestJsonWithAudit(manifestPath, plan);
   return manifestPath;
 }
 

@@ -434,6 +434,20 @@ test('queryXiaohongshuFollow marks self-profile captcha redirects explicitly', a
     assert.equal(report.result.status, 'captcha-gated');
     assert.equal(report.result.reasonCode, 'self-profile-captcha');
     assert.equal(report.result.captchaDetected, true);
+    assert.equal(report.runtimeRisk.schemaVersion, 1);
+    assert.equal(report.runtimeRisk.state, 'captcha_required');
+    assert.equal(report.runtimeRisk.reasonCode, 'self-profile-captcha');
+    assert.equal(report.runtimeRisk.siteKey, 'xiaohongshu');
+    assert.equal(report.runtimeRisk.taskId, 'xiaohongshu-follow-query:list-followed-users');
+    assert.equal(report.runtimeRisk.scope, 'profile');
+    assert.equal(report.runtimeRisk.transition.from, 'normal');
+    assert.equal(report.runtimeRisk.transition.to, 'captcha_required');
+    assert.equal(report.runtimeRisk.recovery.retryable, false);
+    assert.equal(report.runtimeRisk.recovery.cooldownNeeded, true);
+    assert.equal(report.runtimeRisk.recovery.isolationNeeded, true);
+    assert.equal(report.runtimeRisk.recovery.manualRecoveryNeeded, true);
+    assert.equal(report.runtimeRisk.recovery.degradable, true);
+    assert.equal(report.runtimeRisk.recovery.artifactWriteAllowed, true);
   } finally {
     if (tempDir) {
       await rm(tempDir, { recursive: true, force: true });

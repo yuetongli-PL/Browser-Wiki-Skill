@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -90,6 +91,127 @@ class DownloadDouyinTests(unittest.TestCase):
         self.assertIsNone(tool_state["ytDlpPath"])
         self.assertIsNone(tool_state["cookiesFile"])
         self.assertFalse(tool_state["usedLoginState"])
+
+    def test_legacy_manifest_persistence_removes_profile_cookie_and_browser_evidence(self) -> None:
+        manifest = {
+            "host": "www.douyin.com",
+            "profilePath": "C:/synthetic/douyin/profile.json",
+            "runDir": "C:/tmp/safe-run",
+            "usedLoginState": True,
+            "profileHealth": {
+                "exists": True,
+                "healthy": False,
+                "usableForCookies": False,
+                "userDataDir": "C:/synthetic/browser-profile/www.douyin.com",
+                "cookiesPath": "C:/synthetic/browser-profile/Default/Cookies",
+                "preferencesPath": "C:/synthetic/browser-profile/Default/Preferences",
+                "warnings": [
+                    "Profile locked at C:/synthetic/browser-profile/www.douyin.com",
+                    "Authorization: Bearer synthetic-douyin-profile-token",
+                ],
+            },
+            "cookiesExport": {
+                "path": "C:/synthetic/cookies/douyin.txt",
+                "SESSDATA": "synthetic-sessdata",
+            },
+            "browserExport": {
+                "headers": {
+                    "Cookie": "sessionid=synthetic-cookie",
+                    "Authorization": "Bearer synthetic-auth",
+                    "X-CSRF-Token": "synthetic-csrf",
+                },
+            },
+            "inputItems": [{
+                "normalizedUrl": "https://www.douyin.com/video/111?msToken=synthetic-ms-token",
+                "downloadHeaders": {"Cookie": "sessionid=synthetic-input-cookie"},
+            }],
+            "tools": {
+                "ytDlpPath": "yt-dlp",
+                "cookiesFile": "C:/synthetic/cookies/douyin.txt",
+                "browserExport": {"headers": {"Cookie": "sessionid=synthetic-tool-cookie"}},
+            },
+            "results": [{
+                "status": "failed",
+                "pathway": "executor-error",
+                "title": "Synthetic",
+                "error": "Cookie: sessionid=synthetic-result-cookie",
+            }],
+            "summary": {"total": 1, "successful": 0, "failed": 1, "skipped": 0, "planned": 0},
+            "statistics": {"pathStats": {"executor-error": 1}},
+            "warnings": ["Cookie export path C:/synthetic/cookies/douyin.txt"],
+        }
+        sanitized = download_douyin.sanitize_legacy_manifest_for_persistence(manifest)
+        sanitized["summaryView"] = download_douyin.build_summary_view(sanitized)
+        sanitized["reportMarkdown"] = download_douyin.build_report_markdown(sanitized)
+        payload = json.dumps(sanitized, ensure_ascii=False) + sanitized["reportMarkdown"]
+
+        self.assertTrue(sanitized["profileHealth"]["exists"])
+        self.assertFalse(sanitized["profileHealth"]["loginStateReusable"])
+        self.assertIn("warningCount", sanitized["profileHealth"])
+        self.assertNotRegex(
+            payload,
+            r"profilePath|cookiesFile|cookiesExport|browserExport|userDataDir|"
+            r"browserProfileRoot|cookiesPath|preferencesPath|downloadHeaders|"
+            r"Authorization|Cookie|Bearer|sessionid=|csrf|msToken|SESSDATA|"
+            r"C:/synthetic",
+        )
+
+    def test_download_douyin_writes_sanitized_manifest_and_report(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            with mock.patch.object(download_douyin, "current_run_id", return_value="synthetic-run"):
+                with mock.patch.object(download_douyin, "resolve_douyin_profile", return_value={
+                    "profile": {},
+                    "path": "C:/synthetic/douyin/profile.json",
+                }):
+                    with mock.patch.object(download_douyin, "resolve_downloader_config", return_value={
+                        "qualityPolicy": {},
+                        "defaultContainer": None,
+                        "defaultNamingStrategy": None,
+                        "requiresLoginForHighestQuality": True,
+                    }):
+                        with mock.patch.object(download_douyin, "resolve_tool_state", return_value={
+                            "ytDlpPath": None,
+                            "ffmpegPath": None,
+                            "ffprobePath": None,
+                            "profileHealth": {
+                                "exists": True,
+                                "userDataDir": "C:/synthetic/browser-profile/www.douyin.com",
+                                "warnings": ["Profile path C:/synthetic/browser-profile/www.douyin.com"],
+                            },
+                            "cookiesFile": "C:/synthetic/cookies/douyin.txt",
+                            "usedLoginState": True,
+                            "cookiesExport": {"path": "C:/synthetic/cookies/douyin.txt"},
+                            "browserExport": {"headers": {"Cookie": "sessionid=synthetic-cookie"}},
+                            "warnings": ["Cookie path C:/synthetic/cookies/douyin.txt"],
+                        }):
+                            with mock.patch.object(download_douyin, "resolve_media_tasks", return_value={
+                                "tasks": [{
+                                    "finalUrl": "https://www.douyin.com/video/111",
+                                    "videoId": "111",
+                                }],
+                                "report": {"ok": True, "resolvedCount": 0},
+                                "warnings": [],
+                            }):
+                                with mock.patch.object(download_douyin, "execute_download_plan", return_value=[{
+                                    "status": "planned",
+                                    "pathway": "dry-run",
+                                    "title": "Synthetic",
+                                    "videoId": "111",
+                                    "finalUrl": "https://www.douyin.com/video/111",
+                                }]):
+                                    manifest = download_douyin.download_douyin(
+                                        ["https://www.douyin.com/video/7123456789012345678"],
+                                        {"dryRun": True, "outDir": temp_dir},
+                                    )
+            manifest_path = Path(manifest["runDir"]) / "download-manifest.json"
+            report_path = Path(manifest["runDir"]) / "download-report.md"
+            payload = manifest_path.read_text(encoding="utf-8") + report_path.read_text(encoding="utf-8")
+        self.assertNotRegex(
+            payload,
+            r"profilePath|cookiesFile|cookiesExport|browserExport|userDataDir|"
+            r"browserProfileRoot|cookiesPath|preferencesPath|Authorization|"
+            r"Cookie|Bearer|sessionid=|csrf|token|SESSDATA|C:/synthetic",
+        )
 
     def test_resolve_media_tasks_skips_browser_resolver_for_dry_run(self) -> None:
         settings = download_douyin.merge_settings({

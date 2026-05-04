@@ -11,12 +11,13 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import unicodedata
 from functools import partial
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import urlencode, urljoin, urlparse, urlunparse
 
 import anyio
 import httpx
@@ -298,6 +299,22 @@ def sort_chapter_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     )
 
 
+def matches_profile_url_patterns(url: str | None, patterns: list[Any], fallback_pattern: str) -> bool:
+    normalized = normalize_url_no_fragment(url)
+    if not normalized:
+        return False
+    candidates = [normalize_text(pattern) for pattern in patterns if normalize_text(pattern)]
+    if not candidates:
+        candidates = [fallback_pattern]
+    for pattern in candidates:
+        try:
+            if re.search(pattern, normalized, re.IGNORECASE):
+                return True
+        except re.error:
+            continue
+    return False
+
+
 def normalize_paragraphs(raw_html: str, cleanup_patterns: list[re.Pattern[str]]) -> list[str]:
     working = raw_html or ""
     working = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", working)
@@ -332,6 +349,198 @@ def dedupe_adjacent_lines(lines: list[str]) -> list[str]:
         result.append(line)
         previous = line
     return result
+
+
+def normalize_ocr_config(value: Any) -> dict[str, Any]:
+    config = value if isinstance(value, dict) else {}
+    return {
+        "enabled": bool(config.get("enabled")),
+        "required": bool(config.get("required")),
+        "engine": normalize_text(config.get("engine") or "tesseract"),
+        "command": normalize_text(config.get("command") or os.environ.get("BWS_OCR_COMMAND") or "tesseract"),
+        "languages": normalize_text(config.get("languages") or os.environ.get("BWS_OCR_LANGUAGES") or "chi_sim+eng"),
+        "pageSegmentationMode": int(config.get("pageSegmentationMode") or 6),
+        "timeoutSeconds": int(config.get("timeoutSeconds") or 15),
+        "preserveImagePlaceholders": bool(config.get("preserveImagePlaceholders")),
+        "imageSourceAttributes": [
+            normalize_text(item) for item in config.get("imageSourceAttributes", ["data-src", "data-original", "src"])
+            if normalize_text(item)
+        ],
+        "textAttributes": [
+            normalize_text(item) for item in config.get("textAttributes", ["data-ocr-text", "data-text", "alt", "title"])
+            if normalize_text(item)
+        ],
+    }
+
+
+def tag_attribute(tag_html: str, name: str) -> str:
+    match = re.search(rf"\b{re.escape(name)}\s*=\s*(['\"])(.*?)\1", tag_html or "", re.IGNORECASE | re.DOTALL)
+    return html.unescape(match.group(2)) if match else ""
+
+
+def image_source_from_tag(tag_html: str, base_url: str, ocr_config: dict[str, Any]) -> str:
+    for name in ocr_config.get("imageSourceAttributes", []):
+        value = normalize_text(tag_attribute(tag_html, name))
+        if value:
+            return normalize_url_no_fragment(urljoin(base_url, value)) or ""
+    return ""
+
+
+def is_access_control_ocr_image(image_url: str, tag_html: str) -> bool:
+    evidence = " ".join([
+        image_url or "",
+        tag_html or "",
+    ]).lower()
+    return any(token in evidence for token in [
+        "/cdn-cgi/",
+        "challenge",
+        "captcha",
+        "cf_chl",
+        "cloudflare",
+        "risk-control",
+        "risk_control",
+        "verification",
+        "verify-code",
+    ])
+
+
+def attribute_ocr_text(tag_html: str, ocr_config: dict[str, Any]) -> str:
+    for name in ocr_config.get("textAttributes", []):
+        value = normalize_text(tag_attribute(tag_html, name))
+        if value:
+            return value
+    return ""
+
+
+def run_tesseract_ocr(image_bytes: bytes, ocr_config: dict[str, Any]) -> str:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".img") as handle:
+        temp_path = Path(handle.name)
+        handle.write(image_bytes)
+    try:
+        completed = subprocess.run(
+            [
+                ocr_config["command"],
+                str(temp_path),
+                "stdout",
+                "-l",
+                ocr_config["languages"],
+                "--psm",
+                str(ocr_config["pageSegmentationMode"]),
+            ],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=int(ocr_config["timeoutSeconds"]),
+            env=child_utf8_env(),
+            check=False,
+        )
+        if completed.returncode != 0:
+            return ""
+        return normalize_text(completed.stdout)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
+    finally:
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
+
+
+async def ocr_image_text(
+    client: httpx.AsyncClient,
+    image_url: str,
+    tag_html: str,
+    ocr_config: dict[str, Any],
+) -> tuple[str, str]:
+    if is_access_control_ocr_image(image_url, tag_html):
+        return "", "access-control-image"
+    attribute_text = attribute_ocr_text(tag_html, ocr_config)
+    if attribute_text:
+        return attribute_text, "attribute"
+    if not ocr_config.get("enabled") or not image_url:
+        return "", "disabled"
+    try:
+        response = await client.get(image_url)
+        response.raise_for_status()
+        image_bytes = response.content
+    except Exception:
+        return "", "image-fetch-failed"
+    text = await anyio.to_thread.run_sync(run_tesseract_ocr, image_bytes, ocr_config)
+    return text, "tesseract" if text else "ocr-empty"
+
+
+async def normalize_paragraphs_with_ocr(
+    client: httpx.AsyncClient,
+    raw_html: str,
+    cleanup_patterns: list[re.Pattern[str]],
+    *,
+    base_url: str,
+    ocr_config: dict[str, Any],
+) -> tuple[list[str], dict[str, Any]]:
+    if not ocr_config.get("enabled") and not ocr_config.get("required"):
+        return normalize_paragraphs(raw_html, cleanup_patterns), {
+            "enabled": False,
+            "imageCount": 0,
+            "recognizedImageCount": 0,
+            "failedImageCount": 0,
+        }
+
+    image_count = 0
+    recognized = 0
+    failed = 0
+    sources: dict[str, int] = {}
+    segments: list[str] = []
+    cursor = 0
+    for match in re.finditer(r"<img\b[^>]*>", raw_html or "", re.IGNORECASE | re.DOTALL):
+        segments.append((raw_html or "")[cursor:match.start()])
+        tag_html = match.group(0)
+        image_count += 1
+        image_url = image_source_from_tag(tag_html, base_url, ocr_config)
+        ocr_text, source = await ocr_image_text(client, image_url, tag_html, ocr_config)
+        sources[source] = sources.get(source, 0) + 1
+        if ocr_text:
+            recognized += 1
+            segments.append(f"<br>{html.escape(ocr_text)}<br>")
+        else:
+            failed += 1
+            if source == "access-control-image":
+                raise RuntimeError(f"ocr-disallowed-access-control-image: {image_url or 'inline-image'}")
+            if ocr_config.get("required"):
+                raise RuntimeError(f"ocr-required-image-unreadable: {image_url or 'inline-image'}")
+            if ocr_config.get("preserveImagePlaceholders"):
+                label = image_url or "inline-image"
+                segments.append(f"<br>[OCR pending: {html.escape(label)}]<br>")
+        cursor = match.end()
+    segments.append((raw_html or "")[cursor:])
+    return normalize_paragraphs("".join(segments), cleanup_patterns), {
+        "enabled": bool(ocr_config.get("enabled")),
+        "required": bool(ocr_config.get("required")),
+        "engine": ocr_config.get("engine"),
+        "languages": ocr_config.get("languages"),
+        "imageCount": image_count,
+        "recognizedImageCount": recognized,
+        "failedImageCount": failed,
+        "sources": sources,
+    }
+
+
+def summarize_chapter_ocr(pages: list[dict[str, Any]]) -> dict[str, Any]:
+    enabled = any(bool(page.get("enabled")) for page in pages)
+    required = any(bool(page.get("required")) for page in pages)
+    sources: dict[str, int] = {}
+    for page in pages:
+        for key, value in (page.get("sources") or {}).items():
+            sources[key] = sources.get(key, 0) + int(value or 0)
+    return {
+        "enabled": enabled,
+        "required": required,
+        "imageCount": sum(int(page.get("imageCount") or 0) for page in pages),
+        "recognizedImageCount": sum(int(page.get("recognizedImageCount") or 0) for page in pages),
+        "failedImageCount": sum(int(page.get("failedImageCount") or 0) for page in pages),
+        "sources": sources,
+    }
 
 
 def format_txt_paragraphs(lines: list[str]) -> list[str]:
@@ -380,15 +589,59 @@ def maybe_reverse_chapters(chapters: list[dict[str, Any]]) -> list[dict[str, Any
     return chapters
 
 
+def response_access_control_challenge(response: httpx.Response) -> bool:
+    status_code = response.status_code
+    headers = {key.lower(): value.lower() for key, value in response.headers.items()}
+    evidence = " ".join([
+        str(response.url).lower(),
+        headers.get("server", ""),
+        headers.get("cf-mitigated", ""),
+        headers.get("cf-ray", ""),
+        response.text[:4096].lower(),
+    ])
+    has_cloudflare_signal = any(token in evidence for token in [
+        "cloudflare",
+        "cf-mitigated",
+        "cf-ray",
+        "/cdn-cgi/challenge-platform",
+        "challenge-platform",
+    ])
+    has_challenge_signal = any(token in evidence for token in [
+        "challenge",
+        "captcha",
+        "just a moment",
+        "checking your browser",
+        "attention required",
+    ])
+    return (
+        headers.get("cf-mitigated") == "challenge"
+        or "/cdn-cgi/challenge-platform" in evidence
+        or (status_code in {403, 429, 503} and has_cloudflare_signal and has_challenge_signal)
+    )
+
+
+def access_control_challenge_reason(response: httpx.Response) -> str:
+    return f"blocked-by-cloudflare-challenge: HTTP {response.status_code} at {response.url}"
+
+
 async def fetch_html(client: httpx.AsyncClient, url: str, *, method: str = "GET", data: dict[str, str] | None = None) -> tuple[str, str]:
     attempts = 3
     last_error: Exception | None = None
     for attempt in range(1, attempts + 1):
         try:
             response = await client.request(method, url, data=data)
+            if response_access_control_challenge(response):
+                raise RuntimeError(access_control_challenge_reason(response))
             response.raise_for_status()
             return response.text, str(response.url)
+        except RuntimeError as exc:
+            if str(exc).startswith("blocked-by-cloudflare-challenge:"):
+                raise
+            last_error = exc
         except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+            response = getattr(exc, "response", None)
+            if response is not None and response_access_control_challenge(response):
+                raise RuntimeError(access_control_challenge_reason(response)) from exc
             last_error = exc
             if attempt >= attempts:
                 break
@@ -396,9 +649,52 @@ async def fetch_html(client: httpx.AsyncClient, url: str, *, method: str = "GET"
     raise RuntimeError(str(last_error) if last_error else f"request-failed: {url}")
 
 
+def substitute_query_template(value: Any, query_text: str) -> str:
+    return str(value).replace("{query}", query_text)
+
+
+def search_request_candidates(search_cfg: dict[str, Any], base_url: str, query_text: str) -> list[dict[str, Any]]:
+    configured = search_cfg.get("requestCandidates")
+    if not configured:
+        configured = [{
+            "method": "POST",
+            "path": "/ss/",
+            "data": {"searchkey": "{query}"},
+        }]
+    candidates: list[dict[str, Any]] = []
+    for entry in configured:
+        if not isinstance(entry, dict):
+            continue
+        method = str(entry.get("method") or "GET").upper()
+        url_value = entry.get("url") or entry.get("urlTemplate") or entry.get("path") or "/ss/"
+        request_url = urljoin(base_url, substitute_query_template(url_value, query_text))
+        query_params = entry.get("query")
+        if isinstance(query_params, dict) and query_params:
+            rendered_query = {
+                str(key): substitute_query_template(value, query_text)
+                for key, value in query_params.items()
+            }
+            separator = "&" if urlparse(request_url).query else "?"
+            request_url = f"{request_url}{separator}{urlencode(rendered_query)}"
+        data = None
+        data_params = entry.get("data")
+        if isinstance(data_params, dict) and data_params:
+            data = {
+                str(key): substitute_query_template(value, query_text)
+                for key, value in data_params.items()
+            }
+        candidates.append({
+            "method": method,
+            "url": request_url,
+            "data": data,
+        })
+    return candidates
+
+
 def parse_search_results(html_text: str, final_url: str, profile: dict[str, Any]) -> dict[str, Any]:
     document = HTMLParser(html_text)
     search_cfg = profile.get("search", {})
+    detail_cfg = profile.get("bookDetail", {})
     title_text = first_css_text(document, search_cfg.get("resultTitleSelectors", [])) or ""
     query_match = re.search(r'搜索["“]?(.+?)["”]?\s+共有', title_text)
     count_match = re.search(r'共有\s*["“]?(\d+)["”]?\s*个结果', title_text)
@@ -409,7 +705,7 @@ def parse_search_results(html_text: str, final_url: str, profile: dict[str, Any]
             href = normalize_url_no_fragment(urljoin(final_url, node.attributes.get("href", "")))
             if not href or href in seen_urls:
                 continue
-            if not re.search(r"/biqu\d+/?$", href, re.IGNORECASE):
+            if not matches_profile_url_patterns(href, detail_cfg.get("bookUrlPatterns", []), r"/biqu\d+/?$"):
                 continue
             seen_urls.add(href)
             title = normalize_text(node.text(separator=" ", strip=True))
@@ -473,37 +769,48 @@ async def resolve_book_target(
                 "mode": "known-query",
             }
 
+    last_search_error: Exception | None = None
+    search_cfg = profile.get("search", {})
     for query_text in candidate_query_texts(book_title):
-        html_text, final_url = await fetch_html(
-            client,
-            urljoin(base_url, "/ss/"),
-            method="POST",
-            data={"searchkey": query_text},
-        )
-        search_info = parse_search_results(html_text, final_url, profile)
-        exact_results = [
-            item for item in search_info["results"]
-            if normalize_text(item.get("title")) == query_text
-        ]
-        fuzzy_results = [
-            item for item in search_info["results"]
-            if titles_match(item.get("title"), book_title)
-        ]
-        result = (
-            exact_results[0] if exact_results else (
-                fuzzy_results[0] if fuzzy_results else (
-                    search_info["results"][0] if search_info["results"] else None
+        for candidate in search_request_candidates(search_cfg, base_url, query_text):
+            try:
+                html_text, final_url = await fetch_html(
+                    client,
+                    candidate["url"],
+                    method=candidate["method"],
+                    data=candidate.get("data"),
+                )
+            except RuntimeError as exc:
+                if str(exc).startswith("blocked-by-cloudflare-challenge:"):
+                    raise
+                last_search_error = exc
+                continue
+            search_info = parse_search_results(html_text, final_url, profile)
+            exact_results = [
+                item for item in search_info["results"]
+                if normalize_text(item.get("title")) == query_text
+            ]
+            fuzzy_results = [
+                item for item in search_info["results"]
+                if titles_match(item.get("title"), book_title)
+            ]
+            result = (
+                exact_results[0] if exact_results else (
+                    fuzzy_results[0] if fuzzy_results else (
+                        search_info["results"][0] if search_info["results"] else None
+                    )
                 )
             )
-        )
-        if not result or not result.get("url"):
-            continue
-        return {
-            "bookUrl": normalize_url_no_fragment(result["url"]),
-            "bookTitle": normalize_text(result.get("title") or book_title),
-            "searchInfo": search_info,
-            "mode": "search",
-        }
+            if not result or not result.get("url"):
+                continue
+            return {
+                "bookUrl": normalize_url_no_fragment(result["url"]),
+                "bookTitle": normalize_text(result.get("title") or book_title),
+                "searchInfo": search_info,
+                "mode": "search",
+            }
+    if last_search_error is not None:
+        raise RuntimeError(f"search-request-failed: {last_search_error}") from last_search_error
     raise RuntimeError(f"search-no-results: {book_title}")
 
 
@@ -526,7 +833,7 @@ def parse_book_detail(html_text: str, final_url: str, profile: dict[str, Any]) -
     for selector in detail_cfg.get("chapterLinkSelectors", []):
         for node in document.css(selector):
             href = normalize_url_no_fragment(urljoin(final_url, node.attributes.get("href", "")))
-            if not href or not re.search(r"/biqu\d+/\d+\.html$", href, re.IGNORECASE):
+            if not href or not matches_profile_url_patterns(href, detail_cfg.get("chapterUrlPatterns", []), r"/biqu\d+/\d+\.html$"):
                 continue
             title = normalize_text(node.text(separator=" ", strip=True))
             if not title:
@@ -608,6 +915,7 @@ def extract_chapter_links(
     final_url: str,
     selectors: list[str],
     detail_url: str,
+    chapter_url_patterns: list[Any] | None = None,
 ) -> list[dict[str, Any]]:
     book_path_match = re.search(r"(/biqu\d+/)", detail_url)
     book_path = book_path_match.group(1) if book_path_match else ""
@@ -619,7 +927,7 @@ def extract_chapter_links(
                 continue
             if book_path and book_path not in href:
                 continue
-            if not re.search(r"/biqu\d+/\d+\.html$", href, re.IGNORECASE):
+            if not matches_profile_url_patterns(href, chapter_url_patterns or [], r"/biqu\d+/\d+\.html$"):
                 continue
             title = normalize_text(node.text(separator=" ", strip=True))
             if not title:
@@ -652,7 +960,13 @@ async def fetch_paginated_chapter_index(
         page_url = template.format(detail_url=detail_url, page=page)
         html_text, final_url = await fetch_html(client, page_url)
         document = HTMLParser(html_text)
-        page_entries = extract_chapter_links(document, final_url, selectors, detail_url)
+        page_entries = extract_chapter_links(
+            document,
+            final_url,
+            selectors,
+            detail_url,
+            detail_cfg.get("chapterUrlPatterns", []),
+        )
         page_signature = "|".join(item["href"] for item in page_entries[-12:])
         if page_signature and page_signature in page_signatures:
             progress_log(f"[download] directory page {page}: repeated signature, stop")
@@ -694,10 +1008,12 @@ async def fetch_chapter_chain(
     chapter_entry: dict[str, Any],
     chapter_cfg: dict[str, Any],
     cleanup_patterns: list[re.Pattern[str]],
+    ocr_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     current_url = chapter_entry["href"]
     pages: list[dict[str, Any]] = []
     all_lines: list[str] = []
+    ocr_pages: list[dict[str, Any]] = []
     seen_urls: set[str] = set()
     retries = 0
     prev_chapter_url = None
@@ -709,7 +1025,14 @@ async def fetch_chapter_chain(
         title = first_css_text(document, chapter_cfg.get("titleSelectors", [])) or chapter_entry["title"]
         content_node = extract_content_node(document, chapter_cfg.get("contentSelectors", []))
         content_html = content_node.html if content_node is not None else ""
-        lines = normalize_paragraphs(content_html, cleanup_patterns)
+        lines, page_ocr = await normalize_paragraphs_with_ocr(
+            client,
+            content_html,
+            cleanup_patterns,
+            base_url=final_url,
+            ocr_config=ocr_config or normalize_ocr_config({}),
+        )
+        ocr_pages.append(page_ocr)
         if lines and normalize_text(lines[0]) == normalize_text(title):
             lines = lines[1:]
         if pages:
@@ -749,6 +1072,7 @@ async def fetch_chapter_chain(
         "pages": pages,
         "joinedParagraphs": all_lines,
         "fullText": full_text,
+        "ocr": summarize_chapter_ocr(ocr_pages),
         "retryCount": retries,
     }
 
@@ -758,6 +1082,7 @@ async def fetch_full_book_from_latest(
     book_detail: dict[str, Any],
     chapter_cfg: dict[str, Any],
     cleanup_patterns: list[re.Pattern[str]],
+    ocr_config: dict[str, Any] | None = None,
     on_chapter: Any | None = None,
 ) -> list[dict[str, Any]]:
     current_url = normalize_url_no_fragment(book_detail.get("latestChapterUrl"))
@@ -781,6 +1106,7 @@ async def fetch_full_book_from_latest(
             },
             chapter_cfg,
             cleanup_patterns,
+            ocr_config,
         )
         chapters_desc.append(chapter_result)
         count = len(chapters_desc)
@@ -805,6 +1131,7 @@ async def fetch_all_chapters(
     chapter_cfg: dict[str, Any],
     cleanup_patterns: list[re.Pattern[str]],
     concurrency: int,
+    ocr_config: dict[str, Any] | None = None,
     on_chapter: Any | None = None,
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any] | None] = [None] * len(chapters)
@@ -819,7 +1146,7 @@ async def fetch_all_chapters(
             while attempts < 3:
                 attempts += 1
                 try:
-                    result = await fetch_chapter_chain(client, chapter_entry, chapter_cfg, cleanup_patterns)
+                    result = await fetch_chapter_chain(client, chapter_entry, chapter_cfg, cleanup_patterns, ocr_config)
                     result["retryCount"] = attempts - 1
                     results[index] = result
                     completed_count += 1
@@ -1119,16 +1446,32 @@ def run_generated_crawler(
         command,
         cwd=str(REPO_ROOT),
         stdout=subprocess.PIPE,
-        stderr=None,
+        stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
         errors="replace",
         env=child_utf8_env(),
     )
-    stdout_text, _ = completed.communicate()
+    stdout_text, stderr_text = completed.communicate()
     if completed.returncode != 0:
-        raise RuntimeError(normalize_text(stdout_text) or "Generated crawler execution failed.")
+        for line in (stderr_text or "").splitlines():
+            normalized_line = normalize_text(line)
+            if normalized_line.startswith("blocked-by-cloudflare-challenge:"):
+                raise RuntimeError(normalized_line)
+        raise RuntimeError(
+            normalize_text(stdout_text)
+            or normalize_text(stderr_text)
+            or "Generated crawler execution failed."
+        )
     return json.loads(stdout_text)
+
+
+def resolve_profile_path(profile_path_value: Any, hostname: str | None) -> Path:
+    text = normalize_text(profile_path_value)
+    if not text or text == "[REDACTED]":
+        return (REPO_ROOT / "profiles" / f"{hostname}.json").resolve()
+    candidate = Path(text)
+    return candidate.resolve() if candidate.is_absolute() else (REPO_ROOT / candidate).resolve()
 
 
 async def crawl_book_with_context(
@@ -1228,6 +1571,7 @@ async def crawl_book_with_context(
                         "finalUrl": chapter_result.get("finalUrl"),
                         "bodyTextLength": chapter_result.get("bodyTextLength"),
                         "firstParagraph": chapter_result.get("firstParagraph"),
+                        "ocr": chapter_result.get("ocr"),
                     },
                     ensure_ascii=False,
                 )
@@ -1252,6 +1596,7 @@ async def crawl_book_with_context(
                     ),
                 )
         cleanup_patterns = compile_cleanup_patterns(profile.get("chapter", {}).get("cleanupPatterns", []))
+        ocr_config = normalize_ocr_config(profile.get("ocr", {}))
         paginated_chapters = await fetch_paginated_chapter_index(
             client,
             book_detail["finalUrl"],
@@ -1267,6 +1612,7 @@ async def crawl_book_with_context(
                 profile.get("chapter", {}),
                 cleanup_patterns,
                 concurrency=DEFAULT_CHAPTER_CONCURRENCY,
+                ocr_config=ocr_config,
                 on_chapter=on_partial_chapter,
             )
         elif book_detail.get("latestChapterUrl"):
@@ -1276,6 +1622,7 @@ async def crawl_book_with_context(
                 book_detail,
                 profile.get("chapter", {}),
                 cleanup_patterns,
+                ocr_config=ocr_config,
                 on_chapter=on_partial_chapter,
             )
         else:
@@ -1288,6 +1635,7 @@ async def crawl_book_with_context(
                 profile.get("chapter", {}),
                 cleanup_patterns,
                 concurrency=DEFAULT_CHAPTER_CONCURRENCY,
+                ocr_config=ocr_config,
                 on_chapter=on_partial_chapter,
             )
 
@@ -1337,6 +1685,7 @@ async def crawl_book_with_context(
             "firstParagraph": item["firstParagraph"],
             "joinedParagraphs": item.get("joinedParagraphs", []),
             "fullText": item.get("fullText", ""),
+            "ocr": item.get("ocr", {}),
         }
         for item in chapters
     ]
@@ -1356,6 +1705,9 @@ async def crawl_book_with_context(
             "chapters": len(chapters),
             "successfulChapters": len(chapters),
             "durationMs": duration_ms,
+            "ocrImages": sum(int((item.get("ocr") or {}).get("imageCount") or 0) for item in chapters),
+            "ocrRecognizedImages": sum(int((item.get("ocr") or {}).get("recognizedImageCount") or 0) for item in chapters),
+            "ocrFailedImages": sum(int((item.get("ocr") or {}).get("failedImageCount") or 0) for item in chapters),
         },
         "completeness": "full-book",
         "downloadOrdering": "ascending",
@@ -1482,9 +1834,7 @@ def public_entry(args: argparse.Namespace) -> dict[str, Any]:
         Path(registry_record.get("bookContentRoot")).resolve() if registry_record.get("bookContentRoot") else (REPO_ROOT / "book-content"),
         host,
     )
-    profile_path = Path(args.profile_path).resolve() if args.profile_path else Path(
-        registry_record.get("profilePath") or (REPO_ROOT / "profiles" / f"{parsed.hostname}.json")
-    ).resolve()
+    profile_path = resolve_profile_path(args.profile_path or registry_record.get("profilePath"), parsed.hostname)
     context = {
         "host": host,
         "baseUrl": resolved_base_url,
@@ -1606,12 +1956,16 @@ def public_entry(args: argparse.Namespace) -> dict[str, Any]:
 def main() -> None:
     init_console_utf8()
     args = parse_args(sys.argv[1:])
-    if args.context_json:
-        context = load_json(args.context_json)
-        cli_entry_for_generated(context)
-        return
-    result = public_entry(args)
-    sys.stdout.write(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+    try:
+        if args.context_json:
+            context = load_json(args.context_json)
+            cli_entry_for_generated(context)
+            return
+        result = public_entry(args)
+        sys.stdout.write(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+    except Exception as exc:  # noqa: BLE001
+        sys.stderr.write(f"{exc}\n")
+        raise SystemExit(1) from exc
 
 
 if __name__ == "__main__":

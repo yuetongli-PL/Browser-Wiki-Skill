@@ -7,7 +7,10 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-import { derivePageFacts } from '../../../shared/page-state-runtime.mjs';
+import {
+  createPageStateHelperFallbackFunction,
+  derivePageFacts,
+} from '../../../shared/page-state-runtime.mjs';
 import { openBrowserSession } from '../../../infra/browser/session.mjs';
 import { detectXiaohongshuRestrictionPage } from '../../../shared/xiaohongshu-risk.mjs';
 import { inferPageTypeFromUrl } from '../../core/page-types.mjs';
@@ -457,6 +460,61 @@ function mergeResolvedDownloadHeaders(baseHeaders, sessionHeaders, finalUrl) {
       Origin: 'https://www.xiaohongshu.com',
     },
   );
+}
+
+const FRESH_EVIDENCE_FORBIDDEN_HEADER_NAMES = new Set([
+  'authorization',
+  'cookie',
+  'proxy-authorization',
+  'set-cookie',
+  'x-access-token',
+  'x-auth-token',
+  'x-csrf-token',
+  'x-refresh-token',
+  'x-session-id',
+  'x-xsrf-token',
+  'session-id',
+  'sessdata',
+]);
+
+function isFreshEvidenceForbiddenHeaderName(name) {
+  const normalizedName = normalizeText(name).toLowerCase();
+  return FRESH_EVIDENCE_FORBIDDEN_HEADER_NAMES.has(normalizedName)
+    || normalizedName.includes('csrf')
+    || normalizedName.includes('xsrf')
+    || normalizedName.includes('token')
+    || normalizedName.includes('sessdata');
+}
+
+function redactXiaohongshuUrlTokens(value) {
+  const normalizedValue = normalizeText(value);
+  if (!normalizedValue) {
+    return '';
+  }
+  try {
+    const parsed = new URL(normalizedValue);
+    if (parsed.searchParams.has('xsec_token')) {
+      parsed.searchParams.set('xsec_token', '[REDACTED]');
+    }
+    return parsed.toString();
+  } catch {
+    return normalizedValue.replace(/xsec_token=(?!\[REDACTED\]|%5BREDACTED%5D)[^&\s;]+/giu, 'xsec_token=[REDACTED]');
+  }
+}
+
+function sanitizeFreshEvidenceHeaders(headers = {}) {
+  return Object.fromEntries(
+    Object.entries(normalizeHeaderEntries(headers))
+      .filter(([name]) => !isFreshEvidenceForbiddenHeaderName(name))
+      .map(([name, value]) => [name, redactXiaohongshuUrlTokens(value)]),
+  );
+}
+
+function safeHeaderNamesFromMaps(...maps) {
+  return [...new Set(maps
+    .flatMap((map) => Object.keys(sanitizeFreshEvidenceHeaders(map)))
+    .filter(Boolean))]
+    .sort();
 }
 
 function preferText(...values) {
@@ -1893,8 +1951,9 @@ function buildDownloadSessionSummary(currentSummary = {}, recovery = {}) {
 function createResolvedNoteItem(signature, candidate = {}, sessionHeaders = {}) {
   const pageFacts = signature?.pageFacts ?? {};
   const contentImages = Array.isArray(pageFacts.contentImages) ? pageFacts.contentImages : [];
-  const resolvedAssets = contentImages
-    .map((entry) => ({
+  const contentVideos = Array.isArray(pageFacts.contentVideos) ? pageFacts.contentVideos : [];
+  const resolvedAssets = [
+    ...contentImages.map((entry) => ({
       assetId: normalizeText(entry?.assetId) || null,
       kind: normalizeText(entry?.kind) || 'image',
       url: normalizeText(entry?.url) || null,
@@ -1902,12 +1961,37 @@ function createResolvedNoteItem(signature, candidate = {}, sessionHeaders = {}) 
       width: Number.isFinite(Number(entry?.width)) ? Number(entry.width) : null,
       height: Number.isFinite(Number(entry?.height)) ? Number(entry.height) : null,
       headers: mergeResolvedDownloadHeaders({}, sessionHeaders, signature.finalUrl),
-      sourceUrls: Array.isArray(entry?.sourceUrls) ? entry.sourceUrls.filter(Boolean) : [],
-    }))
+      sourceUrls: Array.isArray(entry?.sourceUrls)
+        ? entry.sourceUrls.map(redactXiaohongshuUrlTokens).filter(Boolean)
+        : [],
+    })),
+    ...contentVideos.map((entry) => ({
+      assetId: normalizeText(entry?.assetId ?? entry?.id) || null,
+      kind: 'video',
+      url: normalizeText(
+        entry?.url
+        ?? entry?.masterUrl
+        ?? entry?.master_url
+        ?? entry?.media?.stream?.h264?.[0]?.masterUrl
+        ?? entry?.media?.stream?.h264?.[0]?.master_url
+        ?? entry?.media?.stream?.h264?.[0]?.url
+        ?? entry?.media?.stream?.h265?.[0]?.masterUrl
+        ?? entry?.media?.stream?.h265?.[0]?.master_url
+        ?? entry?.media?.stream?.h265?.[0]?.url,
+      ) || null,
+      previewUrl: normalizeText(entry?.previewUrl ?? entry?.coverUrl ?? entry?.cover_url) || null,
+      width: Number.isFinite(Number(entry?.width)) ? Number(entry.width) : null,
+      height: Number.isFinite(Number(entry?.height)) ? Number(entry.height) : null,
+      headers: mergeResolvedDownloadHeaders({}, sessionHeaders, signature.finalUrl),
+      sourceUrls: Array.isArray(entry?.sourceUrls)
+        ? entry.sourceUrls.map(redactXiaohongshuUrlTokens).filter(Boolean)
+        : [],
+    })),
+  ]
     .filter((entry) => entry.url);
   const contentType = normalizeText(pageFacts.contentType).toLowerCase();
-  const imageOnly = resolvedAssets.length > 0;
-  if (!imageOnly) {
+  const hasResolvedAssets = resolvedAssets.length > 0;
+  if (!hasResolvedAssets) {
     const restriction = detectXiaohongshuRestrictionPage({
       inputUrl: signature?.requestedUrl,
       finalUrl: signature?.finalUrl,
@@ -1965,7 +2049,7 @@ function createResolvedNoteItem(signature, candidate = {}, sessionHeaders = {}) 
     bodyText: pageFacts.bodyText || pageFacts.contentBodyText || pageFacts.bodyExcerpt || pageFacts.contentExcerpt || '',
     queryText: normalizeText(candidate.queryText) || null,
     sourceType: normalizeText(candidate.sourceType) || null,
-    sourceUrl: signature.requestedUrl,
+    sourceUrl: redactXiaohongshuUrlTokens(signature.requestedUrl),
     downloadBundle: {
       textBody: pageFacts.bodyText || pageFacts.contentBodyText || pageFacts.bodyExcerpt || pageFacts.contentExcerpt || '',
       headers: mergeResolvedDownloadHeaders({}, sessionHeaders, signature.finalUrl),
@@ -2023,6 +2107,303 @@ async function resolveCandidateNotes(candidates, request, profile, deps = {}) {
   return {
     items: dedupeBy(resolvedItems, (entry) => entry.noteId || entry.finalUrl),
     diagnostics,
+  };
+}
+
+function pageFactsFromResolvedNoteItem(item = {}) {
+  const assets = toArray(item.downloadBundle?.assets)
+    .map((asset) => ({
+      assetId: normalizeText(asset?.assetId) || undefined,
+      kind: normalizeText(asset?.kind) || 'image',
+      url: normalizeText(asset?.url) || undefined,
+      previewUrl: normalizeText(asset?.previewUrl) || undefined,
+      width: Number.isFinite(Number(asset?.width)) ? Number(asset.width) : undefined,
+      height: Number.isFinite(Number(asset?.height)) ? Number(asset.height) : undefined,
+      headers: sanitizeFreshEvidenceHeaders(asset?.headers),
+      sourceUrls: Array.isArray(asset?.sourceUrls)
+        ? asset.sourceUrls.map(redactXiaohongshuUrlTokens).filter(Boolean)
+        : undefined,
+    }))
+    .filter((asset) => asset.url);
+  const contentImages = assets.filter((asset) => asset.kind !== 'video');
+  const contentVideos = assets.filter((asset) => asset.kind === 'video');
+  return {
+    noteId: normalizeText(item.noteId) || extractXiaohongshuNoteId(item.finalUrl) || undefined,
+    title: normalizeText(item.title) || undefined,
+    noteTitle: normalizeText(item.title) || undefined,
+    authorName: normalizeText(item.authorName) || undefined,
+    authorUrl: normalizeText(item.authorUrl) || undefined,
+    authorUserId: normalizeText(item.authorUserId) || undefined,
+    publishedAt: normalizeText(item.publishedAt) || undefined,
+    tagNames: Array.isArray(item.tagNames) ? item.tagNames.filter(Boolean) : undefined,
+    bodyText: normalizeText(item.bodyText) || undefined,
+    sourceUrl: redactXiaohongshuUrlTokens(normalizeUrl(item.finalUrl || item.sourceUrl || '') || ''),
+    contentImages,
+    contentVideos,
+    contentImageCount: contentImages.length,
+    contentVideoCount: contentVideos.length,
+    contentType: contentVideos.length > 0 ? 'video' : contentImages.length > 0 ? 'normal' : undefined,
+    sourceType: 'fresh-page-evidence',
+  };
+}
+
+function resourceSeedsFromResolvedNoteItem(item = {}) {
+  const noteFacts = pageFactsFromResolvedNoteItem(item);
+  return [
+    ...toArray(noteFacts.contentImages).map((asset) => ({ asset, mediaType: 'image' })),
+    ...toArray(noteFacts.contentVideos).map((asset) => ({ asset, mediaType: 'video' })),
+  ]
+    .map((asset, index) => ({
+      id: normalizeText(asset.asset.assetId) || `fresh-${asset.mediaType}-${index + 1}`,
+      url: asset.asset.url,
+      mediaType: asset.mediaType,
+      title: noteFacts.noteTitle,
+      noteId: noteFacts.noteId,
+      sourceUrl: noteFacts.sourceUrl,
+      referer: noteFacts.sourceUrl,
+      groupId: noteFacts.noteId || noteFacts.noteTitle,
+      headers: sanitizeFreshEvidenceHeaders(asset.asset.headers),
+      metadata: {
+        noteId: noteFacts.noteId,
+        noteTitle: noteFacts.noteTitle,
+        authorName: noteFacts.authorName,
+        authorUserId: noteFacts.authorUserId,
+        authorUrl: noteFacts.authorUrl,
+        publishedAt: noteFacts.publishedAt,
+        tagNames: noteFacts.tagNames,
+        assetType: asset.mediaType,
+        assetId: normalizeText(asset.asset.assetId) || undefined,
+        previewUrl: normalizeText(asset.asset.previewUrl) || undefined,
+        width: asset.asset.width,
+        height: asset.asset.height,
+        sourceUrls: Array.isArray(asset.asset.sourceUrls) ? asset.asset.sourceUrls : undefined,
+        sourceType: 'fresh-page-evidence',
+      },
+    }))
+    .filter((seed) => seed.url);
+}
+
+function sanitizeFreshEvidenceSessionSummary(summary = {}) {
+  return {
+    attempted: summary.attempted === true,
+    status: normalizeText(summary.status) || undefined,
+    authAvailable: summary.authAvailable === true,
+    cookieEvidence: normalizePositiveInteger(summary.cookieCount, 0) > 0 || undefined,
+    finalUrlPresent: Boolean(normalizeText(summary.finalUrl)) || undefined,
+    headless: typeof summary.headless === 'boolean' ? summary.headless : undefined,
+    browserAttachedVia: normalizeText(summary.browserAttachedVia) || undefined,
+    reusedBrowserInstance: summary.reusedBrowserInstance === true || undefined,
+    previousSidecarStatus: normalizeText(summary.previousSidecarStatus) || undefined,
+  };
+}
+
+async function browserPageSignature(url, request, profile, deps = {}) {
+  const inspectReusableSession = deps.inspectRequestReusableSiteSession ?? inspectRequestReusableSiteSession;
+  const inspection = await inspectReusableSession(
+    url,
+    request,
+    deps,
+    {},
+    {
+      siteProfile: profile,
+      profilePath: request.profilePath ? path.resolve(request.profilePath) : DEFAULT_PROFILE_PATH,
+    },
+  );
+  if (!inspection?.authAvailable || !inspection?.userDataDir) {
+    return null;
+  }
+  const authConfig = inspection.authConfig ?? {};
+  const headless = typeof request.headless === 'boolean'
+    ? request.headless
+    : authConfig.preferVisibleBrowserForAuthenticatedFlows === true
+      ? false
+      : true;
+  const browserSettings = {
+    browserPath: request.browserPath,
+    userDataDir: inspection.userDataDir,
+    cleanupUserDataDirOnShutdown: false,
+    timeoutMs: Math.min(request.timeoutMs ?? DEFAULT_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
+    headless,
+    startupUrl: url,
+    viewport: {
+      width: 1440,
+      height: 1024,
+      deviceScaleFactor: 1,
+    },
+    fullPage: false,
+  };
+  const openSession = deps.openBrowserSession ?? openBrowserSession;
+  let session = null;
+  try {
+    session = await openSession(browserSettings, { startupUrl: url });
+    await session.navigateAndWait(url, buildBrowserWaitPolicy(browserSettings.timeoutMs));
+    const [pageState, pageMetadata, userAgent, acceptLanguage, referrer] = await Promise.all([
+      session.callPageFunction(createPageStateHelperFallbackFunction(), profile),
+      session.getPageMetadata(url),
+      session.evaluateValue('navigator.userAgent'),
+      session.evaluateValue('(navigator.languages && navigator.languages.join(", ")) || navigator.language || ""'),
+      session.evaluateValue('document.referrer'),
+    ]);
+    const finalUrl = normalizeUrl(pageState?.finalUrl || pageMetadata?.finalUrl || url) || url;
+    return {
+      requestedUrl: url,
+      finalUrl,
+      html: '',
+      title: normalizeText(pageState?.title ?? pageMetadata?.title) || '',
+      documentText: '',
+      pageType: pageState?.pageType ?? inferPageTypeFromUrl(finalUrl, profile),
+      pageFacts: pageState?.pageFacts ?? null,
+      safeHeaders: sanitizeFreshEvidenceHeaders({
+        'User-Agent': normalizeText(userAgent) || DEFAULT_USER_AGENT,
+        'Accept-Language': normalizeText(acceptLanguage) || DEFAULT_ACCEPT_LANGUAGE,
+        Referer: normalizeUrl(referrer || finalUrl) || finalUrl,
+        Origin: 'https://www.xiaohongshu.com',
+      }),
+      browserEvidence: {
+        status: 'browser-page-facts-read',
+        finalUrlPresent: Boolean(finalUrl),
+        headless,
+        browserAttachedVia: session.browserAttachedVia ?? null,
+        reusedBrowserInstance: session.reusedBrowserInstance === true,
+      },
+    };
+  } finally {
+    await session?.close?.();
+  }
+}
+
+async function resolveFreshEvidenceViaBrowser(sourceInput, request = {}, deps = {}) {
+  const classification = classifyXiaohongshuDownloadInput(sourceInput);
+  if (classification.inputKind !== 'note-detail') {
+    return null;
+  }
+  const profile = await readXiaohongshuProfile(request, deps);
+  const signature = await browserPageSignature(sourceInput, request, profile, deps);
+  if (!signature) {
+    return null;
+  }
+  const item = createResolvedNoteItem(signature, {
+    url: sourceInput,
+    noteId: extractXiaohongshuNoteId(sourceInput),
+    sourceType: 'fresh-browser-page',
+  }, signature.safeHeaders);
+  if (!item.ok) {
+    return {
+      items: [],
+      diagnostics: {
+        attemptedNotes: 1,
+        resolvedNotes: 0,
+        skippedVideoNotes: item.reasonCode === 'video-note' ? 1 : 0,
+        skippedNoImageNotes: item.reasonCode === 'no-images' ? 1 : 0,
+        failedNotes: item.reasonCode === 'navigation-miss' ? 1 : 0,
+        browserEvidence: signature.browserEvidence,
+        reasonCode: item.reasonCode,
+        finalUrlPresent: Boolean(item.finalUrl),
+      },
+    };
+  }
+  return {
+    items: [item],
+    diagnostics: {
+      attemptedNotes: 1,
+      resolvedNotes: 1,
+      skippedVideoNotes: 0,
+      skippedNoImageNotes: 0,
+      failedNotes: 0,
+      browserEvidence: signature.browserEvidence,
+    },
+  };
+}
+
+export async function resolveXiaohongshuFreshEvidence(input, options = {}, deps = {}) {
+  const sourceInput = normalizeText(input ?? options.input ?? options.request?.input ?? options.request?.url);
+  if (!sourceInput) {
+    return {
+      contractVersion: 'xiaohongshu-fresh-evidence-v1',
+      siteKey: 'xiaohongshu',
+      sourceType: 'fresh-page-evidence',
+      status: 'missing-input',
+      pageFacts: null,
+      resourceSeeds: [],
+    };
+  }
+  const request = {
+    ...(options.request ?? {}),
+    action: 'download',
+    items: [sourceInput],
+    profilePath: options.profilePath ?? options.request?.profilePath,
+    browserPath: options.browserPath ?? options.request?.browserPath,
+    browserProfileRoot: options.browserProfileRoot ?? options.request?.browserProfileRoot,
+    userDataDir: options.userDataDir ?? options.request?.userDataDir,
+    timeoutMs: options.timeoutMs ?? options.request?.timeoutMs,
+    headless: typeof options.headless === 'boolean' ? options.headless : options.request?.headless,
+    reuseLoginState: options.reuseLoginState ?? options.request?.reuseLoginState,
+    autoLogin: options.autoLogin ?? options.request?.autoLogin,
+    download: {
+      ...(options.request?.download ?? {}),
+      dryRun: true,
+      maxItems: normalizePositiveInteger(
+        options.maxItems ?? options.request?.maxItems ?? options.request?.download?.maxItems,
+        1,
+      ),
+    },
+  };
+  const resolved = await resolveConcreteDownloadInputs(request, deps);
+  let items = toArray(resolved.items);
+  let diagnostics = resolved.resolution ?? {};
+  let browserEvidence = null;
+  if (items.length === 0 && request.reuseLoginState !== false) {
+    const browserResolved = await resolveFreshEvidenceViaBrowser(sourceInput, request, deps);
+    if (browserResolved) {
+      items = toArray(browserResolved.items);
+      diagnostics = {
+        ...diagnostics,
+        attemptedNotes: browserResolved.diagnostics?.attemptedNotes ?? diagnostics.attemptedNotes,
+        resolvedNotes: browserResolved.diagnostics?.resolvedNotes ?? diagnostics.resolvedNotes,
+        skippedVideoNotes: browserResolved.diagnostics?.skippedVideoNotes ?? diagnostics.skippedVideoNotes,
+        skippedNoImageNotes: browserResolved.diagnostics?.skippedNoImageNotes ?? diagnostics.skippedNoImageNotes,
+        failedNotes: browserResolved.diagnostics?.failedNotes ?? diagnostics.failedNotes,
+        reasonCode: browserResolved.diagnostics?.reasonCode ?? diagnostics.reasonCode,
+      };
+      browserEvidence = browserResolved.diagnostics?.browserEvidence ?? null;
+    }
+  }
+  const pageFactsList = items.map(pageFactsFromResolvedNoteItem)
+    .filter((facts) => toArray(facts.contentImages).length > 0 || toArray(facts.contentVideos).length > 0);
+  const resourceSeeds = items.flatMap(resourceSeedsFromResolvedNoteItem);
+  const headerNames = safeHeaderNamesFromMaps(
+    ...resourceSeeds.map((seed) => seed.headers),
+    ...pageFactsList.flatMap((facts) => toArray(facts.contentImages).map((asset) => asset.headers)),
+  );
+  return {
+    contractVersion: 'xiaohongshu-fresh-evidence-v1',
+    siteKey: 'xiaohongshu',
+    sourceType: 'fresh-page-evidence',
+    status: resourceSeeds.length > 0 ? 'resource-seeds-provided' : 'resource-seeds-unavailable',
+    inputUrl: redactXiaohongshuUrlTokens(sourceInput),
+    pageFacts: pageFactsList[0] ?? null,
+    pageFactsList,
+    resourceSeeds,
+    headerFreshness: {
+      contractVersion: 'xiaohongshu-header-freshness-v1',
+      headerNames,
+      requestHeaderNames: headerNames,
+      sessionHeaderNames: [],
+      resolverHeaderNames: [],
+      requiredHeaderNames: ['User-Agent'],
+      missingRequiredHeaders: headerNames.some((name) => name.toLowerCase() === 'user-agent') ? [] : ['User-Agent'],
+      freshnessStatus: headerNames.some((name) => name.toLowerCase() === 'user-agent') ? 'fresh-evidence-produced' : 'missing-required',
+      cookieEvidence: sanitizeFreshEvidenceSessionSummary(resolved.downloadSession).cookieEvidence,
+    },
+    resolution: {
+      sourceType: 'fresh-page-evidence',
+      attemptedNotes: diagnostics.attemptedNotes ?? 0,
+      resolvedNotes: diagnostics.resolvedNotes ?? pageFactsList.length,
+      resourceSeedCount: resourceSeeds.length,
+      reasonCode: diagnostics.reasonCode,
+      browserEvidence,
+      downloadSession: sanitizeFreshEvidenceSessionSummary(resolved.downloadSession),
+    },
   };
 }
 

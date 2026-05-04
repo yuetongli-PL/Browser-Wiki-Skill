@@ -7,7 +7,10 @@ import { executePipeline } from '../../pipeline/engine/engine.mjs';
 import { normalizePipelineOptions, toBoolean } from '../../pipeline/engine/options.mjs';
 import { summarizePipelineStages } from '../../pipeline/engine/stage-spec.mjs';
 import { DEFAULT_PIPELINE_RUNTIME, resolvePipelineRuntime } from '../../pipeline/runtime/create-default-runtime.mjs';
-import { detectXiaohongshuRestrictionPage, isXiaohongshuUrl } from '../../shared/xiaohongshu-risk.mjs';
+import { prepareRedactedArtifactJsonWithAudit, redactValue } from '../../sites/capability/security-guard.mjs';
+import { reasonCodeSummary } from '../../sites/capability/reason-codes.mjs';
+import { normalizeRiskTransition } from '../../sites/capability/risk-state.mjs';
+import { resolveSiteAdapter } from '../../sites/core/adapters/resolver.mjs';
 
 function summarizeAuthKeepalive(authKeepalive) {
   return {
@@ -22,14 +25,51 @@ function summarizeAuthKeepalive(authKeepalive) {
   };
 }
 
-function extractXiaohongshuRestriction(inputUrl, manifest) {
-  return detectXiaohongshuRestrictionPage({
+function resolveRiskAwareAdapter(inputUrl) {
+  const adapter = resolveSiteAdapter({ inputUrl });
+  return typeof adapter?.detectRestrictionPage === 'function' ? adapter : null;
+}
+
+function extractSiteRestriction(adapter, inputUrl, manifest) {
+  return adapter?.detectRestrictionPage?.({
     inputUrl,
     finalUrl: manifest?.finalUrl ?? inputUrl,
     title: manifest?.title ?? '',
     pageType: manifest?.pageType ?? null,
     pageFacts: manifest?.pageFacts ?? null,
     runtimeEvidence: manifest?.runtimeEvidence ?? null,
+  }) ?? null;
+}
+
+function buildRestrictionBlockedReason(adapter, restriction) {
+  const siteLabel = adapter?.siteKey ?? adapter?.id ?? 'site';
+  return `Blocked by ${siteLabel} restriction page${restriction.riskPageCode ? ` ${restriction.riskPageCode}` : ''}.`;
+}
+
+function restrictionReasonCode(restriction) {
+  return restriction?.reasonCode
+    ?? restriction?.antiCrawlReasonCode
+    ?? restriction?.riskCauseCode
+    ?? 'unknown-risk';
+}
+
+function restrictionRecoverySummary(restriction) {
+  return reasonCodeSummary(restrictionReasonCode(restriction));
+}
+
+function buildRestrictionRiskState(adapter, restriction, observedAt) {
+  const signals = new Set(Array.isArray(restriction?.antiCrawlSignals) ? restriction.antiCrawlSignals : []);
+  const reasonCode = restrictionReasonCode(restriction);
+  const state = signals.has('verify') || reasonCode === 'anti-crawl-verify'
+    ? 'captcha_required'
+    : 'manual_recovery_required';
+  return normalizeRiskTransition({
+    from: 'normal',
+    state,
+    reasonCode,
+    siteKey: adapter?.siteKey ?? adapter?.id,
+    scope: 'pipeline-restriction',
+    observedAt,
   });
 }
 
@@ -57,6 +97,8 @@ function summarizeRiskRecovery(result = null) {
     initialRiskPageCode: result.initialRiskPageCode ?? null,
     finalUrl: result.finalUrl ?? null,
     finalRiskPageCode: result.finalRiskPageCode ?? null,
+    reasonCode: result.reasonCode ?? null,
+    recovery: result.recovery ?? null,
     reusedLoginState: result.reusedLoginState === true,
     reports: result.keepaliveReport?.reports ?? null,
     warmupSummary: result.keepaliveReport?.keepalive?.warmupSummary ?? result.keepaliveReport?.loginReport?.auth?.warmupSummary ?? null,
@@ -67,7 +109,7 @@ function summarizeRiskRecovery(result = null) {
   };
 }
 
-async function executeXiaohongshuRiskAwareCapture(inputUrl, settings, stageSpecs, stageImpls, pipelineSiteKeepalive) {
+async function executeRiskAwareCapture(adapter, inputUrl, settings, stageSpecs, stageImpls, pipelineSiteKeepalive) {
   const captureStageSpec = stageSpecs.find((stageSpec) => stageSpec.name === 'capture');
   if (!captureStageSpec) {
     throw new Error('Missing capture stage spec.');
@@ -79,7 +121,7 @@ async function executeXiaohongshuRiskAwareCapture(inputUrl, settings, stageSpecs
     stageResults: {},
   });
   let captureManifest = await stageImpls.capture(inputUrl, captureOptions);
-  const initialRestriction = extractXiaohongshuRestriction(inputUrl, captureManifest);
+  const initialRestriction = extractSiteRestriction(adapter, inputUrl, captureManifest);
   if (!initialRestriction) {
     return {
       captureManifest,
@@ -103,6 +145,8 @@ async function executeXiaohongshuRiskAwareCapture(inputUrl, settings, stageSpecs
         initialRiskPageCode: initialRestriction.riskPageCode ?? null,
         finalUrl: captureManifest?.finalUrl ?? inputUrl,
         finalRiskPageCode: initialRestriction.riskPageCode ?? null,
+        reasonCode: restrictionReasonCode(initialRestriction),
+        recovery: restrictionRecoverySummary(initialRestriction),
         reusedLoginState: settings.reuseLoginState !== false,
       },
     };
@@ -125,7 +169,7 @@ async function executeXiaohongshuRiskAwareCapture(inputUrl, settings, stageSpecs
       ...captureOptions,
       outDir: path.join(settings.captureOutDir, 'risk-recovery-recapture'),
     });
-    const finalRestriction = extractXiaohongshuRestriction(inputUrl, captureManifest);
+    const finalRestriction = extractSiteRestriction(adapter, inputUrl, captureManifest);
     return {
       captureManifest,
       initialRestriction,
@@ -139,6 +183,8 @@ async function executeXiaohongshuRiskAwareCapture(inputUrl, settings, stageSpecs
         initialRiskPageCode: initialRestriction.riskPageCode ?? null,
         finalUrl: captureManifest?.finalUrl ?? inputUrl,
         finalRiskPageCode: finalRestriction?.riskPageCode ?? null,
+        reasonCode: finalRestriction ? restrictionReasonCode(finalRestriction) : null,
+        recovery: finalRestriction ? restrictionRecoverySummary(finalRestriction) : null,
         reusedLoginState: true,
       },
     };
@@ -157,6 +203,8 @@ async function executeXiaohongshuRiskAwareCapture(inputUrl, settings, stageSpecs
         initialRiskPageCode: initialRestriction.riskPageCode ?? null,
         finalUrl: captureManifest?.finalUrl ?? inputUrl,
         finalRiskPageCode: initialRestriction.riskPageCode ?? null,
+        reasonCode: restrictionReasonCode(initialRestriction),
+        recovery: restrictionRecoverySummary(initialRestriction),
         reusedLoginState: true,
       },
     };
@@ -194,8 +242,10 @@ export async function runPipeline(inputUrl, options = {}, runtime = DEFAULT_PIPE
   let stageResults = null;
   let generatedAt = new Date().toISOString();
 
-  if (isXiaohongshuUrl(inputUrl)) {
-    const riskAwareCapture = await executeXiaohongshuRiskAwareCapture(
+  const riskAwareAdapter = resolveRiskAwareAdapter(inputUrl);
+  if (riskAwareAdapter) {
+    const riskAwareCapture = await executeRiskAwareCapture(
+      riskAwareAdapter,
       inputUrl,
       settings,
       stageSpecs,
@@ -205,7 +255,8 @@ export async function runPipeline(inputUrl, options = {}, runtime = DEFAULT_PIPE
     riskRecovery = summarizeRiskRecovery(riskAwareCapture.riskRecovery);
     if (riskAwareCapture.finalRestriction?.restrictionDetected) {
       const restriction = riskAwareCapture.finalRestriction;
-      const blockedReason = `Blocked by Xiaohongshu restriction page${restriction.riskPageCode ? ` ${restriction.riskPageCode}` : ''}.`;
+      const blockedReason = buildRestrictionBlockedReason(riskAwareAdapter, restriction);
+      const riskState = buildRestrictionRiskState(riskAwareAdapter, restriction, generatedAt);
       return {
         inputUrl,
         generatedAt,
@@ -214,6 +265,7 @@ export async function runPipeline(inputUrl, options = {}, runtime = DEFAULT_PIPE
         skillName: null,
         authKeepalive: summarizedAuthKeepalive,
         riskRecovery,
+        riskState,
         pipelineBlockedByRisk: true,
         antiCrawlSignals: restriction.antiCrawlSignals ?? [],
         antiCrawlReasonCode: restriction.antiCrawlReasonCode ?? null,
@@ -249,6 +301,36 @@ export async function runPipeline(inputUrl, options = {}, runtime = DEFAULT_PIPE
     pipelineBlockedByRisk: false,
     stages: summarizePipelineStages(stageResults),
   };
+}
+
+function toPipelineCliSummaryRedactionFailure(error) {
+  const recovery = reasonCodeSummary('redaction-failed');
+  const causeSummary = redactValue({
+    name: error instanceof Error ? error.name : undefined,
+    code: error && typeof error === 'object' ? (error.code ?? null) : null,
+  }).value;
+  const failure = new Error('Pipeline CLI summary redaction failed');
+  failure.name = 'PipelineCliSummaryRedactionFailure';
+  failure.code = 'redaction-failed';
+  failure.reasonCode = 'redaction-failed';
+  failure.retryable = recovery.retryable;
+  failure.cooldownNeeded = recovery.cooldownNeeded;
+  failure.isolationNeeded = recovery.isolationNeeded;
+  failure.manualRecoveryNeeded = recovery.manualRecoveryNeeded;
+  failure.degradable = recovery.degradable;
+  failure.artifactWriteAllowed = recovery.artifactWriteAllowed;
+  failure.catalogAction = recovery.catalogAction;
+  failure.diagnosticWriteAllowed = false;
+  failure.causeSummary = causeSummary;
+  return failure;
+}
+
+export function pipelineCliJson(result) {
+  try {
+    return `${prepareRedactedArtifactJsonWithAudit(result).json}\n`;
+  } catch (error) {
+    throw toPipelineCliSummaryRedactionFailure(error);
+  }
 }
 
 function printHelp() {
@@ -499,7 +581,7 @@ async function runCli() {
   }
 
   const result = await runPipeline(url, options);
-  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  process.stdout.write(pipelineCliJson(result));
 }
 
 const entryPath = process.argv[1] ? path.resolve(process.argv[1]) : null;

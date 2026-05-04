@@ -4,12 +4,18 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
-import { initializeCliUtf8, writeJsonStdout } from '../../infra/cli.mjs';
+import { initializeCliUtf8 } from '../../infra/cli.mjs';
 import {
   actionSessionMetadataFromOptions,
   readSessionRunManifest,
   sessionOptionsFromRunManifest,
 } from '../../sites/sessions/manifest-bridge.mjs';
+import {
+  assertNoForbiddenPatterns,
+  prepareRedactedArtifactJsonWithAudit,
+  redactValue,
+} from '../../sites/capability/security-guard.mjs';
+import { reasonCodeSummary } from '../../sites/capability/reason-codes.mjs';
 import { runDouyinAction } from '../../sites/douyin/actions/router.mjs';
 
 export const DOUYIN_ACTION_HELP = `Usage:
@@ -142,6 +148,49 @@ function selectCliPayload(result, output) {
   return result;
 }
 
+function toDouyinActionCliOutputRedactionFailure(error) {
+  const recovery = reasonCodeSummary('redaction-failed');
+  const failure = new Error('Douyin action CLI output redaction failed');
+  failure.name = 'DouyinActionCliOutputRedactionFailure';
+  failure.code = 'redaction-failed';
+  failure.reasonCode = 'redaction-failed';
+  failure.retryable = recovery.retryable;
+  failure.cooldownNeeded = recovery.cooldownNeeded;
+  failure.isolationNeeded = recovery.isolationNeeded;
+  failure.manualRecoveryNeeded = recovery.manualRecoveryNeeded;
+  failure.degradable = recovery.degradable;
+  failure.artifactWriteAllowed = recovery.artifactWriteAllowed;
+  failure.catalogAction = recovery.catalogAction;
+  failure.diagnosticWriteAllowed = false;
+  failure.causeSummary = {
+    name: error?.name ?? 'Error',
+    code: error?.code ?? null,
+  };
+  return failure;
+}
+
+export function douyinActionCliJson(payload) {
+  try {
+    return `${prepareRedactedArtifactJsonWithAudit(payload).json}\n`;
+  } catch (error) {
+    throw toDouyinActionCliOutputRedactionFailure(error);
+  }
+}
+
+export function douyinActionCliMarkdown(markdown, fallbackPayload) {
+  try {
+    const text = String(markdown ?? '');
+    if (!text) {
+      return douyinActionCliJson(fallbackPayload);
+    }
+    const redacted = String(redactValue(text).value ?? '');
+    assertNoForbiddenPatterns(redacted);
+    return redacted;
+  } catch (error) {
+    throw toDouyinActionCliOutputRedactionFailure(error);
+  }
+}
+
 export async function buildDouyinActionRequest(parsed) {
   const sessionManifestOptions = parsed.sessionManifest
     ? sessionOptionsFromRunManifest(
@@ -179,9 +228,9 @@ export async function runDouyinActionCli(argv = process.argv.slice(2)) {
     const markdown = parsed.output === 'summary'
       ? result?.markdown || result?.download?.reportMarkdown || ''
       : result?.download?.reportMarkdown || result?.markdown || '';
-    process.stdout.write(markdown || `${JSON.stringify(selectCliPayload(result, parsed.output), null, 2)}\n`);
+    process.stdout.write(douyinActionCliMarkdown(markdown, selectCliPayload(result, parsed.output)));
   } else {
-    writeJsonStdout(selectCliPayload(result, parsed.output));
+    process.stdout.write(douyinActionCliJson(selectCliPayload(result, parsed.output)));
   }
   if (result?.ok !== true) {
     process.exitCode = 1;

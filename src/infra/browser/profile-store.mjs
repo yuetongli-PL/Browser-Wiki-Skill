@@ -120,6 +120,19 @@ function buildSnapshotSignature(entries) {
     .join('|');
 }
 
+function classifyPersistentProfileLifecycle({ exists, missingPaths = [], suspiciousExit = false } = {}) {
+  if (!exists) {
+    return 'missing';
+  }
+  if (suspiciousExit) {
+    return 'crashed';
+  }
+  if (missingPaths.length > 0) {
+    return 'uninitialized';
+  }
+  return 'healthy';
+}
+
 export async function inspectPersistentProfileHealth(userDataDir) {
   const resolvedDir = path.resolve(userDataDir);
   const exists = await pathExists(resolvedDir);
@@ -131,6 +144,7 @@ export async function inspectPersistentProfileHealth(userDataDir) {
   const exitType = String(preferences?.profile?.exit_type ?? '').trim() || null;
   const sessionDataStatus = preferences?.sessions?.session_data_status ?? null;
   const suspiciousExit = Boolean(exitType && !/^normal$/iu.test(exitType));
+  const profileLifecycle = classifyPersistentProfileLifecycle({ exists, missingPaths, suspiciousExit });
   const warnings = [];
 
   if (!exists) {
@@ -147,6 +161,8 @@ export async function inspectPersistentProfileHealth(userDataDir) {
     userDataDir: resolvedDir,
     exists,
     healthy: exists && missingPaths.length === 0 && !suspiciousExit,
+    profileLifecycle,
+    requiresProfileRebuild: profileLifecycle === 'crashed',
     missingPaths,
     lastExitType: exitType,
     sessionDataStatus,

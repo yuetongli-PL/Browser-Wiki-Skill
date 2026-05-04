@@ -7,6 +7,7 @@ import { readdir, stat, writeFile } from 'node:fs/promises';
 
 import { ensureDir, writeJsonFile } from '../../infra/io.mjs';
 import { compactSlug } from '../../shared/normalize.mjs';
+import { prepareRedactedArtifactJsonWithAudit } from '../capability/security-guard.mjs';
 
 const DEFAULT_MEDIA_DOWNLOAD_CONCURRENCY = 6;
 const DEFAULT_MEDIA_DOWNLOAD_RETRIES = 2;
@@ -192,11 +193,15 @@ function buildDownloadQueue(candidates = [], previousQueue = []) {
   return candidates.map((entry, index) => normalizeDownloadQueueEntry(entry, index, previousByKey.get(downloadQueueKey(entry))));
 }
 
+function queueRedactionAuditPath(queuePath) {
+  return `${queuePath}.redaction-audit.json`;
+}
+
 async function writeDownloadQueue(queuePath, queue) {
   if (!queuePath) {
     return;
   }
-  await writeJsonFile(queuePath, {
+  const prepared = prepareRedactedArtifactJsonWithAudit({
     schemaVersion: ARTIFACT_SCHEMA_VERSION,
     updatedAt: new Date().toISOString(),
     counts: {
@@ -208,6 +213,8 @@ async function writeDownloadQueue(queuePath, queue) {
     },
     queue,
   });
+  await writeFile(queuePath, `${prepared.json}\n`, 'utf8');
+  await writeFile(queueRedactionAuditPath(queuePath), `${prepared.auditJson}\n`, 'utf8');
 }
 
 function previousQueueResults(previousQueue = []) {
@@ -219,28 +226,35 @@ function previousQueueResults(previousQueue = []) {
     }));
 }
 
+function itemSlugFromPageUrl(value) {
+  try {
+    const parsed = new URL(String(value || ''));
+    const segments = parsed.pathname.split('/').filter(Boolean);
+    if (segments.length !== 2) {
+      return null;
+    }
+    const slugSource = segments[1] || segments[0] || '';
+    return slugSource ? compactSlug(slugSource, 'item').slice(0, 64) : null;
+  } catch {
+    return null;
+  }
+}
+
 function buildMediaDownloadFileName(entry, index, { siteKey, account, contentType }) {
   const firstReference = Array.isArray(entry.references) && entry.references.length ? entry.references[0] : entry;
-  const itemSlugSource = firstReference.itemId || firstReference.pageUrl || account || 'media';
+  const pageItemSlug = itemSlugFromPageUrl(firstReference.pageUrl);
+  const itemSlugSource = firstReference.itemId || pageItemSlug || firstReference.pageUrl || account || 'media';
   const itemSlug = compactSlug(String(itemSlugSource).replace(/^https?:\/\//iu, ''), 'item').slice(0, 48);
   const mediaIndex = firstReference.mediaIndex ?? entry.mediaIndex ?? index;
   const ext = extensionFromUrlOrContentType(entry.url, contentType, entry.type === 'video' ? 'mp4' : 'jpg');
-  if (siteKey === 'instagram') {
-    let instagramItemSlug = itemSlug;
-    try {
-      const parsed = new URL(String(firstReference.pageUrl || ''));
-      const segments = parsed.pathname.split('/').filter(Boolean);
-      instagramItemSlug = compactSlug(segments[1] || segments[0] || itemSlug, 'item').slice(0, 64);
-    } catch {
-      instagramItemSlug = itemSlug;
-    }
+  if (pageItemSlug) {
     const mediaOrdinal = Number.isFinite(Number(mediaIndex)) ? Number(mediaIndex) + 1 : index + 1;
     const mediaStem = compactSlug([
       `m${String(mediaOrdinal).padStart(2, '0')}`,
       entry.type || 'media',
       entry.urlHash || shortHash(entry.url),
     ].filter(Boolean).join('-'), 'media');
-    return path.join(instagramItemSlug, `${mediaStem}.${ext}`);
+    return path.join(pageItemSlug, `${mediaStem}.${ext}`);
   }
   const stem = compactSlug([
     String(index + 1).padStart(4, '0'),

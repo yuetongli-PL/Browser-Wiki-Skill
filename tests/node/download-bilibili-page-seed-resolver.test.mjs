@@ -585,3 +585,58 @@ test('bilibili ordinary input without fixture payload still falls back to legacy
   assert.equal(resolved.completeness.reason, 'legacy-downloader-required');
   assert.equal(plan.legacy.entrypoint.endsWith(path.join('src', 'entrypoints', 'sites', 'bilibili-action.mjs')), true);
 });
+
+test('bilibili native miss includes unified sanitized diagnostics', async () => {
+  const { resolved } = await resolveBilibili({
+    site: 'bilibili',
+    input: 'https://www.bilibili.com/video/BV1needsEvidence/',
+    dryRun: true,
+  }, null, {
+    allowNetworkResolve: true,
+  });
+
+  assert.equal(resolved.resources.length, 0);
+  assert.equal(resolved.completeness.reason, 'bilibili-api-evidence-unavailable');
+  assert.equal(resolved.metadata.resolution.nativeMiss.contractVersion, 'native-miss-diagnostics-v1');
+  assert.equal(resolved.metadata.resolution.nativeMiss.siteKey, 'bilibili');
+  assert.equal(resolved.metadata.resolution.nativeMiss.primaryReason, 'bilibili-api-evidence-unavailable');
+  assert.equal(resolved.metadata.resolution.nativeMiss.currentPhase, 'video-detail');
+  assert.deepEqual(resolved.metadata.resolution.nativeMiss.phases[0], {
+    phase: 'view-hydration',
+    status: 'unresolved',
+    reason: 'bilibili-api-evidence-unavailable',
+  });
+  assert.deepEqual(resolved.metadata.resolution.nativeMiss.phases[1], {
+    phase: 'playurl-fetch',
+    status: 'not-run',
+    reason: 'upstream-evidence-unavailable',
+  });
+  assert.equal(JSON.stringify(resolved.metadata.resolution.nativeMiss).includes('Cookie'), false);
+});
+
+test('bilibili UP-space native miss records sanitized phase diagnostics', async () => {
+  const { resolved } = await resolveBilibili({
+    site: 'bilibili',
+    input: 'https://space.bilibili.com/100',
+    maxItems: 2,
+    dryRun: true,
+  }, null, {
+    allowNetworkResolve: true,
+  });
+
+  assert.equal(resolved.resources.length, 0);
+  assert.equal(resolved.completeness.reason, 'bilibili-api-evidence-unavailable');
+  assert.equal(resolved.metadata.resolution.nativeMiss.currentPhase, 'space-archives');
+  assert.deepEqual(resolved.metadata.resolution.nativeMiss.phases[0], {
+    phase: 'space-list-fetch',
+    status: 'unresolved',
+    reason: 'bilibili-api-evidence-unavailable',
+  });
+  assert.deepEqual(resolved.metadata.resolution.nativeMiss.phases.map((phase) => phase.phase), [
+    'space-list-fetch',
+    'space-list-parse',
+    'view-hydration',
+    'playurl-fetch',
+    'resource-seed-map',
+  ]);
+});

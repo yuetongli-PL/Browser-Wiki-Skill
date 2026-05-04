@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
-import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile, readFile } from 'node:fs/promises';
 
 import {
   acquireSessionLease,
@@ -19,13 +19,20 @@ import {
   readProfileQuarantine,
   releaseSessionLease,
   resolveAuthSessionPolicy,
+  siteSessionGovernanceRedactionAuditPath,
   summarizeAuthSessionState,
+  writeAuthSessionState,
   writeHealthyNetworkFingerprint,
   writeProfileQuarantine,
 } from '../../src/infra/auth/site-session-governance.mjs';
 import {
+  buildSessionRepairPlan,
   inspectSessionHealth as inspectDownloadSessionHealth,
 } from '../../src/sites/downloads/session-manager.mjs';
+import { assertSchemaCompatible } from '../../src/sites/capability/compatibility-registry.mjs';
+import { requireReasonCodeDefinition } from '../../src/sites/capability/reason-codes.mjs';
+import { RISK_STATE_SCHEMA_VERSION } from '../../src/sites/capability/risk-state.mjs';
+import { REDACTION_PLACEHOLDER } from '../../src/sites/capability/security-guard.mjs';
 
 test('resolveAuthSessionPolicy applies keepalive and stable-network defaults', () => {
   const policy = resolveAuthSessionPolicy({
@@ -220,6 +227,100 @@ test('classifyRiskFromContext maps anti-crawl and network drift to the new risk 
   );
 });
 
+test('risk governance outputs consume the reasonCode catalog while preserving unknown legacy causes', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-risk-reason-codes-'));
+  try {
+    const requestBurst = requireReasonCodeDefinition('request-burst', { family: 'risk' }).code;
+    const concurrentProfileUse = requireReasonCodeDefinition('concurrent-profile-use', { family: 'risk' }).code;
+    const browserFingerprintRisk = requireReasonCodeDefinition('browser-fingerprint-risk', { family: 'risk' }).code;
+
+    assert.equal(
+      classifyRiskFromContext({ antiCrawlSignals: ['rate-limit'] }).riskCauseCode,
+      requestBurst,
+    );
+    const concurrentDecision = evaluateSessionPolicy({
+      operation: 'pipeline',
+      concurrentProfileUse: true,
+      networkFingerprint: 'synthetic-concurrent-network',
+      now: new Date('2026-05-01T00:00:00+08:00'),
+    });
+    assert.equal(concurrentDecision.riskCauseCode, concurrentProfileUse);
+    assert.equal(concurrentDecision.riskState.schemaVersion, RISK_STATE_SCHEMA_VERSION);
+    assert.equal(concurrentDecision.riskState.state, 'cooldown');
+    assert.equal(concurrentDecision.riskState.reasonCode, concurrentProfileUse);
+    assert.equal(concurrentDecision.riskState.scope, 'profile');
+    assert.equal(concurrentDecision.riskState.taskId, 'pipeline');
+    assert.equal(concurrentDecision.riskState.transition.from, 'normal');
+    assert.equal(concurrentDecision.riskState.transition.to, 'cooldown');
+    assert.equal(concurrentDecision.riskState.transition.observedAt, '2026-04-30T16:00:00.000Z');
+    const concurrentReason = requireReasonCodeDefinition('concurrent-profile-use', { family: 'risk' });
+    assert.equal(concurrentDecision.riskState.recovery.retryable, concurrentReason.retryable);
+    assert.equal(concurrentDecision.riskState.recovery.cooldownNeeded, concurrentReason.cooldownNeeded);
+    assert.equal(concurrentDecision.riskState.recovery.isolationNeeded, concurrentReason.isolationNeeded);
+    assert.equal(concurrentDecision.riskState.recovery.manualRecoveryNeeded, concurrentReason.manualRecoveryNeeded);
+    assert.equal(concurrentDecision.riskState.recovery.artifactWriteAllowed, concurrentReason.artifactWriteAllowed);
+    assert.equal(Object.hasOwn(concurrentDecision.riskState, 'profile'), false);
+    assert.equal(Object.hasOwn(concurrentDecision.riskState, 'session'), false);
+    assert.equal(Object.hasOwn(concurrentDecision.riskState, 'lease'), false);
+    assert.equal(Object.hasOwn(concurrentDecision.riskState, 'networkFingerprint'), false);
+    assert.equal(JSON.stringify(concurrentDecision.riskState).includes('synthetic-concurrent-network'), false);
+    assert.equal(assertSchemaCompatible('RiskState', concurrentDecision.riskState), true);
+
+    const quarantine = await writeProfileQuarantine(workspace, {
+      riskCauseCode: 'browser-fingerprint-risk',
+      riskAction: 'cooldown-and-retry-later',
+      antiCrawlSignals: ['verify'],
+      cooldownMinutes: 5,
+    });
+    assert.equal(quarantine.riskCauseCode, browserFingerprintRisk);
+    const quarantineDecision = evaluateSessionPolicy({
+      operation: 'pipeline',
+      quarantine,
+      networkFingerprint: 'synthetic-network-fingerprint',
+      now: new Date('2026-05-01T00:00:00+08:00'),
+    });
+    assert.equal(quarantineDecision.allowed, false);
+    assert.equal(quarantineDecision.riskCauseCode, browserFingerprintRisk);
+    assert.equal(quarantineDecision.riskState.schemaVersion, RISK_STATE_SCHEMA_VERSION);
+    assert.equal(quarantineDecision.riskState.state, 'isolated');
+    assert.equal(quarantineDecision.riskState.reasonCode, browserFingerprintRisk);
+    assert.equal(quarantineDecision.riskState.scope, 'profile');
+    assert.equal(quarantineDecision.riskState.taskId, 'pipeline');
+    assert.equal(quarantineDecision.riskState.transition.from, 'normal');
+    assert.equal(quarantineDecision.riskState.transition.to, 'isolated');
+    assert.equal(quarantineDecision.riskState.transition.observedAt, '2026-04-30T16:00:00.000Z');
+    const browserFingerprintReason = requireReasonCodeDefinition('browser-fingerprint-risk', { family: 'risk' });
+    assert.equal(quarantineDecision.riskState.recovery.retryable, browserFingerprintReason.retryable);
+    assert.equal(quarantineDecision.riskState.recovery.cooldownNeeded, browserFingerprintReason.cooldownNeeded);
+    assert.equal(quarantineDecision.riskState.recovery.isolationNeeded, browserFingerprintReason.isolationNeeded);
+    assert.equal(quarantineDecision.riskState.recovery.manualRecoveryNeeded, browserFingerprintReason.manualRecoveryNeeded);
+    assert.equal(quarantineDecision.riskState.recovery.artifactWriteAllowed, browserFingerprintReason.artifactWriteAllowed);
+    assert.equal(Object.hasOwn(quarantineDecision.riskState, 'profile'), false);
+    assert.equal(Object.hasOwn(quarantineDecision.riskState, 'session'), false);
+    assert.equal(Object.hasOwn(quarantineDecision.riskState, 'networkFingerprint'), false);
+    assert.equal(Object.hasOwn(quarantineDecision.riskState, 'quarantine'), false);
+    assert.equal(Object.hasOwn(quarantineDecision.riskState, 'antiCrawlSignals'), false);
+    assert.equal(JSON.stringify(quarantineDecision.riskState).includes('synthetic-network-fingerprint'), false);
+    assert.equal(JSON.stringify(quarantineDecision.riskState).includes('verify'), false);
+    assert.equal(assertSchemaCompatible('RiskState', quarantineDecision.riskState), true);
+
+    const legacyQuarantine = await writeProfileQuarantine(workspace, {
+      riskCauseCode: 'legacy-risk-provider-cause',
+      riskAction: 'manual-investigation',
+      antiCrawlSignals: ['legacy-signal'],
+      cooldownMinutes: 5,
+    });
+    assert.equal(legacyQuarantine.riskCauseCode, 'legacy-risk-provider-cause');
+    assert.equal(evaluateSessionPolicy({
+      operation: 'pipeline',
+      quarantine: legacyQuarantine,
+      now: new Date('2026-05-01T00:00:00+08:00'),
+    }).riskState, undefined);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test('evaluateSessionPolicy blocks pipeline on drift but still allows keepalive', () => {
   const authConfig = {
     verificationUrl: 'https://www.douyin.com/user/self?showTab=like',
@@ -238,19 +339,43 @@ test('evaluateSessionPolicy blocks pipeline on drift but still allows keepalive'
     authConfig,
     networkFingerprint,
     networkDrift,
+    now: new Date('2026-05-01T00:00:00+08:00'),
   });
   assert.equal(pipelineDecision.allowed, false);
   assert.equal(pipelineDecision.riskCauseCode, 'network-identity-drift');
   assert.equal(pipelineDecision.riskAction, 'run-keepalive-before-auth');
+  assert.equal(pipelineDecision.riskState.schemaVersion, RISK_STATE_SCHEMA_VERSION);
+  assert.equal(pipelineDecision.riskState.state, 'cooldown');
+  assert.equal(pipelineDecision.riskState.reasonCode, 'network-identity-drift');
+  assert.equal(pipelineDecision.riskState.scope, 'profile');
+  assert.equal(pipelineDecision.riskState.taskId, 'pipeline');
+  assert.equal(pipelineDecision.riskState.transition.from, 'normal');
+  assert.equal(pipelineDecision.riskState.transition.to, 'cooldown');
+  assert.equal(pipelineDecision.riskState.transition.observedAt, '2026-04-30T16:00:00.000Z');
+  const networkDriftReason = requireReasonCodeDefinition('network-identity-drift', { family: 'risk' });
+  assert.equal(pipelineDecision.riskState.recovery.retryable, networkDriftReason.retryable);
+  assert.equal(pipelineDecision.riskState.recovery.cooldownNeeded, networkDriftReason.cooldownNeeded);
+  assert.equal(pipelineDecision.riskState.recovery.isolationNeeded, networkDriftReason.isolationNeeded);
+  assert.equal(pipelineDecision.riskState.recovery.manualRecoveryNeeded, networkDriftReason.manualRecoveryNeeded);
+  assert.equal(pipelineDecision.riskState.recovery.artifactWriteAllowed, networkDriftReason.artifactWriteAllowed);
+  assert.equal(Object.hasOwn(pipelineDecision.riskState, 'profile'), false);
+  assert.equal(Object.hasOwn(pipelineDecision.riskState, 'session'), false);
+  assert.equal(Object.hasOwn(pipelineDecision.riskState, 'networkFingerprint'), false);
+  assert.equal(Object.hasOwn(pipelineDecision.riskState, 'networkDrift'), false);
+  assert.equal(JSON.stringify(pipelineDecision.riskState).includes('network-a'), false);
+  assert.equal(JSON.stringify(pipelineDecision.riskState).includes('public-ip-changed'), false);
+  assert.equal(assertSchemaCompatible('RiskState', pipelineDecision.riskState), true);
 
   const keepaliveDecision = evaluateSessionPolicy({
     operation: 'site-keepalive',
     authConfig,
     networkFingerprint,
     networkDrift,
+    now: new Date('2026-05-01T00:00:00+08:00'),
   });
   assert.equal(keepaliveDecision.allowed, true);
   assert.equal(keepaliveDecision.riskAction, 'keepalive-only');
+  assert.equal(keepaliveDecision.riskState, undefined);
 });
 
 test('download session preflight maps governance risk to a sanitized quarantine lease', async (t) => {
@@ -342,15 +467,126 @@ test('download session preflight maps governance risk to a sanitized quarantine 
   assert.deepEqual(released, ['risk-preflight-lease']);
 });
 
-test('appendRiskLedgerEvent writes structured entries without throwing', async () => {
+test('writeAuthSessionState persists redacted state and audit sidecar', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-auth-session-redaction-'));
+  try {
+    const statePath = await writeAuthSessionState(workspace, {
+      updatedAt: '2026-05-03T00:00:00.000Z',
+      userDataDir: workspace,
+      profilePath: path.join(workspace, 'browser-profile'),
+      sessionId: 'synthetic-auth-session-id',
+      headers: {
+        authorization: 'Bearer synthetic-auth-session-token',
+        Cookie: 'SESSDATA=synthetic-auth-session-cookie',
+        accept: 'application/json',
+      },
+      cookies: [{
+        name: 'SESSDATA',
+        value: 'synthetic-auth-session-cookie',
+      }],
+      note: 'refresh_token=synthetic-auth-session-refresh',
+      safeValue: 'kept',
+    });
+    const auditPath = siteSessionGovernanceRedactionAuditPath(statePath);
+    const persistedText = await readFile(statePath, 'utf8');
+    const auditText = await readFile(auditPath, 'utf8');
+    const persisted = JSON.parse(persistedText);
+    const audit = JSON.parse(auditText);
+
+    assert.equal(persisted.safeValue, 'kept');
+    assert.equal(persisted.userDataDir, REDACTION_PLACEHOLDER);
+    assert.equal(persisted.profilePath, REDACTION_PLACEHOLDER);
+    assert.equal(persisted.sessionId, REDACTION_PLACEHOLDER);
+    assert.equal(persisted.headers.authorization, REDACTION_PLACEHOLDER);
+    assert.equal(persisted.headers.Cookie, REDACTION_PLACEHOLDER);
+    assert.equal(persisted.cookies, REDACTION_PLACEHOLDER);
+    assert.equal(persisted.note, REDACTION_PLACEHOLDER);
+    assert.doesNotMatch(
+      `${persistedText}\n${auditText}`,
+      /synthetic-auth-session|SESSDATA=|Bearer|refresh_token=|bwk-auth-session-redaction/iu,
+    );
+    assert.equal(audit.redactedPaths.includes('userDataDir'), true);
+    assert.equal(audit.redactedPaths.includes('profilePath'), true);
+    assert.equal(audit.redactedPaths.includes('sessionId'), true);
+    assert.equal(audit.redactedPaths.includes('headers.authorization'), true);
+    assert.equal(audit.redactedPaths.includes('headers.Cookie'), true);
+    assert.equal(audit.redactedPaths.includes('cookies'), true);
+    assert.equal(audit.redactedPaths.includes('note'), true);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('writeAuthSessionState fails closed when its audit sidecar cannot be written', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-auth-session-audit-fail-'));
+  try {
+    const statePath = path.join(workspace, '.bws', 'auth-session-state.json');
+    const auditPath = siteSessionGovernanceRedactionAuditPath(statePath);
+    await mkdir(auditPath, { recursive: true });
+
+    await assert.rejects(() => writeAuthSessionState(workspace, {
+      updatedAt: '2026-05-03T00:00:00.000Z',
+      sessionId: 'synthetic-auth-session-id',
+    }));
+    await assert.rejects(() => readFile(statePath, 'utf8'), /ENOENT/u);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('appendRiskLedgerEvent writes redacted structured entries and audit sidecar', async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-risk-ledger-'));
   try {
     const filePath = await appendRiskLedgerEvent(workspace, {
       riskCauseCode: 'request-burst',
       riskAction: 'cooldown-and-retry-later',
-      antiCrawlSignals: ['rate-limit'],
+      antiCrawlSignals: [
+        'rate-limit',
+        'Authorization: Bearer synthetic-risk-ledger-token',
+        'SESSDATA=synthetic-risk-ledger-cookie',
+      ],
+      sessionMaterial: {
+        userDataDir: workspace,
+        sessionId: 'synthetic-risk-ledger-session-id',
+      },
     });
     assert.match(filePath, /\.bws[\\\/]risk-ledger\.jsonl$/u);
+    const auditPath = siteSessionGovernanceRedactionAuditPath(filePath);
+    const ledgerText = await readFile(filePath, 'utf8');
+    const auditText = await readFile(auditPath, 'utf8');
+    const entry = JSON.parse(ledgerText.trim());
+    const audit = JSON.parse(auditText.trim());
+
+    assert.deepEqual(entry.antiCrawlSignals, [
+      'rate-limit',
+      'Authorization: [REDACTED]',
+      REDACTION_PLACEHOLDER,
+    ]);
+    assert.equal(entry.sessionMaterial, REDACTION_PLACEHOLDER);
+    assert.doesNotMatch(
+      `${ledgerText}\n${auditText}`,
+      /synthetic-risk-ledger|SESSDATA=|Authorization: Bearer|bwk-risk-ledger/iu,
+    );
+    assert.equal(audit.redactedPaths.includes('antiCrawlSignals.1'), true);
+    assert.equal(audit.redactedPaths.includes('antiCrawlSignals.2'), true);
+    assert.equal(audit.redactedPaths.includes('sessionMaterial'), true);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('appendRiskLedgerEvent fails closed when its audit sidecar cannot be written', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-risk-ledger-audit-fail-'));
+  try {
+    const ledgerPath = path.join(workspace, '.bws', 'risk-ledger.jsonl');
+    const auditPath = siteSessionGovernanceRedactionAuditPath(ledgerPath);
+    await mkdir(auditPath, { recursive: true });
+
+    await assert.rejects(() => appendRiskLedgerEvent(workspace, {
+      riskCauseCode: 'request-burst',
+      antiCrawlSignals: ['SESSDATA=synthetic-risk-ledger-cookie'],
+    }));
+    await assert.rejects(() => readFile(ledgerPath, 'utf8'), /ENOENT/u);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -502,4 +738,147 @@ test('finalizeSiteSessionGovernance clears active quarantine after a healthy aut
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
+});
+
+test('finalizeSiteSessionGovernance does not reclassify recovered profile health as active risk', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-auth-session-profile-health-recovery-'));
+  try {
+    const summary = await finalizeSiteSessionGovernance({
+      operation: 'site-keepalive',
+      userDataDir: workspace,
+      authConfig: {
+        verificationUrl: 'https://x.com/home',
+        keepaliveUrl: 'https://x.com/home',
+        keepaliveIntervalMinutes: 180,
+        cooldownMinutesAfterRisk: 180,
+        preferVisibleBrowserForAuthenticatedFlows: true,
+        requireStableNetworkForAuthenticatedFlows: true,
+      },
+      networkDrift: {
+        driftDetected: false,
+        reasons: [],
+      },
+      policyDecision: {
+        allowed: true,
+        riskCauseCode: 'profile-health-risk',
+        riskAction: 'rebuild-profile',
+        profileQuarantined: false,
+      },
+      lease: null,
+    }, {
+      authRequired: true,
+      authAvailable: true,
+      identityConfirmed: true,
+      loginStateDetected: true,
+      persistedHealthySession: true,
+      sessionReuseVerified: true,
+      profileHealth: {
+        exists: true,
+        healthy: false,
+        usableForCookies: true,
+        warnings: ['Persistent browser profile last exit type was Crashed.'],
+      },
+      warmupSummary: {
+        attempted: true,
+        completed: true,
+        urls: ['https://x.com/home'],
+      },
+    }, {
+      now: new Date('2026-05-03T18:26:23.711Z'),
+    });
+
+    const persistedState = await readAuthSessionState(workspace);
+    assert.equal(summary.riskCauseCode, null);
+    assert.equal(summary.riskAction, null);
+    assert.equal(summary.profileQuarantined, false);
+    assert.equal(persistedState?.lastRiskCauseCode, null);
+    assert.equal(persistedState?.lastRiskAction, null);
+    assert.equal(persistedState?.lastSessionReuseVerifiedAt, '2026-05-03T18:26:23.711Z');
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('uninitialized profiles require login instead of dangerous profile rebuild', async () => {
+  const risk = classifyRiskFromContext({
+    profileHealth: {
+      exists: true,
+      healthy: false,
+      profileLifecycle: 'uninitialized',
+      warnings: ['Persistent browser profile is missing expected paths.'],
+    },
+  });
+
+  assert.equal(risk.riskCauseCode, null);
+  assert.equal(risk.riskAction, null);
+
+  const repairPlan = buildSessionRepairPlan({
+    siteKey: 'x',
+    host: 'x.com',
+    status: 'manual-required',
+    reason: 'profile-uninitialized',
+    riskSignals: ['profile-uninitialized'],
+  });
+  assert.equal(repairPlan.action, 'site-login');
+  assert.equal(repairPlan.command, 'site-login');
+
+  const health = await inspectDownloadSessionHealth('x', {
+    host: 'x.com',
+    sessionRequirement: 'required',
+    profile: {
+      host: 'x.com',
+      authSession: {
+        loginUrl: 'https://x.com/i/flow/login',
+        verificationUrl: 'https://x.com/home',
+      },
+    },
+    reuseLoginState: true,
+  }, {
+    async inspectReusableSiteSession() {
+      return {
+        authAvailable: false,
+        reusableProfile: false,
+        reuseLoginState: true,
+        userDataDir: path.join(os.tmpdir(), 'bwk-x-profile-uninitialized'),
+        profileHealth: {
+          exists: true,
+          healthy: false,
+          profileLifecycle: 'uninitialized',
+          warnings: ['Persistent browser profile is missing expected paths.'],
+        },
+        authConfig: {
+          loginUrl: 'https://x.com/i/flow/login',
+          verificationUrl: 'https://x.com/home',
+        },
+        sessionOptions: {
+          authConfig: {
+            loginUrl: 'https://x.com/i/flow/login',
+            verificationUrl: 'https://x.com/home',
+          },
+          reuseLoginState: true,
+          userDataDir: path.join(os.tmpdir(), 'bwk-x-profile-uninitialized'),
+        },
+      };
+    },
+    async prepareSiteSessionGovernance() {
+      return {
+        policyDecision: {
+          allowed: true,
+          riskCauseCode: null,
+          riskAction: null,
+        },
+        networkDrift: {
+          driftDetected: false,
+          reasons: [],
+        },
+        authSessionSummary: {},
+        lease: null,
+      };
+    },
+  });
+
+  assert.equal(health.status, 'manual-required');
+  assert.equal(health.reason, 'profile-uninitialized');
+  assert.equal(health.repairPlan.action, 'site-login');
+  assert.equal(health.repairPlan.command, 'site-login');
 });

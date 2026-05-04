@@ -17,6 +17,7 @@ import {
   releaseSessionLease,
 } from '../../../infra/auth/site-session-governance.mjs';
 import { cleanText } from '../../../shared/normalize.mjs';
+import { normalizeRiskTransition } from '../../capability/risk-state.mjs';
 import { resolveProfilePathForUrl } from '../../core/profiles.mjs';
 
 const DEFAULT_INPUT_URL = 'https://www.xiaohongshu.com/notification';
@@ -82,6 +83,20 @@ function normalizePositiveInteger(value, flagName, fallback = null) {
     throw new Error(`Invalid positive integer for ${flagName}: ${value}`);
   }
   return Math.trunc(parsed);
+}
+
+function runtimeRiskForFollowQueryResult(result, settings) {
+  if (result?.status !== 'captcha-gated' || result?.captchaDetected !== true) {
+    return null;
+  }
+  return normalizeRiskTransition({
+    from: 'normal',
+    state: 'captcha_required',
+    reasonCode: result.reasonCode,
+    siteKey: 'xiaohongshu',
+    taskId: `xiaohongshu-follow-query:${settings.intent}`,
+    scope: 'profile',
+  });
 }
 
 function normalizeHost(inputUrl) {
@@ -1423,6 +1438,7 @@ export async function queryXiaohongshuFollow(inputUrl = DEFAULT_INPUT_URL, optio
       note: result.reasonCode,
     });
     governanceFinalized = true;
+    const runtimeRisk = runtimeRiskForFollowQueryResult(result, settings);
 
     return {
       site: {
@@ -1448,6 +1464,7 @@ export async function queryXiaohongshuFollow(inputUrl = DEFAULT_INPUT_URL, optio
         loginStateDetected: authResult?.loginState?.loginStateDetected === true || authSnapshot?.rawLoggedIn === true,
       },
       result,
+      runtimeRisk,
       warnings,
     };
   } finally {

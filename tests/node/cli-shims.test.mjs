@@ -23,6 +23,46 @@ test('canonical site CLI entrypoints expose the expected Douyin handlers', () =>
   assert.equal(typeof douyinCookiesEntrypoint.runDouyinExportCookiesCli, 'function');
 });
 
+test('Douyin cookie export artifact helper writes only redacted summaries', () => {
+  const prepared = douyinCookiesEntrypoint.prepareDouyinCookieExportArtifacts({
+    inputUrl: 'https://www.douyin.com/',
+    outFile: 'C:/tmp/douyin-cookies.txt',
+    sidecarFile: 'C:/tmp/douyin-cookies.sidecar.json',
+    generatedAt: '2026-05-03T00:00:00.000Z',
+    cookies: [{
+      name: 'sessionid',
+      value: 'synthetic-douyin-cookie-secret',
+      domain: '.douyin.com',
+      path: '/',
+    }],
+    liveContext: {
+      headers: {
+        Cookie: 'sessionid=synthetic-douyin-cookie-secret',
+        Authorization: 'Bearer synthetic-douyin-auth-secret',
+      },
+      observedRequestHeaders: {
+        cookie: 'sessionid=synthetic-douyin-cookie-secret',
+      },
+    },
+    authContext: {
+      userDataDir: 'C:/synthetic/douyin/profile',
+      authConfig: {
+        verificationUrl: 'https://www.douyin.com/',
+      },
+    },
+  });
+
+  const persisted = `${prepared.cookieArtifact.json}\n${prepared.cookieArtifact.auditJson}\n${prepared.sidecar.json}\n${prepared.sidecar.auditJson}`;
+  assert.equal(prepared.summary.count, 1);
+  assert.deepEqual(prepared.summary.names, ['sessionid']);
+  assert.deepEqual(prepared.summary.domains, ['.douyin.com']);
+  assert.doesNotMatch(
+    persisted,
+    /synthetic-douyin-cookie-secret|synthetic-douyin-auth-secret|sessionid=|Bearer synthetic|C:\/synthetic\/douyin\/profile|C:\/tmp\/douyin-cookies/iu,
+  );
+  assert.match(persisted, /redacted-cookie-export-summary/u);
+});
+
 test('canonical site CLI entrypoints expose the expected bilibili handlers', () => {
   assert.equal(typeof bilibiliActionEntrypoint.cli, 'function');
   assert.equal(typeof bilibiliOpenEntrypoint.openBilibiliPage, 'function');

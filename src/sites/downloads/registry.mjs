@@ -8,8 +8,10 @@ import {
   inferHostFromDownloadRequest,
   inferSiteKeyFromHost,
   normalizeDownloadResource,
+  normalizeDownloadResourceConsumerHeaders,
   normalizeDownloadTaskPlan,
   normalizeResolvedDownloadTask,
+  normalizeSessionLeaseConsumerHeaders,
 } from './contracts.mjs';
 
 export const DEFAULT_DOWNLOAD_SITE_DEFINITIONS = Object.freeze([
@@ -31,7 +33,7 @@ export const DEFAULT_DOWNLOAD_SITE_DEFINITIONS = Object.freeze([
     taskType: 'video',
     taskTypes: ['video', 'media-bundle'],
     sessionRequirement: 'optional',
-    resolverMethod: 'legacy-bilibili-action',
+    resolverMethod: 'native-bilibili-resource-seeds',
     legacyEntrypoint: 'src/entrypoints/sites/bilibili-action.mjs',
     legacyExecutorKind: 'node',
   },
@@ -42,7 +44,7 @@ export const DEFAULT_DOWNLOAD_SITE_DEFINITIONS = Object.freeze([
     taskType: 'video',
     taskTypes: ['video', 'media-bundle'],
     sessionRequirement: 'optional',
-    resolverMethod: 'legacy-douyin-action',
+    resolverMethod: 'native-douyin-resource-seeds',
     legacyEntrypoint: 'src/entrypoints/sites/douyin-action.mjs',
     legacyExecutorKind: 'node',
   },
@@ -53,7 +55,7 @@ export const DEFAULT_DOWNLOAD_SITE_DEFINITIONS = Object.freeze([
     taskType: 'image-note',
     taskTypes: ['image-note', 'media-bundle'],
     sessionRequirement: 'optional',
-    resolverMethod: 'legacy-xiaohongshu-action',
+    resolverMethod: 'native-xiaohongshu-resource-seeds',
     legacyEntrypoint: 'src/entrypoints/sites/xiaohongshu-action.mjs',
     legacyExecutorKind: 'node',
   },
@@ -253,10 +255,16 @@ export async function createDownloadPlan(request = {}, context = {}) {
 
 export async function resolveDownloadResources(plan, sessionLease = null, context = {}) {
   const request = context.request ?? {};
+  const leaseHeaders = normalizeSessionLeaseConsumerHeaders(sessionLease);
+  const requestHeaders = normalizeDownloadResourceConsumerHeaders(request.downloadHeaders);
   const resources = requestResources(request).map((resource, index) => normalizeDownloadResource({
     mediaType: request.mediaType,
-    headers: sessionLease?.headers ?? {},
     ...resource,
+    headers: normalizeDownloadResourceConsumerHeaders({
+      ...leaseHeaders,
+      ...requestHeaders,
+      ...(resource.headers ?? {}),
+    }),
     fileName: resource.fileName ?? request.fileName ?? (path.basename(resource.url ?? '') || undefined),
   }, index));
   return normalizeResolvedDownloadTask({

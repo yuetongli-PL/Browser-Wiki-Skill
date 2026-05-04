@@ -15,7 +15,13 @@ import {
   runSocialActionCli,
   sanitizeSocialApiRequestTemplate,
   SOCIAL_ACTION_HELP,
+  writeExternalSocialReportArtifacts,
+  writeInternalSocialReportArtifact,
+  writeRedactedJsonArtifactWithAudit,
 } from '../../src/sites/social/actions/router.mjs';
+import { assertSchemaCompatible } from '../../src/sites/capability/compatibility-registry.mjs';
+import { createCapabilityHookRegistry } from '../../src/sites/capability/capability-hook.mjs';
+import { assertNoForbiddenPatterns } from '../../src/sites/capability/security-guard.mjs';
 
 test('social action planner builds X user content, relation, and date search routes', () => {
   assert.equal(normalizeSocialAccount('https://x.com/opensource/status/1646527756281315330', 'x'), 'opensource');
@@ -536,6 +542,57 @@ test('runSocialAction suppresses API cursor for Instagram relation actions', asy
   assert.equal(result.settings.apiCursorSuppressed, true);
 });
 
+test('runSocialAction writes manifest when unified session gate blocks before browser work', async (t) => {
+  const runDir = await mkdtemp(path.join(os.tmpdir(), 'bws-social-session-gate-blocked-'));
+  t.after(async () => {
+    await rm(runDir, { recursive: true, force: true });
+  });
+
+  const result = await runSocialAction({
+    site: 'x',
+    action: 'full-archive',
+    account: 'openai',
+    runDir,
+    useUnifiedSessionHealth: true,
+  }, {
+    async runSessionTask() {
+      return {
+        manifest: {
+          schemaVersion: 1,
+          runId: 'session-run-x-archive-blocked',
+          siteKey: 'x',
+          host: 'x.com',
+          purpose: 'archive',
+          status: 'manual-required',
+          reason: 'profile-health-risk',
+          health: {
+            status: 'manual-required',
+            authStatus: 'unknown',
+            identityConfirmed: false,
+            riskCauseCode: 'profile-health-risk',
+            riskSignals: ['profile-health-risk'],
+          },
+          artifacts: {
+            manifest: path.join(runDir, 'session-health', 'manifest.json'),
+            runDir: path.join(runDir, 'session-health'),
+          },
+        },
+      };
+    },
+  });
+
+  const manifest = JSON.parse(await readFile(path.join(runDir, 'manifest.json'), 'utf8'));
+  const report = await readFile(path.join(runDir, 'report.md'), 'utf8');
+
+  assert.equal(result.ok, false);
+  assert.equal(result.outcome.status, 'blocked');
+  assert.equal(result.outcome.reason, 'profile-health-risk');
+  assert.equal(manifest.outcome.status, 'blocked');
+  assert.equal(manifest.sessionGate.reason, 'profile-health-risk');
+  assert.equal(manifest.artifacts.manifest, path.join(runDir, 'manifest.json'));
+  assert.match(report, /Outcome: blocked \(profile-health-risk\)/u);
+});
+
 test('runSocialAction archives Instagram profile content through api v1 feed user fallback', async (t) => {
   const runDir = await mkdtemp(path.join(os.tmpdir(), 'bws-social-ig-feed-user-'));
   t.after(async () => {
@@ -724,6 +781,107 @@ test('runSocialAction opens a blank page before API cursor capture navigation', 
 
   assert.equal(startupUrl, 'about:blank');
   assert.equal(navigations[0], 'https://x.com/openai');
+});
+
+test('runSocialAction records safe session reuse after an authenticated run with forced browser shutdown', async (t) => {
+  const runDir = await mkdtemp(path.join(os.tmpdir(), 'bws-social-auth-session-record-'));
+  t.after(async () => {
+    await rm(runDir, { recursive: true, force: true });
+  });
+  const profileDir = path.join(runDir, 'profile');
+  const writes = [];
+  const fakeSession = {
+    async navigateAndWait() {},
+    async evaluateValue() {
+      return 'https://x.com/openai';
+    },
+    async callPageFunction(fn) {
+      const source = String(fn);
+      if (source.includes('pageExtractSocialState')) {
+        return {
+          url: 'https://x.com/openai',
+          title: 'OpenAI / X',
+          currentAccount: 'me',
+          account: { handle: 'openai', displayName: 'OpenAI' },
+          items: [],
+          relations: [],
+          media: [],
+        };
+      }
+      if (source.includes('pageScrollToBottom')) {
+        return { before: 0, after: 0, height: 0 };
+      }
+      return null;
+    },
+    getMetrics() {
+      return {};
+    },
+    async close() {
+      return {
+        shutdownMode: 'forced',
+        profileFlush: { stable: true },
+      };
+    },
+  };
+
+  const result = await runSocialAction({
+    site: 'x',
+    action: 'profile-content',
+    account: 'openai',
+    timeoutMs: 1000,
+    maxScrolls: 0,
+    runDir,
+  }, {
+    now: new Date('2026-05-04T02:20:00.000Z'),
+    async resolveSiteBrowserSessionOptions() {
+      return {
+        userDataDir: profileDir,
+        cleanupUserDataDirOnShutdown: false,
+        reuseLoginState: true,
+        authConfig: {
+          keepaliveIntervalMinutes: 180,
+          verificationUrl: 'https://x.com/home',
+          keepaliveUrl: 'https://x.com/home',
+        },
+      };
+    },
+    async openBrowserSession() {
+      return fakeSession;
+    },
+    async ensureAuthenticatedSession() {
+      return {
+        status: 'already-authenticated',
+        loginState: {
+          identityConfirmed: true,
+          loginStateDetected: true,
+        },
+      };
+    },
+    async readAuthSessionState() {
+      return {
+        counts: {
+          sessionReuseVerifications: 2,
+        },
+      };
+    },
+    async writeAuthSessionState(userDataDir, state) {
+      writes.push({ userDataDir, state });
+      return { filePath: path.join(userDataDir, '.bws', 'auth-session-state.json') };
+    },
+  });
+
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].userDataDir, profileDir);
+  assert.equal(writes[0].state.lastHealthyAt, '2026-05-04T02:20:00.000Z');
+  assert.equal(writes[0].state.lastSessionReuseVerifiedAt, '2026-05-04T02:20:00.000Z');
+  assert.equal(writes[0].state.nextSuggestedKeepaliveAt, '2026-05-04T05:20:00.000Z');
+  assert.equal(writes[0].state.lastBrowserShutdownMode, 'forced');
+  assert.equal(writes[0].state.counts.sessionReuseVerifications, 3);
+  assert.equal(writes[0].state.counts.socialActionSessionReuses, 1);
+  assert.equal(result.authSessionRecord.status, 'recorded');
+  assert.equal(result.authSessionRecord.profileRef, 'persistent-profile');
+  assertNoForbiddenPatterns(writes[0].state);
+  assertNoForbiddenPatterns(result.authSessionRecord);
 });
 
 test('runSocialAction reports resume-only archive completion as unknown', async (t) => {
@@ -972,6 +1130,7 @@ test('runSocialAction captures API debug summary and replays cursor fixture page
   });
 
   const debug = JSON.parse(await readFile(path.join(runDir, 'api-capture-debug.json'), 'utf8'));
+  const debugAudit = JSON.parse(await readFile(path.join(runDir, 'api-capture-debug.redaction-audit.json'), 'utf8'));
   assert.equal(result.result.archive.strategy, 'api-cursor');
   assert.equal(result.result.archive.pages, 2);
   assert.equal(result.result.archive.complete, true);
@@ -980,6 +1139,261 @@ test('runSocialAction captures API debug summary and replays cursor fixture page
   assert.equal(debug.capture.samples[0].itemCount, 1);
   assert.equal(debug.capture.samples[0].hasNextCursor, true);
   assert.equal(debug.capture.driftSamples.length, 0);
+  assert.equal(result.artifacts.apiCaptureRedactionAudit, path.join(runDir, 'api-capture-debug.redaction-audit.json'));
+  assert.equal(debugAudit.schemaVersion, 1);
+  assert.equal(Array.isArray(debugAudit.redactedPaths), true);
+  assert.equal(Array.isArray(debugAudit.findings), true);
+});
+
+test('social API artifact redaction failure is reason-coded and fails closed', async (t) => {
+  const runDir = await mkdtemp(path.join(os.tmpdir(), 'bws-social-api-redaction-fail-'));
+  t.after(async () => {
+    await rm(runDir, { recursive: true, force: true });
+  });
+  const artifactPath = path.join(runDir, 'api-capture-debug.json');
+  const auditPath = path.join(runDir, 'api-capture-debug.redaction-audit.json');
+  const payload = {
+    schemaVersion: 1,
+    leak: {
+      toJSON() {
+        return 'Authorization: Bearer synthetic-token-value';
+      },
+    },
+  };
+
+  await assert.rejects(
+    writeRedactedJsonArtifactWithAudit(artifactPath, auditPath, payload, { artifactKind: 'api-capture-debug' }),
+    (error) => {
+      assert.equal(error.name, 'SocialArtifactRedactionFailure');
+      assert.equal(error.reasonCode, 'redaction-failed');
+      assert.equal(error.failureMode, 'redaction-failed');
+      assert.equal(error.artifactWriteAllowed, false);
+      assert.equal(error.manualRecoveryNeeded, true);
+      assert.equal(error.retryable, false);
+      assert.equal(error.artifactKind, 'api-capture-debug');
+      assert.equal(error.message.includes('synthetic-token-value'), false);
+      return true;
+    },
+  );
+  await assert.rejects(readFile(artifactPath, 'utf8'), /ENOENT/u);
+  await assert.rejects(readFile(auditPath, 'utf8'), /ENOENT/u);
+
+  const throwingArtifactPath = path.join(runDir, 'api-drift-samples.json');
+  const throwingAuditPath = path.join(runDir, 'api-drift-samples.redaction-audit.json');
+  await assert.rejects(
+    writeRedactedJsonArtifactWithAudit(
+      throwingArtifactPath,
+      throwingAuditPath,
+      {
+        schemaVersion: 1,
+        leak: {
+          toJSON() {
+            throw new Error('Authorization: Bearer synthetic-token-value');
+          },
+        },
+      },
+      { artifactKind: 'api-drift-samples' },
+    ),
+    (error) => {
+      const serialized = JSON.stringify(error);
+      assert.equal(error.reasonCode, 'redaction-failed');
+      assert.equal(error.artifactKind, 'api-drift-samples');
+      assert.equal(Object.prototype.hasOwnProperty.call(error, 'cause'), false);
+      assert.deepEqual(error.causeSummary, { name: 'Error' });
+      assert.equal(error.message.includes('synthetic-token-value'), false);
+      assert.equal(serialized.includes('synthetic-token-value'), false);
+      assert.equal(JSON.stringify(error.causeSummary).includes('synthetic-token-value'), false);
+      return true;
+    },
+  );
+  await assert.rejects(readFile(throwingArtifactPath, 'utf8'), /ENOENT/u);
+  await assert.rejects(readFile(throwingAuditPath, 'utf8'), /ENOENT/u);
+});
+
+test('external social report artifacts are redacted before persistent write', async (t) => {
+  const runDir = await mkdtemp(path.join(os.tmpdir(), 'bws-social-report-redaction-'));
+  t.after(async () => {
+    await rm(runDir, { recursive: true, force: true });
+  });
+  const reportPath = path.join(runDir, 'external-report.json');
+  const written = await writeExternalSocialReportArtifacts(reportPath, {
+    ok: false,
+    siteKey: 'x',
+    generatedAt: '2026-05-02T17:50:00.000Z',
+    markdown: 'Synthetic Authorization: Bearer synthetic-markdown-token',
+    authHealth: {
+      headers: {
+        authorization: 'Bearer synthetic-json-token',
+        cookie: 'SESSDATA=synthetic-cookie-value',
+      },
+      csrfToken: 'synthetic-csrf-token',
+      session_id: 'synthetic-session-id',
+      userDataDir: 'C:/Users/synthetic-profile',
+    },
+    runtimeRisk: {
+      details: 'refresh_token=synthetic-refresh-token',
+    },
+  });
+
+  const jsonText = await readFile(reportPath, 'utf8');
+  const jsonAuditText = await readFile(written.reportRedactionAuditPath, 'utf8');
+  const markdownText = await readFile(written.markdownReportPath, 'utf8');
+  const markdownAuditText = await readFile(written.markdownRedactionAuditPath, 'utf8');
+  assert.equal(jsonText.includes('synthetic-json-token'), false);
+  assert.equal(jsonText.includes('synthetic-cookie-value'), false);
+  assert.equal(jsonText.includes('synthetic-csrf-token'), false);
+  assert.equal(jsonText.includes('synthetic-session-id'), false);
+  assert.equal(jsonText.includes('synthetic-refresh-token'), false);
+  assert.equal(markdownText.includes('synthetic-markdown-token'), false);
+  assert.match(jsonText, /\[REDACTED\]/u);
+  assert.match(markdownText, /\[REDACTED\]/u);
+  assertNoForbiddenPatterns(jsonText);
+  assertNoForbiddenPatterns(markdownText);
+  assert.equal(JSON.parse(jsonAuditText).schemaVersion, 1);
+  assert.equal(JSON.parse(markdownAuditText).schemaVersion, 1);
+});
+
+test('external social report redaction failure is reason-coded and fails closed', async (t) => {
+  const runDir = await mkdtemp(path.join(os.tmpdir(), 'bws-social-report-redaction-fail-'));
+  t.after(async () => {
+    await rm(runDir, { recursive: true, force: true });
+  });
+  const reportPath = path.join(runDir, 'external-report.json');
+  const markdownPath = path.join(runDir, 'external-report.md');
+  const jsonAuditPath = path.join(runDir, 'external-report.redaction-audit.json');
+  const markdownAuditPath = path.join(runDir, 'external-report.md.redaction-audit.json');
+
+  await assert.rejects(
+    writeExternalSocialReportArtifacts(reportPath, {
+      ok: false,
+      markdown: 'safe markdown',
+      leak: {
+        toJSON() {
+          throw new Error('Authorization: Bearer synthetic-report-token');
+        },
+      },
+    }),
+    (error) => {
+      const serialized = JSON.stringify(error);
+      assert.equal(error.name, 'SocialArtifactRedactionFailure');
+      assert.equal(error.reasonCode, 'redaction-failed');
+      assert.equal(error.artifactKind, 'external-social-report');
+      assert.equal(error.artifactWriteAllowed, false);
+      assert.equal(error.message.includes('synthetic-report-token'), false);
+      assert.equal(serialized.includes('synthetic-report-token'), false);
+      return true;
+    },
+  );
+  await assert.rejects(readFile(reportPath, 'utf8'), /ENOENT/u);
+  await assert.rejects(readFile(markdownPath, 'utf8'), /ENOENT/u);
+  await assert.rejects(readFile(jsonAuditPath, 'utf8'), /ENOENT/u);
+  await assert.rejects(readFile(markdownAuditPath, 'utf8'), /ENOENT/u);
+});
+
+test('external social report redaction failure preserves existing artifacts', async (t) => {
+  const runDir = await mkdtemp(path.join(os.tmpdir(), 'bws-social-report-redaction-preserve-'));
+  t.after(async () => {
+    await rm(runDir, { recursive: true, force: true });
+  });
+  const reportPath = path.join(runDir, 'external-report.json');
+  const markdownPath = path.join(runDir, 'external-report.md');
+  const jsonAuditPath = path.join(runDir, 'external-report.redaction-audit.json');
+  const markdownAuditPath = path.join(runDir, 'external-report.md.redaction-audit.json');
+  const sentinels = new Map([
+    [reportPath, '{"sentinel":"json-before-redaction-failure"}\n'],
+    [markdownPath, '# markdown before redaction failure\n'],
+    [jsonAuditPath, '{"sentinel":"json-audit-before-redaction-failure"}\n'],
+    [markdownAuditPath, '{"sentinel":"markdown-audit-before-redaction-failure"}\n'],
+  ]);
+  for (const [filePath, text] of sentinels) {
+    await writeFile(filePath, text, 'utf8');
+  }
+
+  await assert.rejects(
+    writeExternalSocialReportArtifacts(reportPath, {
+      ok: false,
+      markdown: 'safe markdown',
+      leak: {
+        toJSON() {
+          throw new Error('Authorization: Bearer synthetic-report-preserve-token');
+        },
+      },
+    }),
+    (error) => {
+      const serialized = JSON.stringify(error);
+      assert.equal(error.name, 'SocialArtifactRedactionFailure');
+      assert.equal(error.reasonCode, 'redaction-failed');
+      assert.equal(error.artifactKind, 'external-social-report');
+      assert.equal(error.artifactWriteAllowed, false);
+      assert.equal(error.message.includes('synthetic-report-preserve-token'), false);
+      assert.equal(serialized.includes('synthetic-report-preserve-token'), false);
+      return true;
+    },
+  );
+  for (const [filePath, text] of sentinels) {
+    assert.equal(await readFile(filePath, 'utf8'), text);
+  }
+});
+
+test('internal social report artifact is redacted before persistent write', async (t) => {
+  const runDir = await mkdtemp(path.join(os.tmpdir(), 'bws-social-internal-report-redaction-'));
+  t.after(async () => {
+    await rm(runDir, { recursive: true, force: true });
+  });
+  const reportPath = path.join(runDir, 'report.md');
+  const auditPath = path.join(runDir, 'report.redaction-audit.json');
+
+  const written = await writeInternalSocialReportArtifact(
+    reportPath,
+    auditPath,
+    [
+      '# synthetic social report',
+      '',
+      'Authorization: Bearer synthetic-internal-report-token',
+      'Cookie: SESSDATA=synthetic-internal-cookie',
+      'csrf=synthetic-internal-csrf',
+    ].join('\n'),
+  );
+
+  const reportText = await readFile(reportPath, 'utf8');
+  const auditText = await readFile(auditPath, 'utf8');
+  assert.equal(written.reportPath, reportPath);
+  assert.equal(written.reportRedactionAuditPath, auditPath);
+  assert.equal(reportText.includes('synthetic-internal-report-token'), false);
+  assert.equal(reportText.includes('synthetic-internal-cookie'), false);
+  assert.equal(reportText.includes('synthetic-internal-csrf'), false);
+  assert.match(reportText, /\[REDACTED\]/u);
+  assertNoForbiddenPatterns(reportText);
+  assert.equal(JSON.parse(auditText).schemaVersion, 1);
+});
+
+test('internal social report redaction failure is reason-coded and fails closed', async (t) => {
+  const runDir = await mkdtemp(path.join(os.tmpdir(), 'bws-social-internal-report-redaction-fail-'));
+  t.after(async () => {
+    await rm(runDir, { recursive: true, force: true });
+  });
+  const reportPath = path.join(runDir, 'report.md');
+  const auditPath = path.join(runDir, 'report.redaction-audit.json');
+
+  await assert.rejects(
+    writeInternalSocialReportArtifact(reportPath, auditPath, {
+      toString() {
+        throw new Error('Authorization: Bearer synthetic-internal-report-token');
+      },
+    }),
+    (error) => {
+      const serialized = JSON.stringify(error);
+      assert.equal(error.name, 'SocialArtifactRedactionFailure');
+      assert.equal(error.reasonCode, 'redaction-failed');
+      assert.equal(error.artifactKind, 'internal-social-report');
+      assert.equal(error.artifactWriteAllowed, false);
+      assert.equal(error.message.includes('synthetic-internal-report-token'), false);
+      assert.equal(serialized.includes('synthetic-internal-report-token'), false);
+      return true;
+    },
+  );
+  await assert.rejects(readFile(reportPath, 'utf8'), /ENOENT/u);
+  await assert.rejects(readFile(auditPath, 'utf8'), /ENOENT/u);
 });
 
 test('runSocialAction filters X profile API archive to requested original posts', async (t) => {
@@ -1492,9 +1906,13 @@ test('runSocialAction classifies API drift samples with category and reason', as
 
   const debug = JSON.parse(await readFile(path.join(runDir, 'api-capture-debug.json'), 'utf8'));
   const samples = JSON.parse(await readFile(path.join(runDir, 'api-drift-samples.json'), 'utf8'));
+  const samplesAudit = JSON.parse(await readFile(path.join(runDir, 'api-drift-samples.redaction-audit.json'), 'utf8'));
   assert.equal(debug.capture.driftSamples[0].category, 'target-empty');
   assert.equal(debug.capture.driftSamples[0].driftReason, 'target timeline parsed no items');
   assert.equal(samples.samples[0].summary.category, 'target-empty');
+  assert.equal(samplesAudit.schemaVersion, 1);
+  assert.equal(Array.isArray(samplesAudit.redactedPaths), true);
+  assert.equal(Array.isArray(samplesAudit.findings), true);
 });
 
 test('runSocialAction retries API cursor replay after rate limit response', async (t) => {
@@ -1777,6 +2195,22 @@ test('runSocialAction pauses X full archive with resumable cursor after API rate
   const seedUrl = new URL('https://x.com/i/api/graphql/abc/UserTweets');
   seedUrl.searchParams.set('variables', JSON.stringify({ userId: '1', cursor: 'OLD' }));
   let emitted = false;
+  const capabilityHookRegistry = createCapabilityHookRegistry([{
+    id: 'social-rate-limit-observer',
+    phase: 'on_risk',
+    hookType: 'observer',
+    subscriber: {
+      name: 'social-rate-limit-observer',
+      modulePath: 'synthetic/social-rate-limit-observer.mjs',
+      entrypoint: 'shouldNotExecute',
+      capability: 'social-action',
+    },
+    filters: {
+      eventTypes: ['social.action.risk_blocked'],
+      siteKeys: ['x'],
+      reasonCodes: ['request-burst'],
+    },
+  }]);
   const fakeSession = {
     client: { on(eventName, callback) { listeners.set(eventName, callback); return () => {}; } },
     sessionId: 'session-api-429-paused',
@@ -1832,16 +2266,81 @@ test('runSocialAction pauses X full archive with resumable cursor after API rate
     async resolveSiteBrowserSessionOptions() { return { userDataDir: null, cleanupUserDataDirOnShutdown: true }; },
     async openBrowserSession() { return fakeSession; },
     async ensureAuthenticatedSession() { return { loggedIn: true }; },
+    capabilityHookRegistry,
   });
 
   const state = JSON.parse(await readFile(path.join(runDir, 'state.json'), 'utf8'));
   const manifest = JSON.parse(await readFile(path.join(runDir, 'manifest.json'), 'utf8'));
+  const riskEvent = JSON.parse(await readFile(path.join(runDir, 'social-action-risk-blocked.lifecycle-event.json'), 'utf8'));
+  const riskEventAudit = JSON.parse(await readFile(path.join(runDir, 'social-action-risk-blocked.lifecycle-event.redaction-audit.json'), 'utf8'));
   assert.equal(result.ok, false);
   assert.equal(result.outcome.resumable, true);
   assert.equal(result.result.archive.reason, 'api-rate-limited');
   assert.equal(result.result.archive.nextCursor, 'CURSOR_NEXT');
+  assert.equal(result.runtimeRisk.riskState.schemaVersion, 1);
+  assert.equal(result.runtimeRisk.riskState.state, 'rate_limited');
+  assert.equal(result.runtimeRisk.riskState.reasonCode, 'request-burst');
+  assert.equal(result.runtimeRisk.riskState.siteKey, 'x');
+  assert.equal(result.runtimeRisk.riskState.taskId, 'x:full-archive');
+  assert.equal(result.runtimeRisk.riskState.scope, 'api');
+  assert.equal(result.runtimeRisk.riskState.transition.from, 'normal');
+  assert.equal(result.runtimeRisk.riskState.transition.to, 'rate_limited');
+  assert.equal(result.runtimeRisk.riskState.recovery.retryable, true);
+  assert.equal(result.runtimeRisk.riskState.recovery.cooldownNeeded, true);
+  assert.equal(result.runtimeRisk.riskState.recovery.isolationNeeded, false);
+  assert.equal(result.runtimeRisk.riskState.recovery.manualRecoveryNeeded, false);
+  assert.equal(result.runtimeRisk.riskState.recovery.degradable, true);
+  assert.equal(result.runtimeRisk.riskState.recovery.artifactWriteAllowed, true);
   assert.equal(state.status, 'paused');
   assert.equal(state.archive.nextCursor, 'CURSOR_NEXT');
+  assert.equal(state.runtimeRisk.riskState.state, 'rate_limited');
+  assert.equal(state.artifacts.schemaVersion, 1);
+  assert.equal(assertSchemaCompatible('ArtifactReferenceSet', state.artifacts), true);
+  assert.equal(manifest.runtimeRisk.riskState.state, 'rate_limited');
+  assert.equal(manifest.artifacts.schemaVersion, 1);
+  assert.equal(assertSchemaCompatible('ArtifactReferenceSet', manifest.artifacts), true);
+  assert.equal(manifest.artifacts.socialRiskBlockedLifecycleEvent, path.join(runDir, 'social-action-risk-blocked.lifecycle-event.json'));
+  assert.equal(riskEvent.schemaVersion, 1);
+  assert.equal(riskEvent.eventType, 'social.action.risk_blocked');
+  assert.equal(riskEvent.traceId, path.basename(runDir));
+  assert.equal(riskEvent.correlationId, 'x:full-archive');
+  assert.equal(riskEvent.taskId, 'x:full-archive');
+  assert.equal(riskEvent.siteKey, 'x');
+  assert.equal(riskEvent.taskType, 'full-archive');
+  assert.equal(riskEvent.adapterVersion, 'social-action-router-v1');
+  assert.equal(riskEvent.reasonCode, 'request-burst');
+  assert.equal(riskEvent.details.riskState.state, 'rate_limited');
+  assert.equal(assertSchemaCompatible('LifecycleEvent', riskEvent), true);
+  assert.deepEqual(riskEvent.details.capabilityHookMatches.lifecycleEvent, {
+    schemaVersion: 1,
+    eventType: 'social.action.risk_blocked',
+    traceId: path.basename(runDir),
+    correlationId: 'x:full-archive',
+    taskId: 'x:full-archive',
+    siteKey: 'x',
+    taskType: 'full-archive',
+    adapterVersion: 'social-action-router-v1',
+    reasonCode: 'request-burst',
+  });
+  assert.equal(Object.hasOwn(riskEvent.details.capabilityHookMatches.lifecycleEvent, 'details'), false);
+  assert.deepEqual(riskEvent.details.capabilityHookMatches.phases, ['on_risk', 'on_failure']);
+  assert.equal(riskEvent.details.capabilityHookMatches.matchCount, 1);
+  assert.equal(riskEvent.details.capabilityHookMatches.matches[0].id, 'social-rate-limit-observer');
+  assert.equal(riskEvent.details.capabilityHookMatches.matches[0].subscriber.name, 'social-rate-limit-observer');
+  assert.equal(riskEvent.details.capabilityHookMatches.matches[0].subscriber.capability, 'social-action');
+  assert.equal(
+    Object.hasOwn(riskEvent.details.capabilityHookMatches.matches[0].subscriber, 'modulePath'),
+    false,
+  );
+  assert.equal(
+    Object.hasOwn(riskEvent.details.capabilityHookMatches.matches[0].subscriber, 'entrypoint'),
+    false,
+  );
+  assert.equal(JSON.stringify(riskEvent).includes('shouldNotExecute'), false);
+  assert.equal(JSON.stringify(riskEvent).includes('synthetic/social-rate-limit-observer.mjs'), false);
+  assertNoForbiddenPatterns(riskEvent);
+  assert.equal(riskEventAudit.schemaVersion, 1);
+  assert.equal(Array.isArray(riskEventAudit.redactedPaths), true);
   assert.equal(state.archive.riskSignals.includes('rate-limited'), true);
   assert.equal(manifest.recoveryRunbook.status, 'actionable');
   assert.equal(manifest.recoveryRunbook.commands.some((entry) => entry.id === 'resume-after-cooldown'), true);
@@ -2040,8 +2539,8 @@ test('runSocialAction keeps Instagram followed profile scan incomplete unless pa
   assert.equal(result.result.items.length, 1);
   assert.equal(result.result.archive.complete, false);
   assert.equal(result.result.archive.reason, 'unverified-following-pagination');
-  assert.equal(result.result.archive.confidence, 'verified-complete');
-  assert.equal(result.completeness.confidence, 'verified-complete');
+  assert.equal(result.result.archive.confidence, 'unverified-following-pagination');
+  assert.equal(result.completeness.confidence, 'unverified-following-pagination');
 });
 
 test('runSocialAction scrolls Instagram followed-users until profile count is reached', async (t) => {
@@ -3323,6 +3822,8 @@ test('runSocialAction writes standard social archive artifacts', async (t) => {
   });
 
   const manifest = JSON.parse(await readFile(path.join(runDir, 'manifest.json'), 'utf8'));
+  const manifestAudit = JSON.parse(await readFile(path.join(runDir, 'manifest.redaction-audit.json'), 'utf8'));
+  const reportAudit = JSON.parse(await readFile(path.join(runDir, 'report.redaction-audit.json'), 'utf8'));
   const state = JSON.parse(await readFile(path.join(runDir, 'state.json'), 'utf8'));
   const itemsText = await readFile(path.join(runDir, 'items.jsonl'), 'utf8');
   const report = await readFile(path.join(runDir, 'report.md'), 'utf8');
@@ -3330,16 +3831,29 @@ test('runSocialAction writes standard social archive artifacts', async (t) => {
   const indexHtml = await readFile(path.join(runDir, 'index.html'), 'utf8');
 
   assert.equal(result.artifacts.runDir, runDir);
+  assert.equal(result.artifacts.schemaVersion, 1);
+  assert.equal(assertSchemaCompatible('ArtifactReferenceSet', result.artifacts), true);
   assert.equal(manifest.schemaVersion, 1);
   assert.equal(manifest.counts.items, 1);
+  assert.equal(manifest.artifacts.schemaVersion, 1);
+  assert.equal(assertSchemaCompatible('ArtifactReferenceSet', manifest.artifacts), true);
+  assert.equal(manifest.artifacts.manifestRedactionAudit, path.join(runDir, 'manifest.redaction-audit.json'));
+  assert.equal(manifest.artifacts.reportRedactionAudit, path.join(runDir, 'report.redaction-audit.json'));
   assert.equal(manifest.artifacts.indexCsv, path.join(runDir, 'index.csv'));
   assert.equal(manifest.artifacts.indexHtml, path.join(runDir, 'index.html'));
+  assert.equal(manifestAudit.schemaVersion, 1);
+  assert.equal(Array.isArray(manifestAudit.redactedPaths), true);
+  assert.equal(Array.isArray(manifestAudit.findings), true);
+  assert.equal(reportAudit.schemaVersion, 1);
+  assert.equal(Array.isArray(reportAudit.redactedPaths), true);
+  assert.equal(Array.isArray(reportAudit.findings), true);
   assert.equal(state.status, 'completed');
   assert.equal(state.counts.items, 1);
   assert.equal(state.settings.apiCursorSuppressed, false);
   assert.match(itemsText, /"kind":"item"/u);
   assert.match(itemsText, /https:\/\/x\.com\/openai\/status\/1/u);
   assert.match(report, /- Items: 1/u);
+  assertNoForbiddenPatterns(report);
   assert.match(indexCsv, /artifact item/u);
   assert.match(indexHtml, /artifact item/u);
 });
@@ -3612,6 +4126,826 @@ test('runSocialAction uses X API media variants for search downloads without api
   assert.equal(result.download.expectedMedia[0].type, 'video');
   assert.equal(result.download.expectedMedia[0].bitrate, 2176000);
   assert.equal(fetchedUrl, 'https://video.twimg.com/ext_tw_video/search-1/pu/vid/1024x576/high.mp4');
+});
+
+test('runSocialAction treats X followed-posts no-api-cursor seed miss as soft and skips orphan UI icon media', async (t) => {
+  const runDir = await mkdtemp(path.join(os.tmpdir(), 'bws-social-x-followed-no-api-seed-icons-'));
+  const previousFetch = globalThis.fetch;
+  const fetchedUrls = [];
+  t.after(async () => {
+    globalThis.fetch = previousFetch;
+    await rm(runDir, { recursive: true, force: true });
+  });
+  globalThis.fetch = async (url) => {
+    fetchedUrls.push(String(url));
+    return {
+      ok: true,
+      status: 200,
+      headers: {
+        get(name) {
+          return String(name).toLowerCase() === 'content-type' ? 'image/jpeg' : '';
+        },
+      },
+      async arrayBuffer() {
+        return new TextEncoder().encode(String(url)).buffer;
+      },
+    };
+  };
+
+  const postMediaUrl = 'https://pbs.twimg.com/media/followed-post.jpg';
+  const uiIconUrl = 'https://abs.twimg.com/responsive-web/client-web/icon-default.123.png';
+  const items = [
+    {
+      id: 'followed-1',
+      url: 'https://x.com/openai/status/followed-1',
+      text: 'followed post with media',
+      timestamp: '2026-04-26T12:00:00.000Z',
+      author: { handle: 'openai' },
+      media: [{ type: 'image', url: postMediaUrl, width: 1200, height: 800 }],
+    },
+    {
+      id: null,
+      url: '',
+      text: 'decorative app icon row',
+      timestamp: '2026-04-26T12:01:00.000Z',
+      media: [{ type: 'image', url: uiIconUrl, alt: 'X app icon' }],
+    },
+  ];
+  const listeners = new Map();
+  const fakeSession = {
+    client: {
+      on(eventName, callback) {
+        listeners.set(eventName, callback);
+        return () => {};
+      },
+    },
+    sessionId: 'session-x-followed-no-api-seed-icons',
+    async send() {
+      return {};
+    },
+    async navigateAndWait() {},
+    async evaluateValue() {
+      return 'https://x.com/search?q=filter%3Afollows%20since%3A2026-04-26%20until%3A2026-04-27&f=live';
+    },
+    async callPageFunction(fn) {
+      const source = String(fn);
+      if (source.includes('pageExtractSocialState')) {
+        return {
+          url: 'https://x.com/search?q=filter%3Afollows%20since%3A2026-04-26%20until%3A2026-04-27&f=live',
+          title: 'Followed posts / X',
+          currentAccount: 'me',
+          account: null,
+          items,
+          relations: [],
+          media: items.flatMap((item) => item.media),
+        };
+      }
+      if (source.includes('pageScrollToBottom')) {
+        return { before: 0, after: 0, height: 0 };
+      }
+      return null;
+    },
+    getMetrics() {
+      return {};
+    },
+    async close() {},
+  };
+
+  const result = await runSocialAction({
+    site: 'x',
+    action: 'followed-posts-by-date',
+    date: '2026-04-26',
+    maxItems: 10,
+    maxScrolls: 0,
+    timeoutMs: 1000,
+    scrollWaitMs: 0,
+    apiCursor: false,
+    downloadMedia: true,
+    runDir,
+  }, {
+    async resolveSiteBrowserSessionOptions() {
+      return { userDataDir: null, cleanupUserDataDirOnShutdown: true };
+    },
+    async openBrowserSession() {
+      return fakeSession;
+    },
+    async ensureAuthenticatedSession() {
+      return { loggedIn: true };
+    },
+    async exportDownloadSessionPassthrough() {
+      return {};
+    },
+  });
+
+  const manifest = JSON.parse(await readFile(path.join(runDir, 'manifest.json'), 'utf8'));
+  assert.equal(manifest.settings.apiCursor, false);
+  assert.equal(result.ok, true);
+  assert.notEqual(result.outcome.status, 'incomplete');
+  assert.notEqual(result.outcome.reason, 'no-api-seed-captured');
+  assert.deepEqual(fetchedUrls, [postMediaUrl]);
+  assert.equal(result.download.expectedMedia.length, 1);
+  assert.equal(result.download.expectedMedia[0].itemId, 'followed-1');
+  assert.equal(result.download.expectedMedia[0].pageUrl, 'https://x.com/openai/status/followed-1');
+  assert.equal(result.download.downloads.length, 1);
+  assert.equal(result.download.downloads[0].url, postMediaUrl);
+});
+
+test('runSocialAction recovery runbook preserves X followed date window', async (t) => {
+  const runDir = await mkdtemp(path.join(os.tmpdir(), 'bws-social-x-followed-recovery-date-'));
+  t.after(async () => {
+    await rm(runDir, { recursive: true, force: true });
+  });
+  const seedPayload = {
+    data: {
+      search_by_raw_query: {
+        search_timeline: {
+          timeline: {
+            instructions: [{
+              entries: [
+                {
+                  content: {
+                    itemContent: {
+                      tweet_results: {
+                        result: {
+                          rest_id: 'followed-window-1',
+                          core: { user_results: { result: { legacy: { screen_name: 'openai' } } } },
+                          legacy: {
+                            created_at: 'Thu Apr 30 18:24:52 +0000 2026',
+                            full_text: 'followed date window seed',
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+                { content: { cursorType: 'Bottom', value: 'CURSOR_NEXT' } },
+              ],
+            }],
+          },
+        },
+      },
+    },
+  };
+  const listeners = new Map();
+  const seedUrl = new URL('https://x.com/i/api/graphql/abc/SearchTimeline');
+  seedUrl.searchParams.set('variables', JSON.stringify({ rawQuery: 'filter:follows since:2026-04-28 until:2026-05-04', cursor: 'OLD' }));
+  let emitted = false;
+  const fakeSession = {
+    client: {
+      on(eventName, callback) {
+        listeners.set(eventName, callback);
+        return () => {};
+      },
+    },
+    sessionId: 'session-x-followed-recovery-date',
+    async send(command) {
+      if (command === 'Network.getResponseBody') {
+        return { body: JSON.stringify(seedPayload), base64Encoded: false };
+      }
+      return {};
+    },
+    async navigateAndWait(url) {
+      if (emitted || !String(url).includes('/search')) {
+        return;
+      }
+      emitted = true;
+      listeners.get('Network.requestWillBeSent')?.({
+        params: {
+          requestId: 'api-1',
+          type: 'XHR',
+          request: {
+            url: seedUrl.toString(),
+            method: 'GET',
+            headers: { accept: 'application/json' },
+          },
+        },
+      });
+      listeners.get('Network.responseReceived')?.({
+        params: {
+          requestId: 'api-1',
+          type: 'XHR',
+          response: {
+            url: seedUrl.toString(),
+            status: 200,
+            mimeType: 'application/json',
+          },
+        },
+      });
+      listeners.get('Network.loadingFinished')?.({ params: { requestId: 'api-1' } });
+    },
+    async evaluateValue() {
+      return 'https://x.com/search?q=filter%3Afollows%20since%3A2026-04-28%20until%3A2026-05-04&f=live';
+    },
+    async callPageFunction(fn) {
+      const source = String(fn);
+      if (source.includes('pageExtractSocialState')) {
+        return {
+          url: 'https://x.com/search?q=filter%3Afollows%20since%3A2026-04-28%20until%3A2026-05-04&f=live',
+          title: 'Followed posts / X',
+          currentAccount: 'me',
+          account: null,
+          items: [],
+          relations: [],
+          media: [],
+        };
+      }
+      if (source.includes('pageScrollToBottom')) {
+        return { before: 0, after: 0, height: 0 };
+      }
+      return null;
+    },
+    getMetrics() {
+      return {};
+    },
+    async close() {},
+  };
+
+  const result = await runSocialAction({
+    site: 'x',
+    action: 'followed-posts-by-date',
+    fromDate: '2026-04-28',
+    toDate: '2026-05-04',
+    maxItems: 10,
+    maxApiPages: 1,
+    maxScrolls: 0,
+    timeoutMs: 1000,
+    scrollWaitMs: 0,
+    runDir,
+  }, {
+    async resolveSiteBrowserSessionOptions() {
+      return { userDataDir: null, cleanupUserDataDirOnShutdown: true };
+    },
+    async openBrowserSession() {
+      return fakeSession;
+    },
+    async ensureAuthenticatedSession() {
+      return { loggedIn: true };
+    },
+  });
+
+  const command = result.recoveryRunbook.commands.find((entry) => entry.id === 'resume-archive')?.command ?? '';
+  assert.equal(result.ok, true);
+  assert.equal(result.outcome.status, 'bounded');
+  assert.match(command, /--from-date 2026-04-28/u);
+  assert.match(command, /--to-date 2026-05-04/u);
+});
+
+test('runSocialAction falls back to X followed profile date scan when filter follows search is empty', async (t) => {
+  const runDir = await mkdtemp(path.join(os.tmpdir(), 'bws-social-x-followed-profile-fallback-'));
+  const previousFetch = globalThis.fetch;
+  const fetchedUrls = [];
+  t.after(async () => {
+    globalThis.fetch = previousFetch;
+    await rm(runDir, { recursive: true, force: true });
+  });
+  globalThis.fetch = async (url) => {
+    fetchedUrls.push(String(url));
+    return {
+      ok: true,
+      status: 200,
+      headers: {
+        get(name) {
+          return String(name).toLowerCase() === 'content-type' ? 'image/jpeg' : '';
+        },
+      },
+      async arrayBuffer() {
+        return new TextEncoder().encode(String(url)).buffer;
+      },
+    };
+  };
+
+  const navigations = [];
+  let currentUrl = '';
+  const extractCallsByUrl = new Map();
+  const fallbackMediaUrl = 'https://pbs.twimg.com/media/followed-fallback.jpg';
+  const fakeSession = {
+    client: {
+      on() {
+        return () => {};
+      },
+    },
+    sessionId: 'session-x-followed-profile-fallback',
+    async send() {
+      return {};
+    },
+    async navigateAndWait(url) {
+      currentUrl = String(url);
+      navigations.push(currentUrl);
+    },
+    async evaluateValue() {
+      return currentUrl;
+    },
+    async callPageFunction(fn) {
+      const source = String(fn);
+      if (source.includes('pageExtractSocialState')) {
+        const extractCount = extractCallsByUrl.get(currentUrl) ?? 0;
+        extractCallsByUrl.set(currentUrl, extractCount + 1);
+        if ((currentUrl === 'https://x.com/me/following' || currentUrl === 'https://x.com/openai') && extractCount === 0) {
+          return {
+            url: currentUrl,
+            title: 'X',
+            currentAccount: null,
+            account: null,
+            items: [],
+            relations: [],
+            media: [],
+          };
+        }
+        if (currentUrl.includes('/search?')) {
+          return {
+            url: currentUrl,
+            title: 'Empty followed search / X',
+            currentAccount: 'me',
+            account: null,
+            items: [],
+            relations: [],
+            media: [],
+          };
+        }
+        if (currentUrl === 'https://x.com/me/following') {
+          return {
+            url: currentUrl,
+            title: 'Following / X',
+            currentAccount: 'me',
+            account: { handle: 'me' },
+            items: [],
+            relations: [{
+              handle: 'openai',
+              displayName: 'OpenAI',
+              url: 'https://x.com/openai',
+            }],
+            media: [],
+          };
+        }
+        if (currentUrl === 'https://x.com/openai') {
+          const items = [{
+            id: 'fallback-1',
+            url: 'https://x.com/openai/status/fallback-1',
+            text: 'followed profile fallback post',
+            timestamp: '2026-04-26T12:00:00.000Z',
+            author: { handle: 'openai' },
+            media: [{ type: 'image', url: fallbackMediaUrl, width: 1200, height: 800 }],
+          }];
+          return {
+            url: currentUrl,
+            title: 'OpenAI / X',
+            currentAccount: 'me',
+            account: { handle: 'openai' },
+            items,
+            relations: [],
+            media: items.flatMap((item) => item.media),
+          };
+        }
+      }
+      if (source.includes('pageScrollToBottom')) {
+        return { before: 0, after: 0, height: 0 };
+      }
+      return null;
+    },
+    getMetrics() {
+      return {};
+    },
+    async close() {},
+  };
+
+  const result = await runSocialAction({
+    site: 'x',
+    action: 'followed-posts-by-date',
+    account: 'me',
+    date: '2026-04-26',
+    maxItems: 10,
+    maxUsers: 1,
+    maxScrolls: 0,
+    timeoutMs: 1000,
+    scrollWaitMs: 0,
+    apiCursor: false,
+    downloadMedia: true,
+    runDir,
+  }, {
+    async resolveSiteBrowserSessionOptions() {
+      return { userDataDir: null, cleanupUserDataDirOnShutdown: true };
+    },
+    async openBrowserSession() {
+      return fakeSession;
+    },
+    async ensureAuthenticatedSession() {
+      return { loggedIn: true };
+    },
+    async exportDownloadSessionPassthrough() {
+      return {};
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.outcome.status, 'bounded');
+  assert.equal(result.outcome.reason, 'max-users');
+  assert.equal(result.result.archive.strategy, 'followed-profile-date-scan');
+  assert.equal(result.result.archive.fallbackFrom.reason, 'dom-empty');
+  assert.equal(result.result.items.length, 1);
+  assert.equal(result.result.items[0].sourceAccount, 'openai');
+  assert.equal(result.download.downloads.length, 1);
+  assert.deepEqual(fetchedUrls, [fallbackMediaUrl]);
+  assert.equal(navigations.includes('https://x.com/me/following'), true);
+  assert.equal(navigations.includes('https://x.com/openai'), true);
+});
+
+test('runSocialAction uses X per-profile API seed for followed profile video downloads', async (t) => {
+  const runDir = await mkdtemp(path.join(os.tmpdir(), 'bws-social-x-followed-profile-api-video-'));
+  const previousFetch = globalThis.fetch;
+  let fetchedUrl = null;
+  t.after(async () => {
+    globalThis.fetch = previousFetch;
+    await rm(runDir, { recursive: true, force: true });
+  });
+  globalThis.fetch = async (url) => {
+    fetchedUrl = String(url);
+    return {
+      ok: true,
+      status: 200,
+      headers: {
+        get(name) {
+          return String(name).toLowerCase() === 'content-type' ? 'video/mp4' : '';
+        },
+      },
+      async arrayBuffer() {
+        return new TextEncoder().encode(`video:${url}`).buffer;
+      },
+    };
+  };
+
+  const tweetId = '2050000000000000001';
+  const posterUrl = `https://pbs.twimg.com/ext_tw_video_thumb/${tweetId}/pu/img/poster.jpg`;
+  const lowVideoUrl = `https://video.twimg.com/ext_tw_video/${tweetId}/pu/vid/320x180/low.mp4`;
+  const highVideoUrl = `https://video.twimg.com/ext_tw_video/${tweetId}/pu/vid/1280x720/high.mp4`;
+  const seedPayload = {
+    data: {
+      user: {
+        result: {
+          timeline: {
+            timeline: {
+              instructions: [{
+                entries: [{
+                  entryId: `tweet-${tweetId}`,
+                  content: {
+                    itemContent: {
+                      tweet_results: {
+                        result: {
+                          rest_id: tweetId,
+                          core: { user_results: { result: { legacy: { screen_name: 'openai' } } } },
+                          legacy: {
+                            created_at: 'Sun Apr 26 12:00:00 +0000 2026',
+                            full_text: 'followed profile video from api',
+                            extended_entities: {
+                              media: [{
+                                media_url_https: posterUrl,
+                                video_info: {
+                                  duration_millis: 10_000,
+                                  variants: [
+                                    { content_type: 'video/mp4', bitrate: 256000, url: lowVideoUrl },
+                                    { content_type: 'video/mp4', bitrate: 2176000, url: highVideoUrl },
+                                  ],
+                                },
+                              }],
+                            },
+                          },
+                        },
+                      },
+                    },
+                  },
+                }],
+              }],
+            },
+          },
+        },
+      },
+    },
+  };
+
+  const listeners = new Map();
+  const navigations = [];
+  let currentUrl = '';
+  let emittedProfileApi = false;
+  const seedUrl = new URL('https://x.com/i/api/graphql/abc/UserTweets');
+  const fakeSession = {
+    client: {
+      on(eventName, callback) {
+        listeners.set(eventName, callback);
+        return () => {};
+      },
+    },
+    sessionId: 'session-x-followed-profile-api-video',
+    async send(command) {
+      if (command === 'Network.getResponseBody') {
+        return { body: JSON.stringify(seedPayload), base64Encoded: false };
+      }
+      return {};
+    },
+    async navigateAndWait(url) {
+      currentUrl = String(url);
+      navigations.push(currentUrl);
+      if (!emittedProfileApi && currentUrl === 'https://x.com/openai') {
+        emittedProfileApi = true;
+        listeners.get('Network.requestWillBeSent')?.({
+          params: { requestId: 'profile-api-1', type: 'XHR', request: { url: seedUrl.toString(), method: 'GET', headers: { accept: 'application/json' } } },
+        });
+        listeners.get('Network.responseReceived')?.({
+          params: { requestId: 'profile-api-1', type: 'XHR', response: { url: seedUrl.toString(), status: 200, mimeType: 'application/json' } },
+        });
+        listeners.get('Network.loadingFinished')?.({ params: { requestId: 'profile-api-1' } });
+      }
+    },
+    async evaluateValue() {
+      return currentUrl;
+    },
+    async callPageFunction(fn) {
+      const source = String(fn);
+      if (source.includes('pageExtractSocialState')) {
+        if (currentUrl.includes('/search?')) {
+          return {
+            url: currentUrl,
+            title: 'Empty followed search / X',
+            currentAccount: 'me',
+            account: null,
+            items: [],
+            relations: [],
+            media: [],
+          };
+        }
+        if (currentUrl === 'https://x.com/me/following') {
+          return {
+            url: currentUrl,
+            title: 'Following / X',
+            currentAccount: 'me',
+            account: { handle: 'me' },
+            items: [],
+            relations: [{ handle: 'openai', displayName: 'OpenAI', url: 'https://x.com/openai' }],
+            media: [],
+          };
+        }
+        if (currentUrl === 'https://x.com/openai') {
+          const item = {
+            id: tweetId,
+            url: `https://x.com/openai/status/${tweetId}`,
+            text: 'followed profile video from dom',
+            timestamp: '2026-04-26T12:00:00.000Z',
+            author: { handle: 'openai' },
+            media: [{ type: 'image', url: posterUrl }],
+          };
+          return {
+            url: currentUrl,
+            title: 'OpenAI / X',
+            currentAccount: 'me',
+            account: { handle: 'openai' },
+            items: [item],
+            relations: [],
+            media: item.media,
+          };
+        }
+      }
+      if (source.includes('pageScrollToBottom')) {
+        return { before: 0, after: 0, height: 0 };
+      }
+      return null;
+    },
+    getMetrics() {
+      return {};
+    },
+    async close() {},
+  };
+
+  const result = await runSocialAction({
+    site: 'x',
+    action: 'followed-posts-by-date',
+    account: 'me',
+    date: '2026-04-26',
+    maxItems: 10,
+    maxUsers: 1,
+    maxScrolls: 0,
+    timeoutMs: 1000,
+    scrollWaitMs: 0,
+    apiCursor: false,
+    downloadMedia: true,
+    runDir,
+  }, {
+    async resolveSiteBrowserSessionOptions() {
+      return { userDataDir: null, cleanupUserDataDirOnShutdown: true };
+    },
+    async openBrowserSession() {
+      return fakeSession;
+    },
+    async ensureAuthenticatedSession() {
+      return { loggedIn: true };
+    },
+    async exportDownloadSessionPassthrough() {
+      return {};
+    },
+  });
+
+  const mediaManifest = JSON.parse(await readFile(path.join(runDir, 'media-manifest.json'), 'utf8'));
+
+  assert.equal(result.ok, true);
+  assert.equal(result.result.archive.strategy, 'followed-profile-date-scan');
+  assert.equal(result.result.items[0].media[0].type, 'video');
+  assert.equal(result.result.items[0].media[0].url, highVideoUrl);
+  assert.equal(result.result.archive.scannedUsers[0].apiReason, 'api-seed-only');
+  assert.equal(result.download.expectedMedia[0].type, 'video');
+  assert.equal(result.download.expectedMedia[0].bitrate, 2176000);
+  assert.equal(result.download.expectedMedia[0].fallbackFrom, null);
+  assert.equal(result.download.downloads[0].fallbackFrom, null);
+  assert.equal(fetchedUrl, highVideoUrl);
+  assert.equal(mediaManifest.summary.posterOnlyVideoFallbacks, 0);
+  assert.equal(navigations.includes('https://x.com/openai'), true);
+});
+
+test('runSocialAction marks X followed profile scan complete after verified relation count is scanned', async (t) => {
+  const runDir = await mkdtemp(path.join(os.tmpdir(), 'bws-social-x-followed-profile-complete-'));
+  t.after(async () => {
+    await rm(runDir, { recursive: true, force: true });
+  });
+
+  let currentUrl = '';
+  const fakeSession = {
+    async navigateAndWait(url) {
+      currentUrl = String(url);
+    },
+    async evaluateValue() {
+      return currentUrl;
+    },
+    async callPageFunction(fn) {
+      const source = String(fn);
+      if (source.includes('pageExtractSocialState')) {
+        if (currentUrl === 'https://x.com/me/following') {
+          return {
+            url: currentUrl,
+            title: 'Following / X',
+            currentAccount: 'me',
+            account: { handle: 'me', displayName: 'Me' },
+            relationExpectedCount: 1,
+            items: [],
+            relations: [{ handle: 'openai', url: 'https://x.com/openai' }],
+            media: [],
+          };
+        }
+        if (currentUrl === 'https://x.com/openai') {
+          return {
+            url: currentUrl,
+            title: 'OpenAI / X',
+            currentAccount: 'me',
+            account: { handle: 'openai', displayName: 'OpenAI' },
+            items: [{
+              id: 'complete-1',
+              url: 'https://x.com/openai/status/complete-1',
+              text: 'verified followed profile post',
+              timestamp: '2026-04-26T12:00:00.000Z',
+              author: { handle: 'openai' },
+              media: [],
+            }],
+            relations: [],
+            media: [],
+          };
+        }
+        return {
+          url: currentUrl,
+          title: 'Empty followed search / X',
+          currentAccount: 'me',
+          account: null,
+          items: [],
+          relations: [],
+          media: [],
+        };
+      }
+      if (source.includes('pageScrollToBottom')) {
+        return { before: 0, after: 0, height: 0 };
+      }
+      return null;
+    },
+    getMetrics() {
+      return {};
+    },
+    async close() {},
+  };
+
+  const result = await runSocialAction({
+    site: 'x',
+    action: 'followed-posts-by-date',
+    account: 'me',
+    date: '2026-04-26',
+    followedDateMode: 'followed-profile-date-scan',
+    maxItems: 10,
+    maxUsers: 5,
+    maxScrolls: 0,
+    timeoutMs: 1000,
+    scrollWaitMs: 0,
+    apiCursor: false,
+    runDir,
+  }, {
+    async resolveSiteBrowserSessionOptions() {
+      return { userDataDir: null, cleanupUserDataDirOnShutdown: true };
+    },
+    async openBrowserSession() {
+      return fakeSession;
+    },
+    async ensureAuthenticatedSession() {
+      return { loggedIn: true };
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.result.archive.complete, true);
+  assert.equal(result.result.archive.reason, null);
+  assert.equal(result.completeness.status, 'complete');
+  assert.equal(result.result.items[0].sourceAccount, 'openai');
+});
+
+test('runSocialAction upgrades X DOM video posters with observed direct video resources', async (t) => {
+  const runDir = await mkdtemp(path.join(os.tmpdir(), 'bws-social-x-poster-video-upgrade-'));
+  const previousFetch = globalThis.fetch;
+  let fetchedUrl = null;
+  t.after(async () => {
+    globalThis.fetch = previousFetch;
+    await rm(runDir, { recursive: true, force: true });
+  });
+  globalThis.fetch = async (url) => {
+    fetchedUrl = String(url);
+    return {
+      ok: true,
+      status: 200,
+      headers: {
+        get(name) {
+          return String(name).toLowerCase() === 'content-type' ? 'video/mp4' : '';
+        },
+      },
+      async arrayBuffer() {
+        return new TextEncoder().encode(`video:${url}`).buffer;
+      },
+    };
+  };
+
+  const mediaId = '2050866810015375360';
+  const posterUrl = `https://pbs.twimg.com/ext_tw_video_thumb/${mediaId}/pu/img/poster.jpg`;
+  const videoUrl = `https://video.twimg.com/ext_tw_video/${mediaId}/pu/vid/1280x720/high.mp4`;
+  const item = {
+    id: 'post-video',
+    url: 'https://x.com/openai/status/post-video',
+    text: 'dom poster with warmed video resource',
+    timestamp: '2026-04-26T00:00:00.000Z',
+    media: [{ type: 'image', url: posterUrl }],
+  };
+  const fakeSession = {
+    async navigateAndWait() {},
+    async evaluateValue() { return 'https://x.com/openai'; },
+    async callPageFunction(fn) {
+      const source = String(fn);
+      if (source.includes('pageExtractSocialState')) {
+        return {
+          url: 'https://x.com/openai',
+          title: 'OpenAI / X',
+          currentAccount: 'me',
+          account: { handle: 'openai' },
+          items: [item],
+          relations: [],
+          media: [
+            ...item.media,
+            { type: 'video', url: videoUrl, alt: 'resource:video' },
+          ],
+        };
+      }
+      if (source.includes('pageScrollToBottom')) {
+        return { before: 0, after: 0, height: 0 };
+      }
+      return null;
+    },
+    getMetrics() { return {}; },
+    async close() {},
+  };
+
+  const result = await runSocialAction({
+    site: 'x',
+    action: 'profile-content',
+    account: 'openai',
+    maxItems: 1,
+    maxScrolls: 0,
+    timeoutMs: 1000,
+    downloadMedia: true,
+    runDir,
+  }, {
+    async resolveSiteBrowserSessionOptions() { return { userDataDir: null, cleanupUserDataDirOnShutdown: true }; },
+    async openBrowserSession() { return fakeSession; },
+    async ensureAuthenticatedSession() { return { loggedIn: true }; },
+    async exportDownloadSessionPassthrough() { return {}; },
+  });
+
+  const mediaManifest = JSON.parse(await readFile(path.join(runDir, 'media-manifest.json'), 'utf8'));
+
+  assert.equal(result.result.items[0].media[0].type, 'video');
+  assert.equal(result.result.items[0].media[0].url, videoUrl);
+  assert.equal(result.result.items[0].media[0].posterUrl, posterUrl);
+  assert.equal(result.download.expectedMedia[0].type, 'video');
+  assert.equal(result.download.expectedMedia[0].fallbackFrom, null);
+  assert.equal(result.download.downloads[0].fallbackFrom, null);
+  assert.equal(fetchedUrl, videoUrl);
+  assert.equal(mediaManifest.summary.posterOnlyVideoFallbacks, 0);
+  assert.equal(mediaManifest.entries[0].type, 'video');
 });
 
 test('runSocialAction marks X DOM poster-only video fallbacks in media artifacts', async (t) => {

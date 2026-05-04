@@ -2,10 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
-import { siteDoctor } from '../../scripts/site-doctor.mjs';
+import {
+  siteDoctor,
+  writeSiteDoctorReportArtifacts,
+} from '../../scripts/site-doctor.mjs';
+import { REDACTION_PLACEHOLDER } from '../../src/sites/capability/security-guard.mjs';
 import { assertRepoMetadataUnchanged, captureRepoMetadataSnapshot, createSiteMetadataSandbox } from './helpers/site-metadata-sandbox.mjs';
 
 const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -196,7 +200,141 @@ test('site-doctor enables download preflight for navigation profiles with downlo
     assert.equal(report.download?.status, 'pass');
     assert.equal(observedDownloadCheck?.sample?.url, 'https://videos.example.com/video/BV1WjDDBGE3p/');
     assert.equal(observedDownloadCheck?.siteProfile?.downloader?.maxBatchItems, 5);
+    assert.equal(report.reports.jsonRedactionAudit.endsWith('doctor-report.redaction-audit.json'), true);
+    assert.equal(report.reports.markdownRedactionAudit.endsWith('doctor-report.md.redaction-audit.json'), true);
+    const persistedReport = JSON.parse(await readFile(report.reports.json, 'utf8'));
+    const persistedMarkdown = await readFile(report.reports.markdown, 'utf8');
+    const persistedAudit = JSON.parse(await readFile(report.reports.jsonRedactionAudit, 'utf8'));
+    assert.equal(report.site.profilePath, profilePath);
+    assert.equal(persistedReport.site.profilePath, REDACTION_PLACEHOLDER);
+    assert.equal(persistedReport.download.status, 'pass');
+    assert.equal(persistedMarkdown.includes(profilePath), false);
+    assert.equal(persistedAudit.redactedPaths.includes('site.profilePath'), true);
     await assertRepoMetadataUnchanged(repoMetadataSnapshot);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('site-doctor report writer fails closed before persistent report writes when redaction cannot complete', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-doctor-redaction-fail-'));
+  const reportDir = path.join(workspace, 'report');
+  const circularReport = {
+    site: {
+      url: 'https://videos.example.com/?access_token=synthetic-site-doctor-token',
+      host: 'videos.example.com',
+      profilePath: 'C:/Users/example/profiles/videos.example.com.json',
+      archetype: 'navigation-catalog',
+    },
+    sample: null,
+    profile: { status: 'pass' },
+    crawler: { status: 'pass' },
+    capture: { status: 'pass' },
+    expand: { status: 'pass' },
+    search: { status: 'pass' },
+    detail: { status: 'pass' },
+    download: {
+      status: 'pass',
+      details: {
+        authPassthrough: {
+          cookieFile: 'C:/Users/example/cookies.txt',
+          sidecarPath: 'C:/Users/example/cookies.sidecar.json',
+          userDataDir: 'C:/Users/example/profiles/videos',
+          currentUrl: 'https://videos.example.com/?csrf_token=synthetic-site-doctor-csrf',
+        },
+      },
+    },
+    authSession: {
+      networkIdentityFingerprint: 'synthetic-site-doctor-fingerprint',
+      bootstrapCredentialsSource: 'Bearer synthetic-site-doctor-auth',
+    },
+    scenarios: [],
+    warnings: [],
+    missingFields: [],
+    nextActions: [],
+    reports: {},
+  };
+  circularReport.self = circularReport;
+
+  try {
+    await assert.rejects(
+      () => writeSiteDoctorReportArtifacts(circularReport, {
+        reportDir,
+        jsonPath: path.join(reportDir, 'doctor-report.json'),
+        jsonAuditPath: path.join(reportDir, 'doctor-report.redaction-audit.json'),
+        markdownPath: path.join(reportDir, 'doctor-report.md'),
+        markdownAuditPath: path.join(reportDir, 'doctor-report.md.redaction-audit.json'),
+      }),
+      (error) => {
+        assert.equal(error.name, 'SiteDoctorReportRedactionFailure');
+        assert.equal(error.reasonCode, 'redaction-failed');
+        assert.equal(error.artifactWriteAllowed, false);
+        assert.equal(JSON.stringify(error).includes('synthetic-site-doctor'), false);
+        return true;
+      },
+    );
+    await assert.rejects(
+      () => readdir(reportDir),
+      /ENOENT/u,
+    );
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('site-doctor report writer preserves existing artifacts when redaction fails closed', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-doctor-redaction-preserve-'));
+  const reportDir = path.join(workspace, 'report');
+  const paths = {
+    jsonPath: path.join(reportDir, 'doctor-report.json'),
+    jsonAuditPath: path.join(reportDir, 'doctor-report.redaction-audit.json'),
+    markdownPath: path.join(reportDir, 'doctor-report.md'),
+    markdownAuditPath: path.join(reportDir, 'doctor-report.md.redaction-audit.json'),
+  };
+  const sentinelFiles = [
+    [paths.jsonPath, '{"status":"before"}\n'],
+    [paths.jsonAuditPath, '{"audit":"before"}\n'],
+    [paths.markdownPath, '# before\n'],
+    [paths.markdownAuditPath, '{"markdownAudit":"before"}\n'],
+  ];
+  const circularReport = {
+    site: {
+      url: 'https://videos.example.com/?access_token=synthetic-site-doctor-token',
+      profilePath: 'C:/Users/example/profiles/videos.example.com.json',
+    },
+    profile: { status: 'pass' },
+    crawler: { status: 'pass' },
+    capture: { status: 'pass' },
+    expand: { status: 'pass' },
+    scenarios: [],
+    warnings: [],
+    missingFields: [],
+    nextActions: [],
+    reports: {},
+  };
+  circularReport.self = circularReport;
+
+  try {
+    await mkdir(reportDir, { recursive: true });
+    await Promise.all(sentinelFiles.map(([filePath, content]) => writeFile(filePath, content)));
+
+    await assert.rejects(
+      () => writeSiteDoctorReportArtifacts(circularReport, {
+        reportDir,
+        ...paths,
+      }),
+      (error) => {
+        assert.equal(error.name, 'SiteDoctorReportRedactionFailure');
+        assert.equal(error.reasonCode, 'redaction-failed');
+        assert.equal(error.artifactWriteAllowed, false);
+        assert.equal(JSON.stringify(error).includes('synthetic-site-doctor'), false);
+        return true;
+      },
+    );
+
+    for (const [filePath, content] of sentinelFiles) {
+      assert.equal(await readFile(filePath, 'utf8'), content);
+    }
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

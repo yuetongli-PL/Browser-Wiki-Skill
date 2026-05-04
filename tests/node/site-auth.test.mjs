@@ -24,9 +24,130 @@ import {
   inspectLoginState,
   inspectReusableSiteSession,
   isReusableLoginStateAvailable,
+  pageAssistManualLoginStep,
   resolveSiteBrowserSessionOptions,
   waitForAuthenticatedSession,
 } from '../../src/infra/auth/site-auth.mjs';
+
+async function withFakePageDom({ selectorMap = {}, allNodes = [] }, callback) {
+  const previous = {
+    document: globalThis.document,
+    window: globalThis.window,
+    Element: globalThis.Element,
+    HTMLElement: globalThis.HTMLElement,
+    HTMLInputElement: globalThis.HTMLInputElement,
+    MouseEvent: globalThis.MouseEvent,
+    KeyboardEvent: globalThis.KeyboardEvent,
+  };
+
+  class FakeElement {
+    constructor(options = {}) {
+      const {
+      attributes = {},
+      children = [],
+      className = '',
+      height = 24,
+      textContent = '',
+      width = 120,
+      } = options;
+      this.attributes = attributes;
+      this.className = className;
+      this.textContent = textContent;
+      this.width = width;
+      this.height = height;
+      this.dispatchedEvents = [];
+      this.clicked = false;
+      this.focused = false;
+      this.children = children;
+    }
+
+    getAttribute(name) {
+      return this.attributes[name] ?? null;
+    }
+
+    hasAttribute(name) {
+      return Object.hasOwn(this.attributes, name);
+    }
+
+    getBoundingClientRect() {
+      return {
+        width: this.width,
+        height: this.height,
+      };
+    }
+
+    focus() {
+      this.focused = true;
+    }
+
+    contains(node) {
+      return this.children.includes(node);
+    }
+  }
+
+  class FakeHTMLElement extends FakeElement {
+    dispatchEvent(event) {
+      this.dispatchedEvents.push(event.type);
+      return true;
+    }
+
+    click() {
+      this.clicked = true;
+    }
+  }
+
+  class FakeInputElement extends FakeHTMLElement {
+    constructor(options = {}) {
+      super(options);
+      this.value = options.value ?? '';
+    }
+  }
+
+  class FakeEvent {
+    constructor(type) {
+      this.type = type;
+    }
+  }
+
+  globalThis.Element = FakeElement;
+  globalThis.HTMLElement = FakeHTMLElement;
+  globalThis.HTMLInputElement = FakeInputElement;
+  globalThis.MouseEvent = FakeEvent;
+  globalThis.KeyboardEvent = FakeEvent;
+  globalThis.document = {
+    querySelector(selector) {
+      return selectorMap[selector] ?? null;
+    },
+    querySelectorAll() {
+      return allNodes;
+    },
+  };
+  globalThis.window = {
+    getComputedStyle() {
+      return {
+        display: 'block',
+        visibility: 'visible',
+        opacity: '1',
+      };
+    },
+  };
+
+  try {
+    return await callback({
+      FakeElement,
+      FakeHTMLElement,
+      FakeInputElement,
+    });
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) {
+        delete globalThis[key];
+      } else {
+        globalThis[key] = value;
+      }
+    }
+  }
+}
 
 test('derivePersistentProfileKey groups bilibili subdomains under the same persistent profile key', () => {
   assert.equal(derivePersistentProfileKey('https://www.bilibili.com/'), 'bilibili.com');
@@ -113,6 +234,59 @@ test('waitForAuthenticatedSession can assist a manual multi-step login before po
     'pageAssistManualLoginStep',
     'pageInspectLoginState',
   ]);
+});
+
+test('pageAssistManualLoginStep treats X OCF username input as username before challenge', async () => {
+  const selectorMap = {};
+  const allNodes = [];
+  await withFakePageDom({ selectorMap, allNodes }, async ({ FakeElement, FakeHTMLElement, FakeInputElement }) => {
+    const usernameInput = new FakeInputElement({
+      value: 'YueTongLi_pler',
+      attributes: {
+        'data-testid': 'ocfEnterTextTextInput',
+      },
+    });
+    const ocfContainer = new FakeElement({
+      children: [usernameInput],
+    });
+    const nextButton = new FakeHTMLElement({
+      textContent: '下一步',
+    });
+    selectorMap['input[data-testid="ocfEnterTextTextInput"]'] = usernameInput;
+    selectorMap['[data-testid*="ocf"]'] = ocfContainer;
+    allNodes.push(nextButton);
+    const result = await pageAssistManualLoginStep({
+      usernameSelectors: ['input[data-testid="ocfEnterTextTextInput"]'],
+      passwordSelectors: ['input[name="password"]'],
+      challengeSelectors: ['[data-testid*="ocf"]'],
+    });
+
+    assert.equal(result.status, 'next-clicked');
+    assert.equal(nextButton.clicked, true);
+    assert.equal(result.buttonText, '下一步');
+  });
+});
+
+test('pageAssistManualLoginStep still stops for a distinct visible challenge', async () => {
+  const selectorMap = {};
+  await withFakePageDom({ selectorMap }, async ({ FakeElement, FakeInputElement }) => {
+    const usernameInput = new FakeInputElement({
+      value: 'YueTongLi_pler',
+    });
+    const challenge = new FakeElement({
+      textContent: 'verification required',
+    });
+    selectorMap['input[autocomplete="username"]'] = usernameInput;
+    selectorMap['[data-testid*="verification"]'] = challenge;
+    const result = await pageAssistManualLoginStep({
+      usernameSelectors: ['input[autocomplete="username"]'],
+      passwordSelectors: ['input[name="password"]'],
+      challengeSelectors: ['[data-testid*="verification"]'],
+    });
+
+    assert.equal(result.status, 'challenge-visible');
+    assert.equal(result.challengeText, 'verification required');
+  });
 });
 
 test('derivePersistentProfileKey keeps Xiaohongshu URLs on the shared xiaohongshu.com profile key', () => {
@@ -431,7 +605,7 @@ test('inspectReusableSiteSession reuses shared session inspection and exposes au
   assert.equal(sessionState.authConfig.loginUrl, 'https://www.douyin.com/');
 });
 
-test('exportDownloadSessionPassthrough writes Xiaohongshu cookie and header artifacts for reusable downloads', async () => {
+test('exportDownloadSessionPassthrough writes redacted Xiaohongshu auth summaries for reusable downloads', async () => {
   const userDataDir = await mkdtemp(path.join(os.tmpdir(), 'bwk-xhs-download-auth-'));
 
   try {
@@ -508,29 +682,39 @@ test('exportDownloadSessionPassthrough writes Xiaohongshu cookie and header arti
     });
 
     assert.equal(passthrough.available, true);
-    assert.equal(passthrough.passthroughMode, 'cookie-header');
+    assert.equal(passthrough.passthroughMode, 'redacted-session-view');
     assert.equal(passthrough.cookieHeaderAvailable, true);
     assert.equal(passthrough.cookieCount, 2);
     assert.deepEqual(passthrough.cookieNames, ['a1', 'web_session']);
     assert.deepEqual(passthrough.cookieDomains, ['.xiaohongshu.com', 'www.xiaohongshu.com']);
     assert.deepEqual(passthrough.headerNames, ['Accept-Language', 'Cookie', 'Origin', 'Referer', 'User-Agent']);
     assert.ok(passthrough.sidecarPath);
-    assert.ok(passthrough.cookieFile);
+    assert.equal(passthrough.cookieFile, null);
+    assert.ok(passthrough.sidecarRedactionAuditPath);
+    assert.equal(passthrough.userDataDir, null);
+    assert.equal(passthrough.userDataDirPresent, true);
     assert.equal(await pathExists(passthrough.sidecarPath), true);
-    assert.equal(await pathExists(passthrough.cookieFile), true);
+    assert.equal(await pathExists(passthrough.sidecarRedactionAuditPath), true);
     assert.equal(passthrough.env.BWS_XIAOHONGSHU_DOWNLOAD_AUTH_SIDECAR, passthrough.sidecarPath);
-    assert.equal(passthrough.env.BWS_XIAOHONGSHU_DOWNLOAD_COOKIE_FILE, passthrough.cookieFile);
-    assert.equal(passthrough.env.BWS_XIAOHONGSHU_DOWNLOAD_PASSTHROUGH_MODE, 'cookie-header');
+    assert.equal(Object.hasOwn(passthrough.env, 'BWS_XIAOHONGSHU_DOWNLOAD_COOKIE_FILE'), false);
+    assert.equal(Object.hasOwn(passthrough.env, 'BWS_XIAOHONGSHU_DOWNLOAD_USER_DATA_DIR'), false);
+    assert.equal(passthrough.env.BWS_XIAOHONGSHU_DOWNLOAD_PASSTHROUGH_MODE, 'redacted-session-view');
 
     const sidecar = await readJsonFile(passthrough.sidecarPath);
+    const sidecarText = await readFile(passthrough.sidecarPath, 'utf8');
+    const auditText = await readFile(passthrough.sidecarRedactionAuditPath, 'utf8');
     assert.equal(sidecar.ok, true);
     assert.equal(sidecar.cookieCount, 2);
-    assert.equal(sidecar.passthroughMode, 'cookie-header');
+    assert.equal(sidecar.passthroughMode, 'redacted-session-view');
+    assert.equal(sidecar.rawExportSuppressed, true);
     assert.equal(sidecar.page?.url, 'https://www.xiaohongshu.com/notification');
     assert.equal(sidecar.auth?.loginStateDetected, true);
-    assert.match(sidecar.headers?.Cookie ?? '', /a1=cookie-a1/u);
-    assert.match(sidecar.headers?.Cookie ?? '', /web_session=cookie-session/u);
-    assert.match(await readFile(passthrough.cookieFile, 'utf8'), /web_session/u);
+    assert.deepEqual(sidecar.cookieNames, ['a1', 'web_session']);
+    assert.deepEqual(sidecar.headerNames, ['Accept-Language', 'Cookie', 'Origin', 'Referer', 'User-Agent']);
+    assert.doesNotMatch(
+      `${sidecarText}\n${auditText}`,
+      /cookie-a1|cookie-session|a1=cookie-a1|web_session=cookie-session/iu,
+    );
   } finally {
     await rm(userDataDir, { recursive: true, force: true });
   }
@@ -625,7 +809,9 @@ test('exportSiteDownloadPassthrough opens the Xiaohongshu verification URL with 
     assert.equal(passthrough.available, true);
     assert.equal(passthrough.identityConfirmed, true);
     assert.equal(passthrough.currentUrl, 'https://www.xiaohongshu.com/notification');
-    assert.equal(passthrough.env.BWS_XIAOHONGSHU_DOWNLOAD_USER_DATA_DIR, userDataDir);
+    assert.equal(passthrough.userDataDir, null);
+    assert.equal(passthrough.userDataDirPresent, true);
+    assert.equal(Object.hasOwn(passthrough.env, 'BWS_XIAOHONGSHU_DOWNLOAD_USER_DATA_DIR'), false);
   } finally {
     await rm(userDataDir, { recursive: true, force: true });
   }
@@ -1002,6 +1188,22 @@ test('inspectPersistentProfileHealth flags crashed Chrome profiles as unhealthy'
     assert.equal(health.healthy, false);
     assert.equal(health.lastExitType, 'Crashed');
     assert.match(health.warnings.join('\n'), /last exit type was Crashed/u);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('inspectPersistentProfileHealth classifies first-run incomplete profiles as uninitialized', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-profile-uninitialized-'));
+
+  try {
+    await writeFile(path.join(workspace, 'Local State'), '{}', 'utf8');
+
+    const health = await inspectPersistentProfileHealth(workspace);
+    assert.equal(health.healthy, false);
+    assert.equal(health.profileLifecycle, 'uninitialized');
+    assert.equal(health.requiresProfileRebuild, false);
+    assert.match(health.warnings.join('\n'), /missing expected paths/u);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

@@ -4,7 +4,14 @@ import process from 'node:process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { readJsonFile, writeJsonFile } from '../../infra/io.mjs';
+import { readJsonFile, writeTextFile } from '../../infra/io.mjs';
+import {
+  REDACTION_PLACEHOLDER,
+  SECURITY_GUARD_SCHEMA_VERSION,
+  prepareRedactedArtifactJson,
+  prepareRedactedArtifactJsonWithAudit,
+} from '../../sites/capability/security-guard.mjs';
+import { reasonCodeSummary } from '../../sites/capability/reason-codes.mjs';
 import {
   buildSessionRepairPlan,
   inspectSessionHealth,
@@ -133,6 +140,14 @@ const DANGEROUS_REPAIR_ACTIONS = Object.freeze([
   'cooldown-and-retry-later',
 ]);
 
+const SESSION_REPAIR_PLAN_PROFILE_KEYS = Object.freeze(new Set([
+  'profilePath',
+  'browserProfileRoot',
+  'profileRoot',
+  'profileDir',
+  'userDataDir',
+]));
+
 function executionAudit(options = {}, repairPlan = {}, health = {}) {
   if (!options.execute) {
     return {
@@ -224,6 +239,155 @@ async function auditHealth(options = {}) {
   };
 }
 
+export function sessionRepairPlanRedactionAuditPath(outFile) {
+  const resolved = path.resolve(outFile);
+  const ext = path.extname(resolved);
+  const base = ext ? resolved.slice(0, -ext.length) : resolved;
+  return `${base}.redaction-audit.json`;
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function auditPath(pathParts) {
+  return pathParts.join('.');
+}
+
+function redactSessionRepairPlanProfileRefs(value, pathParts = [], audit = {
+  schemaVersion: SECURITY_GUARD_SCHEMA_VERSION,
+  redactedPaths: [],
+  findings: [],
+}) {
+  if (Array.isArray(value)) {
+    return {
+      value: value.map((item, index) => (
+        redactSessionRepairPlanProfileRefs(item, [...pathParts, String(index)], audit).value
+      )),
+      audit,
+    };
+  }
+  if (!isPlainObject(value)) {
+    return { value, audit };
+  }
+  const output = {};
+  for (const [key, child] of Object.entries(value)) {
+    const childPath = [...pathParts, key];
+    if (SESSION_REPAIR_PLAN_PROFILE_KEYS.has(key)) {
+      output[key] = REDACTION_PLACEHOLDER;
+      audit.redactedPaths.push(auditPath(childPath));
+      continue;
+    }
+    output[key] = redactSessionRepairPlanProfileRefs(child, childPath, audit).value;
+  }
+  return { value: output, audit };
+}
+
+function mergeRedactionAudits(...audits) {
+  const redactedPaths = [];
+  const findings = [];
+  for (const audit of audits) {
+    if (!audit || typeof audit !== 'object') {
+      continue;
+    }
+    redactedPaths.push(...(Array.isArray(audit.redactedPaths) ? audit.redactedPaths : []));
+    findings.push(...(Array.isArray(audit.findings) ? audit.findings : []));
+  }
+  return {
+    schemaVersion: SECURITY_GUARD_SCHEMA_VERSION,
+    redactedPaths: [...new Set(redactedPaths)],
+    findings,
+  };
+}
+
+function prepareSessionRepairPlanArtifactPayload(result) {
+  const profileRedacted = redactSessionRepairPlanProfileRefs(result);
+  const prepared = prepareRedactedArtifactJsonWithAudit(profileRedacted.value);
+  const audit = mergeRedactionAudits(profileRedacted.audit, prepared.auditValue);
+  return {
+    ...prepared,
+    auditJson: prepareRedactedArtifactJson(audit).json,
+    auditValue: audit,
+  };
+}
+
+function toSessionRepairPlanRedactionFailure(error) {
+  const recovery = reasonCodeSummary('redaction-failed');
+  const failure = new Error('Session repair plan artifact redaction failed');
+  failure.name = 'SessionRepairPlanRedactionFailure';
+  failure.code = 'redaction-failed';
+  failure.reasonCode = 'redaction-failed';
+  failure.retryable = recovery.retryable;
+  failure.cooldownNeeded = recovery.cooldownNeeded;
+  failure.isolationNeeded = recovery.isolationNeeded;
+  failure.manualRecoveryNeeded = recovery.manualRecoveryNeeded;
+  failure.degradable = recovery.degradable;
+  failure.artifactWriteAllowed = recovery.artifactWriteAllowed;
+  failure.catalogAction = recovery.catalogAction;
+  failure.causeSummary = {
+    name: error?.name ?? 'Error',
+    code: error?.code ?? null,
+  };
+  return failure;
+}
+
+function toSessionRepairPlanCliSummaryRedactionFailure(error) {
+  const recovery = reasonCodeSummary('redaction-failed');
+  const failure = new Error('Session repair plan CLI summary redaction failed');
+  failure.name = 'SessionRepairPlanCliSummaryRedactionFailure';
+  failure.code = 'redaction-failed';
+  failure.reasonCode = 'redaction-failed';
+  failure.retryable = recovery.retryable;
+  failure.cooldownNeeded = recovery.cooldownNeeded;
+  failure.isolationNeeded = recovery.isolationNeeded;
+  failure.manualRecoveryNeeded = recovery.manualRecoveryNeeded;
+  failure.degradable = recovery.degradable;
+  failure.artifactWriteAllowed = recovery.artifactWriteAllowed;
+  failure.catalogAction = recovery.catalogAction;
+  failure.diagnosticWriteAllowed = false;
+  failure.causeSummary = {
+    name: error?.name ?? 'Error',
+    code: error?.code ?? null,
+  };
+  return failure;
+}
+
+export function prepareSessionRepairPlanArtifact(result) {
+  try {
+    return prepareSessionRepairPlanArtifactPayload(result);
+  } catch (error) {
+    throw toSessionRepairPlanRedactionFailure(error);
+  }
+}
+
+export function sessionRepairPlanCliJson(result) {
+  try {
+    return `${prepareSessionRepairPlanArtifactPayload(result).json}\n`;
+  } catch (error) {
+    throw toSessionRepairPlanCliSummaryRedactionFailure(error);
+  }
+}
+
+export async function writeSessionRepairPlanResult(outFile, result) {
+  const resolvedOutFile = path.resolve(outFile);
+  const redactionAudit = sessionRepairPlanRedactionAuditPath(resolvedOutFile);
+  const prepared = prepareSessionRepairPlanArtifact({
+    ...result,
+    artifacts: {
+      ...(result.artifacts ?? {}),
+      redactionAudit,
+    },
+  });
+  await writeTextFile(redactionAudit, prepared.auditJson);
+  await writeTextFile(resolvedOutFile, prepared.json);
+  return {
+    outFile: resolvedOutFile,
+    redactionAudit,
+    value: prepared.value,
+    audit: prepared.auditValue,
+  };
+}
+
 export async function buildSessionRepairPlanResult(options = {}, deps = {}) {
   if (options.help) {
     return { help: HELP };
@@ -253,7 +417,7 @@ export async function buildSessionRepairPlanResult(options = {}, deps = {}) {
     createdAt: new Date().toISOString(),
   };
   if (options.outFile) {
-    await writeJsonFile(path.resolve(options.outFile), result);
+    await writeSessionRepairPlanResult(options.outFile, result);
   }
   return result;
 }
@@ -288,7 +452,7 @@ function render(result) {
 export async function main(argv = process.argv.slice(2), deps = {}) {
   const options = parseArgs(argv);
   const result = await buildSessionRepairPlanResult(options, deps);
-  const output = options.json ? `${JSON.stringify(result, null, 2)}\n` : render(result);
+  const output = options.json ? sessionRepairPlanCliJson(result) : render(result);
   deps.stdout?.write ? deps.stdout.write(output) : process.stdout.write(output);
   return result;
 }

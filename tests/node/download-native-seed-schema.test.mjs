@@ -105,8 +105,6 @@ const SITE_FIXTURES = [
     expectedResource: {
       fileName: 'douyin-native-video.mp4',
       mediaType: 'video',
-      headerName: 'Cookie',
-      headerValue: 'session=1',
       metadataName: 'awemeId',
       metadataValue: '7321000000000000000',
     },
@@ -212,6 +210,8 @@ function assertResourceSchema(resource, fixture, {
   assert.equal(resource.groupId, groupId);
   assert.equal(typeof resource.headers, 'object');
   assert.equal(typeof resource.metadata, 'object');
+  assert.equal(Object.hasOwn(resource.headers, 'Cookie'), false);
+  assert.equal(Object.hasOwn(resource.headers, 'cookie'), false);
   assert.deepEqual(resource.headers, headers);
   assert.deepEqual(resource.metadata, {
     ...metadata,
@@ -243,13 +243,16 @@ test('native seed resolvers return the same resolved task and resource schema', 
       reason: fixture.options.completeReason,
     });
     assert.equal(resolved.resources.length, 1);
+    const expectedHeaders = {
+      'Accept-Language': 'zh-CN',
+    };
+    if (fixture.expectedResource.headerName) {
+      expectedHeaders[fixture.expectedResource.headerName] = fixture.expectedResource.headerValue;
+    }
     assertResourceSchema(resource, fixture, {
       id: resource.id,
       url: resource.url,
-      headers: {
-        'Accept-Language': 'zh-CN',
-        [fixture.expectedResource.headerName]: fixture.expectedResource.headerValue,
-      },
+      headers: expectedHeaders,
       fileName: fixture.expectedResource.fileName,
       mediaType: fixture.expectedResource.mediaType,
       sourceUrl: fixture.input,
@@ -384,7 +387,7 @@ test('native seed resolvers keep multi-resource arrays and per-resource fields a
           url: 'https://v3-web.example.test/schema/multi-play.mp4',
           fileName: 'douyin-video.mp4',
           mediaType: 'video',
-          headers: { Cookie: 'session=1' },
+          headers: {},
           expectedBytes: undefined,
           expectedHash: undefined,
           priority: 0,
@@ -514,6 +517,71 @@ test('native seed resolvers keep multi-resource arrays and per-resource fields a
       });
     }
   }
+});
+
+test('native seed resolvers strip artifact-facing sensitive seed fields', async () => {
+  const fixture = SITE_FIXTURES.find((entry) => entry.site === 'douyin');
+  assert.ok(fixture, 'Missing native seed fixture for douyin');
+  const request = {
+    site: 'douyin',
+    input: 'https://www.douyin.com/video/7321000000000000099?access_token=synthetic-seed-input-token&auth_token=synthetic-seed-input-auth-token&sessionid=synthetic-seed-input-session',
+    title: 'Cookie: sid=synthetic-seed-title-cookie',
+    groupId: 'sessionid=synthetic-seed-group-session',
+    headers: {
+      Cookie: 'sessionid=synthetic-seed-request-cookie',
+      Authorization: 'Bearer synthetic-seed-request-auth',
+      'X-CSRF-Token': 'synthetic-seed-request-csrf',
+      'User-Agent': 'native-seed-safe-agent',
+    },
+    metadata: {
+      directMedia: [{
+        id: 'synthetic-seed-id-token',
+        resolvedMediaUrl: 'https://v3-web.example.test/schema/sensitive-play.mp4',
+        fileName: 'csrf=synthetic-seed-file-csrf.mp4',
+        pageUrl: 'https://www.douyin.com/video/7321000000000000099?refresh_token=synthetic-seed-page-token&token=synthetic-seed-page-token',
+        referer: 'https://www.douyin.com/video/7321000000000000099?sessionid=synthetic-seed-referer-session',
+        headers: {
+          Cookie: 'sessionid=synthetic-seed-resource-cookie',
+          Authorization: 'Bearer synthetic-seed-resource-auth',
+          Range: 'bytes=0-',
+        },
+        metadata: {
+          diagnostic: 'Authorization: Bearer synthetic-seed-metadata-auth',
+          label: 'safe metadata label',
+        },
+      }],
+    },
+    dryRun: true,
+  };
+
+  const { resolved } = await resolveFixture(fixture, request, {
+    siteKey: 'douyin',
+    status: 'ready',
+    headers: {
+      Cookie: 'sessionid=synthetic-seed-lease-cookie',
+      Authorization: 'Bearer synthetic-seed-lease-auth',
+      'User-Agent': 'native-seed-lease-agent',
+    },
+  });
+  const resource = resolved.resources[0];
+  const serialized = JSON.stringify(resolved);
+
+  assert.equal(resolved.resources.length, 1);
+  assert.equal(resource.url, 'https://v3-web.example.test/schema/sensitive-play.mp4');
+  assert.equal(resource.id.includes('synthetic-seed'), false);
+  assert.equal(resource.fileName, '0001-download.mp4');
+  assert.equal(resource.sourceUrl, 'https://www.douyin.com/?recommend=1');
+  assert.equal(resource.referer, 'https://www.douyin.com/?recommend=1');
+  assert.equal(resource.headers.Cookie, undefined);
+  assert.equal(resource.headers.Authorization, undefined);
+  assert.equal(resource.headers['X-CSRF-Token'], undefined);
+  assert.deepEqual(resource.headers, {
+    'User-Agent': 'native-seed-safe-agent',
+    Range: 'bytes=0-',
+  });
+  assert.equal(resource.metadata.label, 'safe metadata label');
+  assert.equal(resource.metadata.diagnostic, undefined);
+  assert.doesNotMatch(serialized, /synthetic-seed-|Authorization|Cookie|csrf=|sessionid=|access_token=|auth_token=|refresh_token=|\btoken=|Bearer/iu);
 });
 
 test('ordinary native-site inputs still use legacy fallback when no seed is pre-resolved', async () => {

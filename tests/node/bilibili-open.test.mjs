@@ -2,9 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 
-import { resolveBilibiliOpenDecision } from '../../src/sites/bilibili/navigation/open.mjs';
+import {
+  resolveBilibiliOpenDecision,
+  writeBilibiliOpenReport,
+} from '../../src/sites/bilibili/navigation/open.mjs';
+import { assertNoForbiddenPatterns } from '../../src/sites/capability/security-guard.mjs';
 import { openBilibiliPage } from '../../scripts/open-bilibili-page.mjs';
 
 function createAuthProfile() {
@@ -79,6 +83,116 @@ test('resolveBilibiliOpenDecision recognizes authenticated non-author bilibili s
   assert.equal(watchLaterDecision.openMode, 'local-profile-browser');
   assert.equal(favoriteDecision.authRequired, true);
   assert.equal(favoriteDecision.openMode, 'local-profile-browser');
+});
+
+test('writeBilibiliOpenReport redacts profile references before persistent writes', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-bilibili-open-report-redaction-'));
+  try {
+    const reports = await writeBilibiliOpenReport({
+      site: {
+        targetUrl: 'https://space.bilibili.com/1202350411/dynamic?access_token=synthetic-url-token',
+        pageType: 'author-list-page',
+        authRequired: true,
+        openMode: 'local-profile-browser',
+        reason: 'auth-required',
+        profilePath: 'profiles/www.bilibili.com.json',
+        userDataDir: 'C:/Users/synthetic/AppData/Local/BilibiliProfile',
+        browserPath: 'C:/Chrome/chrome.exe',
+      },
+      authBootstrap: {
+        attempted: true,
+        triggeredInteractiveLogin: false,
+        status: 'session-reused',
+        persistenceVerified: true,
+        sessionReused: true,
+        openedTargetUrl: 'https://space.bilibili.com/1202350411/dynamic',
+        usedProfileDir: 'C:/Users/synthetic/AppData/Local/BilibiliProfile',
+      },
+      result: {
+        opened: true,
+        openedTargetUrl: 'https://space.bilibili.com/1202350411/dynamic',
+        browserAttachedVia: 'existing-target',
+        reusedBrowserInstance: true,
+        userDataDir: 'C:/Users/synthetic/AppData/Local/BilibiliProfile',
+        reasonCode: 'opened-authenticated-page',
+        reasonDetail: 'Authorization: Bearer synthetic-bilibili-open-token',
+      },
+      warnings: ['Cookie: SESSDATA=synthetic-bilibili-cookie'],
+    }, workspace);
+
+    const jsonText = await readFile(reports.json, 'utf8');
+    const markdownText = await readFile(reports.markdown, 'utf8');
+    const jsonAudit = JSON.parse(await readFile(reports.jsonRedactionAudit, 'utf8'));
+    const markdownAudit = JSON.parse(await readFile(reports.markdownRedactionAudit, 'utf8'));
+    assert.equal(jsonText.includes('synthetic-url-token'), false);
+    assert.equal(jsonText.includes('profiles/www.bilibili.com.json'), false);
+    assert.equal(jsonText.includes('BilibiliProfile'), false);
+    assert.equal(jsonText.includes('synthetic-bilibili-open-token'), false);
+    assert.equal(jsonText.includes('synthetic-bilibili-cookie'), false);
+    assert.equal(markdownText.includes('synthetic-url-token'), false);
+    assert.equal(markdownText.includes('profiles/www.bilibili.com.json'), false);
+    assert.equal(markdownText.includes('BilibiliProfile'), false);
+    assert.equal(markdownText.includes('synthetic-bilibili-open-token'), false);
+    assert.equal(markdownText.includes('synthetic-bilibili-cookie'), false);
+    assert.match(jsonText, /\[REDACTED\]/u);
+    assert.match(markdownText, /\[REDACTED\]/u);
+    assertNoForbiddenPatterns(jsonText);
+    assertNoForbiddenPatterns(markdownText);
+    assert.equal(jsonAudit.schemaVersion, 1);
+    assert.equal(markdownAudit.schemaVersion, 1);
+    assert.ok(jsonAudit.redactedPaths.includes('site.profilePath'));
+    assert.ok(jsonAudit.redactedPaths.includes('site.userDataDir'));
+    assert.ok(jsonAudit.redactedPaths.includes('authBootstrap.usedProfileDir'));
+    assert.ok(jsonAudit.redactedPaths.includes('result.userDataDir'));
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('writeBilibiliOpenReport redaction failure is reason-coded and fails closed', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-bilibili-open-report-redaction-fail-'));
+  try {
+    await assert.rejects(
+      writeBilibiliOpenReport({
+        site: {
+          targetUrl: {
+            toJSON() {
+              throw new Error('Authorization: Bearer synthetic-bilibili-open-token');
+            },
+          },
+          pageType: 'author-list-page',
+          authRequired: true,
+          openMode: 'local-profile-browser',
+          reason: 'auth-required',
+          profilePath: 'profiles/www.bilibili.com.json',
+          userDataDir: 'C:/Users/synthetic/AppData/Local/BilibiliProfile',
+          browserPath: 'C:/Chrome/chrome.exe',
+        },
+        authBootstrap: {
+          attempted: false,
+          triggeredInteractiveLogin: false,
+          status: null,
+          persistenceVerified: null,
+        },
+        result: {
+          opened: false,
+        },
+        warnings: [],
+      }, workspace),
+      (error) => {
+        const serialized = JSON.stringify(error);
+        assert.equal(error.name, 'BilibiliOpenReportRedactionFailure');
+        assert.equal(error.reasonCode, 'redaction-failed');
+        assert.equal(error.artifactWriteAllowed, false);
+        assert.equal(error.message.includes('synthetic-bilibili-open-token'), false);
+        assert.equal(serialized.includes('synthetic-bilibili-open-token'), false);
+        return true;
+      },
+    );
+    assert.deepEqual(await readdir(workspace), []);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
 });
 
 test('openBilibiliPage triggers interactive login bootstrap when reusable auth is missing', async () => {

@@ -4,11 +4,27 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
+import {
+  createDownloadPlan,
+} from '../../sites/downloads/modules.mjs';
+import {
+  resolveDouyinMediaBatch,
+} from '../../sites/douyin/queries/media-resolver.mjs';
+import {
+  resolveXiaohongshuFreshEvidence,
+} from '../../sites/xiaohongshu/actions/router.mjs';
+import { resolveDownloadSiteDefinition } from '../../sites/downloads/registry.mjs';
 import { runDownloadTask } from '../../sites/downloads/runner.mjs';
 import {
   readSessionRunManifest,
   sessionOptionsFromRunManifest,
 } from '../../sites/sessions/manifest-bridge.mjs';
+import {
+  REDACTION_PLACEHOLDER,
+  prepareRedactedArtifactJsonWithAudit,
+} from '../../sites/capability/security-guard.mjs';
+import { readJsonFile } from '../../infra/io.mjs';
+import { reasonCodeSummary } from '../../sites/capability/reason-codes.mjs';
 
 const HELP = `Usage:
   node src/entrypoints/sites/download.mjs --site <site> --input <url-or-target> [options]
@@ -29,6 +45,7 @@ Options:
   --concurrency <n>                 Download concurrency. Default: 4.
   --retries <n>                     Retry count per resource. Default: 2.
   --retry-backoff-ms <ms>           Backoff between retries. Default: 1000.
+  --max-items <n>                   Bound resolver/download item count for live validation.
   --resume                          Reuse valid completed artifacts and attempt incomplete resources in --run-dir.
   --retry-failed                    Require old queue state; reuse successes and retry only old failed resources.
   --no-resume                       Ignore existing run artifacts and start fresh.
@@ -43,10 +60,21 @@ Options:
   --session-optional                Prefer a reusable session lease.
   --session-none                    Use an anonymous session lease.
   --session-status <status>         Force lease status for testing: ready, blocked, manual-required, expired.
+  --session-reason <reasonCode>     Force a sanitized session reason for testing blocked live gates.
   --session-manifest <path>         Consume a unified runs/session health manifest before resolving resources.
   --session-health-plan             Generate and consume a unified session health manifest first.
   --no-session-health-plan          Use the legacy session provider instead of the unified health plan.
   --resolve-network                 Allow resolvers to fetch source pages before falling back to legacy downloaders.
+  --planner-handoff <path>          Consume a redacted PlannerPolicyRuntimeHandoff for native API endpoint evidence.
+  --profile-path <path>             Reusable browser profile path for approved native resolvers.
+  --browser-profile-root <path>     Browser profile root for approved native resolvers.
+  --user-data-dir <path>            Browser user data directory for approved native resolvers.
+  --browser-path <path>             Browser executable path for approved native resolvers.
+  --headless                        Run approved browser-backed native resolvers headless.
+  --no-headless                     Run approved browser-backed native resolvers visibly.
+  --timeout <ms>                    Browser-backed native resolver timeout.
+  --plan-json                       Emit a no-write resolved plan JSON to stdout and exit.
+  --no-write                        Alias for --plan-json.
   --json                            Print the full runner result JSON.
   -h, --help                        Show this help.
 `;
@@ -68,6 +96,7 @@ export function parseArgs(argv) {
     skipExisting: true,
     verify: true,
     json: false,
+    planJson: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -119,6 +148,9 @@ export function parseArgs(argv) {
         break;
       }
       case '--execute':
+        if (options.planJson) {
+          throw new Error('--execute cannot be combined with --plan-json or --no-write');
+        }
         options.dryRun = false;
         break;
       case '--out-dir': {
@@ -148,6 +180,12 @@ export function parseArgs(argv) {
       case '--retry-backoff-ms': {
         const read = readValue(argv, index, arg);
         options.retryBackoffMs = Number(read.value);
+        index = read.nextIndex;
+        break;
+      }
+      case '--max-items': {
+        const read = readValue(argv, index, arg);
+        options.maxItems = Number(read.value);
         index = read.nextIndex;
         break;
       }
@@ -208,12 +246,35 @@ export function parseArgs(argv) {
         index = read.nextIndex;
         break;
       }
+      case '--session-reason': {
+        const read = readValue(argv, index, arg);
+        options.sessionReason = read.value;
+        index = read.nextIndex;
+        break;
+      }
       case '--session-manifest': {
         const read = readValue(argv, index, arg);
         options.sessionManifest = read.value;
         index = read.nextIndex;
         break;
       }
+      case '--profile-path':
+      case '--browser-profile-root':
+      case '--user-data-dir':
+      case '--browser-path':
+      case '--timeout': {
+        const read = readValue(argv, index, arg);
+        const key = arg.slice(2).replace(/-([a-z])/gu, (_, letter) => letter.toUpperCase());
+        options[key === 'timeout' ? 'timeoutMs' : key] = key === 'timeout' ? Number(read.value) : read.value;
+        index = read.nextIndex;
+        break;
+      }
+      case '--headless':
+        options.headless = true;
+        break;
+      case '--no-headless':
+        options.headless = false;
+        break;
       case '--session-health-plan':
         options.useUnifiedSessionHealth = true;
         break;
@@ -222,6 +283,19 @@ export function parseArgs(argv) {
         break;
       case '--resolve-network':
         options.resolveNetwork = true;
+        break;
+      case '--planner-handoff': {
+        const read = readValue(argv, index, arg);
+        options.plannerHandoffPath = read.value;
+        index = read.nextIndex;
+        break;
+      }
+      case '--plan-json':
+      case '--no-write':
+        if (options.dryRun === false) {
+          throw new Error('--execute cannot be combined with --plan-json or --no-write');
+        }
+        options.planJson = true;
         break;
       case '--json':
         options.json = true;
@@ -248,10 +322,112 @@ export function parseArgs(argv) {
   return options;
 }
 
+function defaultResolverDeps(options = {}) {
+  if (options.resolveNetwork !== true) {
+    return {};
+  }
+  return {
+    resolveDouyinMediaBatch,
+    resolveXiaohongshuFreshEvidence,
+  };
+}
+
+export function downloadPlanOnlyJson(plan, definition, options = {}) {
+  const payload = {
+    status: 'planned',
+    mode: 'plan-only',
+    noWrite: true,
+    generatedAt: new Date().toISOString(),
+    siteKey: plan.siteKey,
+    host: plan.host,
+    taskType: plan.taskType,
+    resolveNetwork: Boolean(options.resolveNetwork),
+    liveValidation: options.liveValidation ?? null,
+    definition: {
+      siteKey: definition.siteKey,
+      host: definition.host,
+      adapterId: definition.adapterId,
+      resolverMethod: definition.resolverMethod,
+      taskType: definition.taskType,
+      taskTypes: definition.taskTypes,
+      sessionRequirement: definition.sessionRequirement,
+    },
+    plan,
+  };
+  return `${prepareRedactedArtifactJsonWithAudit(payload).json}\n`;
+}
+
+function toDownloadCliSummaryRedactionFailure(error) {
+  const recovery = reasonCodeSummary('redaction-failed');
+  const failure = new Error('Download CLI summary redaction failed');
+  failure.name = 'DownloadCliSummaryRedactionFailure';
+  failure.code = 'redaction-failed';
+  failure.reasonCode = 'redaction-failed';
+  failure.retryable = recovery.retryable;
+  failure.cooldownNeeded = recovery.cooldownNeeded;
+  failure.isolationNeeded = recovery.isolationNeeded;
+  failure.manualRecoveryNeeded = recovery.manualRecoveryNeeded;
+  failure.degradable = recovery.degradable;
+  failure.artifactWriteAllowed = recovery.artifactWriteAllowed;
+  failure.catalogAction = recovery.catalogAction;
+  failure.diagnosticWriteAllowed = false;
+  failure.causeSummary = {
+    name: error?.name ?? 'Error',
+    code: error?.code ?? null,
+  };
+  return failure;
+}
+
+function redactDownloadCliSummary(result) {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) {
+    return result;
+  }
+  const summary = { ...result };
+  if (summary.sessionLease && typeof summary.sessionLease === 'object') {
+    const sessionLease = { ...summary.sessionLease };
+    for (const key of [
+      'headers',
+      'cookies',
+      'authorization',
+      'cookie',
+      'csrf',
+      'token',
+      'accessToken',
+      'refreshToken',
+      'SESSDATA',
+    ]) {
+      if (Object.hasOwn(sessionLease, key)) {
+        sessionLease[key] = REDACTION_PLACEHOLDER;
+      }
+    }
+    summary.sessionLease = sessionLease;
+  }
+  return summary;
+}
+
+export function downloadCliJson(result) {
+  try {
+    return `${prepareRedactedArtifactJsonWithAudit(redactDownloadCliSummary(result)).json}\n`;
+  } catch (error) {
+    throw toDownloadCliSummaryRedactionFailure(error);
+  }
+}
+
 export async function main(argv) {
   const options = parseArgs(argv);
   if (options.help) {
     process.stdout.write(`${HELP}\n`);
+    return;
+  }
+  if (options.planJson) {
+    const definition = await resolveDownloadSiteDefinition(options, {
+      workspaceRoot: process.cwd(),
+    });
+    const plan = await createDownloadPlan(options, {
+      workspaceRoot: process.cwd(),
+      definition,
+    });
+    process.stdout.write(downloadPlanOnlyJson(plan, definition, options));
     return;
   }
   const sessionManifestOptions = options.sessionManifest
@@ -260,7 +436,16 @@ export async function main(argv) {
       ...(options.host ? { host: options.host } : {}),
     })
     : {};
-  const result = await runDownloadTask(options, {
+  const plannerHandoff = options.plannerHandoffPath
+    ? await readJsonFile(path.resolve(options.plannerHandoffPath))
+    : undefined;
+  const request = plannerHandoff
+    ? {
+      ...options,
+      plannerHandoff,
+    }
+    : options;
+  const result = await runDownloadTask(request, {
     dryRun: options.dryRun,
     runRoot: options.outDir,
     runDir: options.runDir,
@@ -281,10 +466,11 @@ export async function main(argv) {
     ...sessionManifestOptions,
     useUnifiedSessionHealth: options.useUnifiedSessionHealth,
     ...(options.sessionStatus ? { sessionStatus: options.sessionStatus } : {}),
+    ...(options.sessionReason ? { sessionReason: options.sessionReason } : {}),
     resolveNetwork: options.resolveNetwork,
-  });
+  }, defaultResolverDeps(options));
   if (options.json) {
-    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    process.stdout.write(downloadCliJson(result));
     return;
   }
   process.stdout.write(`Status: ${result.manifest.status}\n`);

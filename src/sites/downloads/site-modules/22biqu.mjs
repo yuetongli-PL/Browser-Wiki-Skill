@@ -4,13 +4,16 @@ import path from 'node:path';
 import { access, readFile } from 'node:fs/promises';
 
 import {
+  normalizeDownloadResourceConsumerHeaders,
   normalizeDownloadResource,
   normalizeResolvedDownloadTask,
+  normalizeSessionLeaseConsumerHeaders,
 } from '../contracts.mjs';
 import {
   isHttpUrl,
   normalizeText,
   pushFlag,
+  resolveLegacyProfileFlagMaterial,
 } from './common.mjs';
 
 export const siteKey = '22biqu';
@@ -813,8 +816,8 @@ async function directoryHtmlPayloadFromFetch(request = {}, plan = {}, context = 
     const response = await fetchState.fetchImpl(finalUrl, {
       method: 'GET',
       headers: {
-        ...(sessionLease?.headers ?? {}),
-        ...(isObject(request.headers) ? request.headers : {}),
+        ...normalizeSessionLeaseConsumerHeaders(sessionLease),
+        ...normalizeDownloadResourceConsumerHeaders(request.headers),
       },
       redirect: 'follow',
     });
@@ -867,7 +870,47 @@ function withDirectoryMetadata(resolved, directory) {
     metadata,
     completeness: {
       ...resolved.completeness,
-      reason: '22biqu-directory-provided',
+      reason: resolved.metadata?.boundedByMaxItems
+        ? '22biqu-chapters-bounded-by-max-items'
+        : '22biqu-directory-provided',
+    },
+  };
+}
+
+export function create22BiquChapterResourceSeed({
+  plan,
+  request = {},
+  sessionLease = null,
+  chapter: rawChapter,
+  index = 0,
+  details = {},
+  baseUrl = '',
+  bookUrl = '',
+  sourceTitle = '',
+} = {}) {
+  const chapter = typeof rawChapter === 'string' ? { url: rawChapter } : rawChapter;
+  if (!isObject(chapter)) {
+    return null;
+  }
+  const url = absoluteUrl(chapter.url ?? chapter.chapterUrl ?? chapter.href ?? chapter.canonicalUrl, baseUrl);
+  if (!url) {
+    return null;
+  }
+  return {
+    id: normalizeText(chapter.id) || undefined,
+    url,
+    headers: normalizeSessionLeaseConsumerHeaders(sessionLease),
+    fileName: chapter.fileName ?? fileNameForChapter(chapter, index),
+    mediaType: 'text',
+    sourceUrl: chapter.sourceUrl ?? bookUrl,
+    referer: chapter.referer ?? bookUrl,
+    priority: chapter.priority ?? index,
+    groupId: request.bookId ?? request.title ?? plan?.source?.title ?? plan?.id,
+    metadata: {
+      siteResolver: siteKey,
+      chapterIndex: chapter.chapterIndex ?? chapter.index ?? index + 1,
+      title: normalizeText(chapter.title ?? chapter.chapterTitle ?? chapter.name) || undefined,
+      bookTitle: sourceTitle || undefined,
     },
   };
 }
@@ -877,6 +920,10 @@ function resolveChapterResources(plan, sessionLease, context, chapterEntries, de
   if (chapterEntries.length === 0) {
     return null;
   }
+  const maxItems = Number(plan.policy?.maxItems ?? request.maxItems ?? 0);
+  const boundedChapterEntries = Number.isFinite(maxItems) && maxItems > 0
+    ? chapterEntries.slice(0, maxItems)
+    : chapterEntries;
 
   const baseUrl = normalizeText(
     details.book?.url
@@ -892,33 +939,20 @@ function resolveChapterResources(plan, sessionLease, context, chapterEntries, de
   );
   const bookUrl = normalizeText(details.book?.url ?? request.bookUrl ?? plan.source?.canonicalUrl ?? plan.source?.input);
   const sourceTitle = normalizeText(details.book?.title ?? request.title ?? request.bookTitle ?? plan.source?.title);
-  const resources = chapterEntries
+  const resources = boundedChapterEntries
     .map((entry, index) => {
-      const chapter = typeof entry === 'string' ? { url: entry } : entry;
-      if (!chapter || typeof chapter !== 'object') {
-        return null;
-      }
-      const url = absoluteUrl(chapter.url ?? chapter.chapterUrl ?? chapter.href ?? chapter.canonicalUrl, baseUrl);
-      if (!url) {
-        return null;
-      }
-      return normalizeDownloadResource({
-        id: normalizeText(chapter.id) || undefined,
-        url,
-        headers: sessionLease?.headers ?? {},
-        fileName: chapter.fileName ?? fileNameForChapter(chapter, index),
-        mediaType: 'text',
-        sourceUrl: chapter.sourceUrl ?? bookUrl,
-        referer: chapter.referer ?? bookUrl,
-        priority: chapter.priority ?? index,
-        groupId: request.bookId ?? request.title ?? plan.source?.title ?? plan.id,
-        metadata: {
-          siteResolver: siteKey,
-          chapterIndex: chapter.chapterIndex ?? chapter.index ?? index + 1,
-          title: normalizeText(chapter.title ?? chapter.chapterTitle ?? chapter.name) || undefined,
-          bookTitle: sourceTitle || undefined,
-        },
-      }, index);
+      const resource = create22BiquChapterResourceSeed({
+        plan,
+        request,
+        sessionLease,
+        chapter: entry,
+        index,
+        details,
+        baseUrl,
+        bookUrl,
+        sourceTitle,
+      });
+      return resource ? normalizeDownloadResource(resource, index) : null;
     })
     .filter(Boolean);
 
@@ -941,12 +975,20 @@ function resolveChapterResources(plan, sessionLease, context, chapterEntries, de
         source: details.book.source,
         bookId: details.book.id || undefined,
       } : undefined,
+      boundedByMaxItems: boundedChapterEntries.length < chapterEntries.length
+        ? {
+          maxItems,
+          fullChapterCount: chapterEntries.length,
+        }
+        : undefined,
     },
     completeness: {
       expectedCount: chapterEntries.length,
       resolvedCount: resources.length,
       complete: resources.length === chapterEntries.length,
-      reason: resources.length === chapterEntries.length
+      reason: boundedChapterEntries.length < chapterEntries.length
+        ? '22biqu-chapters-bounded-by-max-items'
+        : resources.length === chapterEntries.length
         ? '22biqu-chapters-provided'
         : '22biqu-chapter-data-incomplete',
     },
@@ -975,7 +1017,9 @@ export async function resolveResources(plan, sessionLease = null, context = {}) 
         },
         completeness: {
           ...resolved.completeness,
-          reason: '22biqu-book-content-provided',
+          reason: resolved.metadata?.boundedByMaxItems
+            ? '22biqu-chapters-bounded-by-max-items'
+            : '22biqu-book-content-provided',
         },
       };
     }
@@ -1008,7 +1052,10 @@ export function buildLegacyCommand(entrypointPath, plan, request = {}, sessionLe
   if (request.forceRecrawl) {
     args.push('--force-recrawl');
   }
-  pushFlag(args, '--profile-path', request.profilePath);
+  const legacyProfileMaterial = resolveLegacyProfileFlagMaterial(request, sessionLease);
+  if (legacyProfileMaterial.allowed) {
+    pushFlag(args, '--profile-path', legacyProfileMaterial.profilePath);
+  }
   pushFlag(args, '--crawler-scripts-dir', request.crawlerScriptsDir);
   pushFlag(args, '--knowledge-base-dir', request.knowledgeBaseDir);
   pushFlag(args, '--node-executable', request.nodeExecutable ?? options.nodeExecutable);
