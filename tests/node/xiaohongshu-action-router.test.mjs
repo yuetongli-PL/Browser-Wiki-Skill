@@ -8,13 +8,17 @@ import {
   buildXiaohongshuActionRequest,
   parseXiaohongshuActionArgs,
   runXiaohongshuActionCli,
+  xiaohongshuActionCliJson,
+  xiaohongshuActionCliMarkdown,
   XIAOHONGSHU_ACTION_HELP,
 } from '../../src/entrypoints/sites/xiaohongshu-action.mjs';
 import { readJsonFile } from '../../src/infra/io.mjs';
 import {
   classifyXiaohongshuDownloadInput,
+  resolveXiaohongshuFreshEvidence,
   runXiaohongshuAction,
 } from '../../src/sites/xiaohongshu/actions/router.mjs';
+import { reasonCodeSummary } from '../../src/sites/capability/reason-codes.mjs';
 
 function createHtmlResponse(url, html, responseUrl = url) {
   return {
@@ -241,6 +245,91 @@ test('runXiaohongshuActionCli help exposes unified session flags without running
   } finally {
     process.stdout.write = originalWrite;
   }
+});
+
+test('Xiaohongshu action CLI JSON output redacts sensitive diagnostics', () => {
+  const output = xiaohongshuActionCliJson({
+    ok: false,
+    authHealth: {
+      headers: {
+        authorization: 'Bearer synthetic-xhs-cli-json-auth',
+        cookie: 'web_session=synthetic-xhs-cli-json-cookie',
+      },
+      csrfToken: 'synthetic-xhs-cli-json-csrf',
+    },
+    runtimeRisk: {
+      details: 'refresh_token=synthetic-xhs-cli-json-refresh',
+    },
+  });
+
+  assert.doesNotMatch(
+    output,
+    /synthetic-xhs-cli-json-|web_session=|refresh_token=|Bearer/iu,
+  );
+  const parsed = JSON.parse(output);
+  assert.equal(parsed.authHealth.headers.authorization, '[REDACTED]');
+  assert.equal(parsed.authHealth.headers.cookie, '[REDACTED]');
+  assert.equal(parsed.authHealth.csrfToken, '[REDACTED]');
+  assert.equal(parsed.runtimeRisk.details, '[REDACTED]');
+});
+
+test('Xiaohongshu action CLI Markdown output redacts sensitive diagnostics and fallback JSON', () => {
+  const markdown = xiaohongshuActionCliMarkdown([
+    '# Xiaohongshu Download Action',
+    'Authorization: Bearer synthetic-xhs-cli-markdown-auth',
+    'csrf=synthetic-xhs-cli-markdown-csrf',
+  ].join('\n'));
+  assert.doesNotMatch(
+    markdown,
+    /synthetic-xhs-cli-markdown-|Authorization: Bearer|csrf=/iu,
+  );
+  assert.match(markdown, /\[REDACTED\]/u);
+
+  const fallback = xiaohongshuActionCliMarkdown('', {
+    ok: false,
+    headers: {
+      authorization: 'Bearer synthetic-xhs-cli-fallback-auth',
+    },
+  });
+  assert.doesNotMatch(fallback, /synthetic-xhs-cli-fallback-|Bearer/iu);
+  assert.equal(JSON.parse(fallback).headers.authorization, '[REDACTED]');
+});
+
+test('Xiaohongshu action CLI output fails closed without raw cause exposure', () => {
+  const recovery = reasonCodeSummary('redaction-failed');
+  const payload = {
+    toJSON() {
+      throw new Error(
+        'Authorization: Bearer synthetic-xhs-cli-cause-token csrf=synthetic-xhs-cli-cause-csrf',
+      );
+    },
+  };
+
+  assert.throws(
+    () => xiaohongshuActionCliJson(payload),
+    (error) => {
+      assert.equal(error.name, 'XiaohongshuActionCliOutputRedactionFailure');
+      assert.equal(error.reasonCode, 'redaction-failed');
+      assert.equal(error.retryable, recovery.retryable);
+      assert.equal(error.cooldownNeeded, recovery.cooldownNeeded);
+      assert.equal(error.isolationNeeded, recovery.isolationNeeded);
+      assert.equal(error.manualRecoveryNeeded, recovery.manualRecoveryNeeded);
+      assert.equal(error.degradable, recovery.degradable);
+      assert.equal(error.artifactWriteAllowed, recovery.artifactWriteAllowed);
+      assert.equal(error.catalogAction, recovery.catalogAction);
+      assert.equal(error.diagnosticWriteAllowed, false);
+      assert.equal(Object.hasOwn(error, 'cause'), false);
+      assert.deepEqual(error.causeSummary, {
+        name: 'Error',
+        code: null,
+      });
+      assert.doesNotMatch(
+        `${error.message}\n${JSON.stringify(error)}`,
+        /synthetic-xhs-cli-cause-|Authorization: Bearer|csrf=/iu,
+      );
+      return true;
+    },
+  );
 });
 
 test('buildXiaohongshuActionRequest carries unified session manifest options into router request', async () => {
@@ -950,6 +1039,301 @@ test('runXiaohongshuAction reuses exported session headers for page fetches and 
   assert.match(String(capturedPayload[0].downloadBundle.headers.Cookie ?? ''), /web_session=xyz789/u);
   assert.equal(capturedPayload[0].downloadBundle.assets[0].headers['User-Agent'], 'Browser-Wiki-Skill Test UA');
   assert.equal(capturedPayload[0].downloadBundle.assets[0].headers.Referer, 'https://www.xiaohongshu.com/explore/note-image');
+});
+
+test('resolveXiaohongshuFreshEvidence emits sanitized page facts and resource seeds from a reusable session', async () => {
+  const siteProfile = await readJsonFile(path.resolve('profiles/www.xiaohongshu.com.json'));
+  const noteUrl = 'https://www.xiaohongshu.com/explore/note-image';
+  let observedFetchHeaders = null;
+
+  const evidence = await resolveXiaohongshuFreshEvidence(noteUrl, {
+    request: {
+      profilePath: path.resolve('profiles/www.xiaohongshu.com.json'),
+      timeoutMs: 20_000,
+      download: {
+        dryRun: true,
+        maxItems: 1,
+      },
+    },
+  }, {
+    siteProfile,
+    async inspectRequestReusableSiteSession() {
+      return {
+        authAvailable: true,
+        userDataDir: 'C:/profiles/xiaohongshu.com',
+        profileHealth: { healthy: true },
+        authConfig: {
+          keepaliveUrl: 'https://www.xiaohongshu.com/notification',
+          preferVisibleBrowserForAuthenticatedFlows: true,
+        },
+      };
+    },
+    async openBrowserSession() {
+      return {
+        client: {
+          async send(method) {
+            assert.equal(method, 'Storage.getCookies');
+            return {
+              cookies: [
+                { domain: '.xiaohongshu.com', name: 'sid', value: 'fresh-cookie' },
+                { domain: '.xiaohongshu.com', name: 'web_session', value: 'fresh-session' },
+              ],
+            };
+          },
+        },
+        browserAttachedVia: 'existing-target',
+        reusedBrowserInstance: true,
+        async navigateAndWait() {},
+        async getPageMetadata() {
+          return { finalUrl: 'https://www.xiaohongshu.com/notification' };
+        },
+        async evaluateValue(expression) {
+          if (expression.includes('navigator.userAgent')) {
+            return 'Fresh Evidence UA';
+          }
+          if (expression.includes('navigator.languages')) {
+            return 'zh-CN';
+          }
+          return '';
+        },
+        async close() {},
+      };
+    },
+    async fetchImpl(url, options = {}) {
+      assert.equal(String(url), noteUrl);
+      observedFetchHeaders = options.headers ?? {};
+      return createHtmlResponse(String(url), buildImageNoteHtml('note-image', 'Fresh Evidence Note'));
+    },
+  });
+
+  assert.match(String(observedFetchHeaders?.Cookie ?? ''), /fresh-cookie/u);
+  assert.equal(evidence.status, 'resource-seeds-provided');
+  assert.equal(evidence.pageFacts.noteId, 'note-image');
+  assert.equal(evidence.resourceSeeds.length, 1);
+  assert.equal(evidence.resourceSeeds[0].url, 'https://ci.xiaohongshu.com/note-image-default.webp');
+  assert.equal(evidence.resourceSeeds[0].headers['User-Agent'], 'Fresh Evidence UA');
+  assert.equal(evidence.resourceSeeds[0].headers.Referer, noteUrl);
+  assert.equal(Object.hasOwn(evidence.resourceSeeds[0].headers, 'Cookie'), false);
+  assert.equal(evidence.headerFreshness.freshnessStatus, 'fresh-evidence-produced');
+  assert.equal(evidence.resolution.downloadSession.cookieEvidence, true);
+  const serialized = JSON.stringify(evidence);
+  assert.doesNotMatch(serialized, /fresh-cookie|fresh-session|web_session|C:\/profiles|"Cookie"/u);
+});
+
+test('resolveXiaohongshuFreshEvidence falls back to browser page facts when header fetch has no note assets', async () => {
+  const siteProfile = await readJsonFile(path.resolve('profiles/www.xiaohongshu.com.json'));
+  const noteUrl = 'https://www.xiaohongshu.com/explore/note-browser';
+  let openCount = 0;
+
+  const evidence = await resolveXiaohongshuFreshEvidence(noteUrl, {
+    request: {
+      profilePath: path.resolve('profiles/www.xiaohongshu.com.json'),
+      timeoutMs: 20_000,
+      headless: false,
+      download: {
+        dryRun: true,
+        maxItems: 1,
+      },
+    },
+  }, {
+    siteProfile,
+    async inspectRequestReusableSiteSession() {
+      return {
+        authAvailable: true,
+        userDataDir: 'C:/profiles/xiaohongshu.com',
+        profileHealth: { healthy: true },
+        authConfig: {
+          keepaliveUrl: 'https://www.xiaohongshu.com/notification',
+          preferVisibleBrowserForAuthenticatedFlows: true,
+        },
+      };
+    },
+    async openBrowserSession(settings) {
+      openCount += 1;
+      return {
+        client: {
+          async send() {
+            return {
+              cookies: [{ domain: '.xiaohongshu.com', name: 'sid', value: 'browser-cookie' }],
+            };
+          },
+        },
+        browserAttachedVia: openCount === 1 ? 'keepalive-target' : 'note-target',
+        reusedBrowserInstance: true,
+        async navigateAndWait() {},
+        async getPageMetadata() {
+          return {
+            finalUrl: settings.startupUrl,
+            title: openCount === 1 ? 'Notification' : 'Browser Evidence Note',
+          };
+        },
+        async evaluateValue(expression) {
+          if (expression.includes('navigator.userAgent')) {
+            return 'Browser Evidence UA';
+          }
+          if (expression.includes('navigator.languages')) {
+            return 'zh-CN';
+          }
+          return '';
+        },
+        async callPageFunction() {
+          return {
+            finalUrl: noteUrl,
+            title: 'Browser Evidence Note',
+            pageType: 'book-detail-page',
+            pageFacts: {
+              noteId: 'note-browser',
+              contentTitle: 'Browser Evidence Note',
+              contentType: 'normal',
+              authorName: 'Browser Author',
+              contentImages: [{
+                assetId: 'browser-image-1',
+                url: 'https://ci.xiaohongshu.example.test/browser/image.webp',
+                previewUrl: 'https://ci.xiaohongshu.example.test/browser/preview.webp',
+                headers: {
+                  Cookie: 'sid=browser-cookie',
+                  'User-Agent': 'Browser Evidence UA',
+                },
+              }],
+              contentImageCount: 1,
+            },
+          };
+        },
+        async close() {},
+      };
+    },
+    async fetchImpl(url) {
+      assert.equal(String(url), noteUrl);
+      return createHtmlResponse(
+        'https://www.xiaohongshu.com/404?error_code=300031&verifyMsg=',
+        '<title>not found</title><script>window.__INITIAL_STATE__={}</script>',
+      );
+    },
+  });
+
+  assert.equal(openCount, 2);
+  assert.equal(evidence.status, 'resource-seeds-provided');
+  assert.equal(evidence.resourceSeeds.length, 1);
+  assert.equal(evidence.resourceSeeds[0].url, 'https://ci.xiaohongshu.example.test/browser/image.webp');
+  assert.equal(evidence.resourceSeeds[0].headers['User-Agent'], 'Browser Evidence UA');
+  assert.equal(Object.hasOwn(evidence.resourceSeeds[0].headers, 'Cookie'), false);
+  assert.equal(evidence.resolution.browserEvidence.status, 'browser-page-facts-read');
+  assert.equal(JSON.stringify(evidence).includes('browser-cookie'), false);
+});
+
+test('resolveXiaohongshuFreshEvidence emits sanitized video resource seeds from browser page facts', async () => {
+  const siteProfile = await readJsonFile(path.resolve('profiles/www.xiaohongshu.com.json'));
+  const noteUrl = 'https://www.xiaohongshu.com/explore/note-video-fresh?xsec_token=input-secret-xsec-token&xsec_source=pc_note';
+
+  const evidence = await resolveXiaohongshuFreshEvidence(noteUrl, {
+    request: {
+      profilePath: path.resolve('profiles/www.xiaohongshu.com.json'),
+      timeoutMs: 20_000,
+      headless: false,
+      download: {
+        dryRun: true,
+        maxItems: 1,
+      },
+    },
+  }, {
+    siteProfile,
+    async inspectRequestReusableSiteSession() {
+      return {
+        authAvailable: true,
+        userDataDir: 'C:/profiles/xiaohongshu.com',
+        profileHealth: { healthy: true },
+        authConfig: {
+          keepaliveUrl: 'https://www.xiaohongshu.com/notification',
+          preferVisibleBrowserForAuthenticatedFlows: true,
+        },
+      };
+    },
+    async openBrowserSession(settings) {
+      return {
+        client: {
+          async send() {
+            return {
+              cookies: [{ domain: '.xiaohongshu.com', name: 'sid', value: 'video-cookie' }],
+            };
+          },
+        },
+        browserAttachedVia: 'note-target',
+        reusedBrowserInstance: true,
+        async navigateAndWait() {},
+        async getPageMetadata() {
+          return {
+            finalUrl: settings.startupUrl,
+            title: 'Fresh Video Note',
+          };
+        },
+        async evaluateValue(expression) {
+          if (expression.includes('navigator.userAgent')) {
+            return 'Fresh Video UA';
+          }
+          if (expression.includes('navigator.languages')) {
+            return 'zh-CN';
+          }
+          return '';
+        },
+        async callPageFunction() {
+          return {
+            finalUrl: noteUrl,
+            title: 'Fresh Video Note',
+            pageType: 'book-detail-page',
+            pageFacts: {
+              noteId: 'note-video-fresh',
+              contentTitle: 'Fresh Video Note',
+              contentType: 'video',
+              authorName: 'Video Author',
+              contentVideos: [{
+                id: 'video-1',
+                width: 1080,
+                height: 1920,
+                sourceUrls: [
+                  'https://www.xiaohongshu.com/explore/note-video-fresh?xsec_token=secret-xsec-token&xsec_source=pc_note',
+                ],
+                media: {
+                  stream: {
+                    h264: [{
+                      master_url: 'https://sns-video.example.test/fresh/video.mp4',
+                    }],
+                  },
+                },
+                headers: {
+                  Cookie: 'sid=video-cookie',
+                  'User-Agent': 'Fresh Video UA',
+                },
+              }],
+            },
+          };
+        },
+        async close() {},
+      };
+    },
+    async fetchImpl(url) {
+      assert.equal(String(url), noteUrl);
+      return createHtmlResponse(
+        'https://www.xiaohongshu.com/404?error_code=300031&verifyMsg=',
+        '<title>not found</title><script>window.__INITIAL_STATE__={}</script>',
+      );
+    },
+  });
+
+  assert.equal(evidence.status, 'resource-seeds-provided');
+  assert.equal(evidence.pageFacts.contentType, 'video');
+  assert.equal(evidence.pageFacts.contentVideos.length, 1);
+  assert.equal(evidence.resourceSeeds.length, 1);
+  assert.equal(evidence.resourceSeeds[0].mediaType, 'video');
+  assert.equal(evidence.resourceSeeds[0].url, 'https://sns-video.example.test/fresh/video.mp4');
+  assert.equal(evidence.resourceSeeds[0].headers['User-Agent'], 'Fresh Video UA');
+  assert.equal(Object.hasOwn(evidence.resourceSeeds[0].headers, 'Cookie'), false);
+  assert.equal(evidence.resourceSeeds[0].metadata.assetType, 'video');
+  assert.equal(evidence.resolution.browserEvidence.status, 'browser-page-facts-read');
+  assert.equal(JSON.stringify(evidence).includes('video-cookie'), false);
+  assert.equal(JSON.stringify(evidence).includes('secret-xsec-token'), false);
+  assert.equal(JSON.stringify(evidence).includes('input-secret-xsec-token'), false);
+  assert.equal(JSON.stringify(evidence).includes('%5BREDACTED%5D'), true);
+  assert.equal(JSON.stringify(evidence).includes('C:/profiles'), false);
 });
 
 test('runXiaohongshuAction consumes Xiaohongshu passthrough sidecar headers when provided via env', async () => {

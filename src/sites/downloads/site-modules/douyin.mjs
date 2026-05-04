@@ -4,12 +4,17 @@ import {
   addCommonProfileFlags,
   addDownloadPolicyFlags,
   addLoginFlags,
+  createNativeResolutionMiss,
   legacyItems,
   normalizeText,
   pushFlag,
   resolveNativeResourceSeeds,
   toArray,
 } from './common.mjs';
+import {
+  normalizeDownloadResourceConsumerHeaders,
+  normalizeSessionLeaseConsumerHeaders,
+} from '../contracts.mjs';
 
 export const siteKey = 'douyin';
 export const DOUYIN_NATIVE_EVIDENCE_CONTRACT_VERSION = 'douyin-native-evidence-v1';
@@ -35,6 +40,35 @@ function firstText(...values) {
   return '';
 }
 
+const DOUYIN_RESOLVER_REQUEST_HEADER_NAMES = new Set([
+  'accept',
+  'accept-language',
+  'cache-control',
+  'cookie',
+  'origin',
+  'pragma',
+  'range',
+  'referer',
+  'referrer',
+  'user-agent',
+]);
+
+function normalizeDouyinResolverRequestHeaders(headers = null) {
+  if (!isObject(headers)) {
+    return {};
+  }
+  const result = {};
+  for (const [key, value] of Object.entries(headers)) {
+    const name = normalizeText(key);
+    const text = normalizeText(value);
+    if (!name || !text || !DOUYIN_RESOLVER_REQUEST_HEADER_NAMES.has(name.toLowerCase())) {
+      continue;
+    }
+    result[name] = text;
+  }
+  return result;
+}
+
 function metadataObject(request = {}) {
   return isObject(request.metadata) ? request.metadata : {};
 }
@@ -52,7 +86,7 @@ function signedApiEvidenceFrom(request = {}) {
   } catch {
     // Non-URL fixture inputs simply have no query signature evidence.
   }
-  const fetchHeaders = isObject(request.fetchHeaders) ? Object.keys(request.fetchHeaders) : [];
+  const fetchHeaders = Object.keys(normalizeDouyinResolverRequestHeaders(request.fetchHeaders));
   const signatureParamsPresent = Object.keys(urlFlags).sort();
   const requiredSignatureParams = ['a_bogus', 'msToken'];
   const missingSignatureParams = apiUrl
@@ -95,14 +129,9 @@ function signedApiEvidenceFrom(request = {}) {
 }
 
 function sessionEvidenceFrom(sessionLease = null) {
-  const headerNames = Object.keys(sessionLease?.headers ?? {}).sort();
+  const headerNames = Object.keys(normalizeSessionLeaseConsumerHeaders(sessionLease)).sort();
   return {
-    leaseStatus: sessionLease?.status,
-    authStatus: sessionLease?.mode,
-    userDataDirPresent: Boolean(sessionLease?.userDataDir) || undefined,
-    profilePathPresent: Boolean(sessionLease?.browserProfileRoot) || undefined,
     headerNames,
-    cookieEvidence: Array.isArray(sessionLease?.cookies) && sessionLease.cookies.length > 0 || undefined,
   };
 }
 
@@ -296,7 +325,7 @@ function coverUrl(entry = {}) {
   );
 }
 
-function seedFromDouyinEntry(entry = {}, index = 0, overrides = {}) {
+export function createDouyinMediaResourceSeed(entry = {}, index = 0, overrides = {}) {
   if (!isObject(entry)) {
     return null;
   }
@@ -341,11 +370,13 @@ function seedFromDouyinEntry(entry = {}, index = 0, overrides = {}) {
     title,
     sourceUrl,
     referer: firstText(entry.referer, sourceUrl),
-    headers: isObject(entry.headers)
-      ? entry.headers
-      : isObject(entry.downloadHeaders)
-        ? entry.downloadHeaders
-        : {},
+    headers: normalizeDownloadResourceConsumerHeaders(
+      isObject(entry.headers)
+        ? entry.headers
+        : isObject(entry.downloadHeaders)
+          ? entry.downloadHeaders
+          : {},
+    ),
     expectedBytes: entry.expectedBytes ?? entry.size ?? format.size,
     groupId: firstText(entry.groupId, videoId, title),
     metadata: {
@@ -407,7 +438,7 @@ function dedupeSeeds(seeds = []) {
 
 function seedsFromEntries(entries = [], overrides = {}) {
   return dedupeSeeds(entries.flatMap((entry, index) => [
-    seedFromDouyinEntry(entry, index, overrides),
+    createDouyinMediaResourceSeed(entry, index, overrides),
     coverSeedFromDouyinEntry(entry, index, overrides),
   ].filter(Boolean)));
 }
@@ -559,7 +590,7 @@ async function fetchedPayloadEntries(request = {}, context = {}) {
   }
   const response = await fetchImpl(url, {
     method: 'GET',
-    headers: isObject(request.fetchHeaders) ? request.fetchHeaders : undefined,
+    headers: normalizeDouyinResolverRequestHeaders(request.fetchHeaders),
   });
   const payload = await responsePayload(response);
   if (isObject(payload) && payload.fixtureHtml) {
@@ -618,21 +649,124 @@ function evidenceInput(request = {}, sessionLease = null, context = {}) {
   };
 }
 
+function classifyMediaResolverError(error) {
+  const text = normalizeText(error?.code || error?.message || error || '');
+  if (/concurrent-profile-use/iu.test(text)) {
+    return 'concurrent-profile-use';
+  }
+  if (/CDP timeout|Runtime\.evaluate|Target closed|Session closed|Execution context was destroyed|Browser exited before DevTools became ready/iu.test(text)) {
+    return 'browser-runtime-timeout';
+  }
+  if (/unauthenticated|login|session/iu.test(text)) {
+    return 'session-evidence-unavailable';
+  }
+  return 'media-resolver-failed';
+}
+
+function sanitizedResolverPhase(phase = {}) {
+  if (!isObject(phase)) {
+    return null;
+  }
+  const name = firstText(phase.phase, phase.name);
+  const status = firstText(phase.status);
+  const reason = firstText(phase.reason, phase.error);
+  if (!name) {
+    return null;
+  }
+  return {
+    phase: name,
+    status: status || 'unknown',
+    reason: reason || undefined,
+  };
+}
+
+function sanitizedStructuralDiagnostic(entry = {}) {
+  if (!isObject(entry)) {
+    return null;
+  }
+  const sourceType = firstText(entry.sourceType, entry.phase, entry.name);
+  if (!sourceType) {
+    return null;
+  }
+  const containerNames = toArray(entry.containerNames)
+    .map((value) => firstText(value))
+    .filter((value) => /^(?:play_addr|play_addr_h264|play_addr_h265|download_addr)$/u.test(value))
+    .slice(0, 8);
+  return {
+    sourceType,
+    payloadPresent: entry.payloadPresent === true,
+    awemeIdPresent: entry.awemeIdPresent === true,
+    videoPresent: entry.videoPresent === true,
+    containerNames,
+    containerCount: Math.max(0, Math.min(12, Number(entry.containerCount) || 0)),
+    urlCount: Math.max(0, Math.min(200, Number(entry.urlCount) || 0)),
+    bitRateCount: Math.max(0, Math.min(100, Number(entry.bitRateCount) || 0)),
+    bitRateWithUrls: Math.max(0, Math.min(100, Number(entry.bitRateWithUrls) || 0)),
+    formatCount: Math.max(0, Math.min(100, Number(entry.formatCount) || 0)),
+  };
+}
+
+function mediaResolverDiagnosticsFrom(result = {}) {
+  const phases = [
+    ...toArray(result?.diagnostics?.phases),
+    ...toArray(result?.phaseDiagnostics),
+    ...resultEntries(result).flatMap((entry) => toArray(entry?.phaseDiagnostics)),
+  ].map(sanitizedResolverPhase).filter(Boolean);
+  const structuralDiagnostics = [
+    ...toArray(result?.diagnostics?.structuralDiagnostics),
+    ...toArray(result?.structuralDiagnostics),
+    ...resultEntries(result).flatMap((entry) => toArray(entry?.structuralDiagnostics)),
+  ].map(sanitizedStructuralDiagnostic).filter(Boolean);
+  if (phases.length === 0 && structuralDiagnostics.length === 0) {
+    return null;
+  }
+  return {
+    contractVersion: 'douyin-media-resolver-diagnostics-v1',
+    phases: phases.slice(0, 12),
+    structuralDiagnostics: structuralDiagnostics.slice(0, 8),
+  };
+}
+
 async function callMediaBatchResolver(context, items, request, plan, sessionLease) {
   const resolver = callableFromContext(context, 'resolveDouyinMediaBatch');
   if (!resolver || items.length === 0) {
     return [];
   }
-  const result = await resolver(items, {
-    contractVersion: 'douyin-native-resolver-deps-v1',
-    intent: 'resolve-media-batch',
-    sourceType: 'media-batch',
-    request,
-    plan,
-    sessionLease,
-    allowNetworkResolve: context.allowNetworkResolve === true,
-    evidenceInput: evidenceInput(request, sessionLease, context),
-  });
+  let result = null;
+  try {
+    result = await resolver(items, {
+      contractVersion: 'douyin-native-resolver-deps-v1',
+      intent: 'resolve-media-batch',
+      sourceType: 'media-batch',
+      request,
+      plan,
+      sessionLease,
+      allowNetworkResolve: context.allowNetworkResolve === true,
+      profilePath: request.profilePath,
+      browserPath: request.browserPath,
+      browserProfileRoot: request.browserProfileRoot,
+      userDataDir: request.userDataDir,
+      headless: request.headless,
+      reuseLoginState: request.reuseLoginState,
+      autoLogin: request.autoLogin === true,
+      timeoutMs: request.timeoutMs ?? request.timeout,
+      evidenceInput: evidenceInput(request, sessionLease, context),
+    });
+  } catch (error) {
+    context.douyinMediaResolverError = {
+      reason: classifyMediaResolverError(error),
+    };
+    context.douyinMediaResolverDiagnostics = {
+      contractVersion: 'douyin-media-resolver-diagnostics-v1',
+      phases: [{
+        phase: 'browser-runtime',
+        status: 'unresolved',
+        reason: context.douyinMediaResolverError.reason,
+      }],
+    };
+    return [];
+  }
+  context.douyinMediaResolverDiagnostics = mediaResolverDiagnosticsFrom(result);
   return resultEntries(result);
 }
 
@@ -848,6 +982,25 @@ export async function resolveResources(plan, sessionLease = null, context = {}) 
   }
   const seededRequest = await requestWithInjectedSeeds(context.request ?? {}, plan, sessionLease, context);
   if (!seededRequest) {
+    const request = context.request ?? {};
+    const ordinaryTargets = ordinaryVideoTargets(request, plan);
+    if (ordinaryTargets.length > 0 && context.allowNetworkResolve === true) {
+      const resolverAvailable = Boolean(callableFromContext(context, 'resolveDouyinMediaBatch'));
+      return createNativeResolutionMiss(siteKey, plan, {
+        method: nativeSeedResolverOptions.method,
+        reason: resolverAvailable ? 'douyin-native-media-unresolved' : 'douyin-native-resolver-unavailable',
+        expectedCount: ordinaryTargets.length,
+        resolution: {
+          sourceType: 'ordinary-video',
+          attemptedVideos: ordinaryTargets.length,
+          resolverAvailable,
+          resolverError: context.douyinMediaResolverError,
+          phases: toArray(context.douyinMediaResolverDiagnostics?.phases),
+          structuralDiagnostics: toArray(context.douyinMediaResolverDiagnostics?.structuralDiagnostics),
+          evidence: evidenceInput(request, sessionLease, context),
+        },
+      });
+    }
     return null;
   }
   const seededResolved = resolveNativeResourceSeeds(siteKey, plan, sessionLease, {

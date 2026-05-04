@@ -41,6 +41,7 @@ test('douyin native resolver maps injected ordinary video media results to resou
       assert.equal(options.intent, 'resolve-media-batch');
       assert.equal(options.sourceType, 'media-batch');
       assert.equal(options.allowNetworkResolve, false);
+      assert.equal(options.autoLogin, false);
       assert.equal(options.evidenceInput.contractVersion, 'douyin-native-evidence-v1');
       assert.deepEqual(options.evidenceInput.session.headerNames, ['Accept-Language']);
       called.push(...items);
@@ -293,6 +294,93 @@ test('douyin ordinary inputs still fall back when no fixture or injected resolve
 
   assert.equal(resolved.resources.length, 0);
   assert.equal(resolved.completeness.reason, 'legacy-downloader-required');
+});
+
+test('douyin native resolver records browser resolver timeout as native miss evidence', async () => {
+  const { resolved } = await resolveDouyin({
+    site: 'douyin',
+    input: 'https://www.douyin.com/video/7321000000000000110',
+    dryRun: true,
+  }, {
+    allowNetworkResolve: true,
+    resolveDouyinMediaBatch: async () => {
+      throw new Error('CDP timeout for Runtime.evaluate');
+    },
+  });
+
+  assert.equal(resolved.resources.length, 0);
+  assert.equal(resolved.completeness.complete, false);
+  assert.equal(resolved.completeness.reason, 'douyin-native-media-unresolved');
+  assert.equal(resolved.metadata.resolution.resolverError.reason, 'browser-runtime-timeout');
+  assert.deepEqual(resolved.metadata.resolution.nativeMiss.phases[0], {
+    phase: 'browser-runtime',
+    status: 'unresolved',
+    reason: 'browser-runtime-timeout',
+  });
+  assert.equal(JSON.stringify(resolved).includes('Runtime.evaluate'), false);
+});
+
+test('douyin native resolver records sanitized phase diagnostics when media remains unresolved', async () => {
+  const { resolved } = await resolveDouyin({
+    site: 'douyin',
+    input: 'https://www.douyin.com/video/7321000000000000111',
+    dryRun: true,
+  }, {
+    allowNetworkResolve: true,
+    resolveDouyinMediaBatch: async () => ({
+      results: [{
+        requestedUrl: 'https://www.douyin.com/video/7321000000000000111',
+        videoId: '7321000000000000111',
+        resolved: false,
+        error: 'video-not-found-in-author-posts',
+        phaseDiagnostics: [
+          { phase: 'detail-api', status: 'unresolved', reason: 'media-url-missing', rawCookie: 'sid=secret' },
+          { phase: 'page-detail-payload', status: 'unresolved', reason: 'media-url-missing', token: 'secret-token' },
+          { phase: 'author-posts', status: 'unresolved', reason: 'video-not-found-in-author-posts' },
+        ],
+        structuralDiagnostics: [
+          {
+            sourceType: 'detail-api',
+            payloadPresent: true,
+            awemeIdPresent: true,
+            videoPresent: true,
+            containerNames: ['play_addr', 'raw_cookie'],
+            containerCount: 2,
+            urlCount: 3,
+            bitRateCount: 2,
+            bitRateWithUrls: 1,
+            formatCount: 0,
+            rawUrl: 'https://v.example.com/raw?msToken=secret-token',
+          },
+        ],
+      }],
+    }),
+  });
+
+  assert.equal(resolved.resources.length, 0);
+  assert.equal(resolved.completeness.reason, 'douyin-native-media-unresolved');
+  assert.deepEqual(resolved.metadata.resolution.nativeMiss.phases, [
+    { phase: 'detail-api', status: 'unresolved', reason: 'media-url-missing' },
+    { phase: 'page-detail-payload', status: 'unresolved', reason: 'media-url-missing' },
+    { phase: 'author-posts', status: 'unresolved', reason: 'video-not-found-in-author-posts' },
+  ]);
+  assert.deepEqual(resolved.metadata.resolution.structuralDiagnostics, [{
+    sourceType: 'detail-api',
+    payloadPresent: true,
+    awemeIdPresent: true,
+    videoPresent: true,
+    containerNames: ['play_addr'],
+    containerCount: 2,
+    urlCount: 3,
+    bitRateCount: 2,
+    bitRateWithUrls: 1,
+    formatCount: 0,
+  }]);
+  const serialized = JSON.stringify(resolved);
+  assert.equal(serialized.includes('sid=secret'), false);
+  assert.equal(serialized.includes('secret-token'), false);
+  assert.equal(serialized.includes('raw_cookie'), false);
+  assert.equal(serialized.includes('v.example.com'), false);
 });
 
 test('douyin native resolver records sanitized signed API and header evidence only', async () => {

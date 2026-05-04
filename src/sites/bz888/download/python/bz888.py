@@ -1,0 +1,416 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+
+import argparse
+import asyncio
+import hashlib
+import html
+import json
+import re
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+from urllib.parse import quote_plus, urljoin, urlparse
+
+import httpx
+from selectolax.parser import HTMLParser
+
+
+HOST = "www.bz888888888.com"
+BASE_URL = f"https://{HOST}/"
+DEFAULT_HEADERS = {
+    "user-agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
+    ),
+    "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+}
+
+
+@dataclass(frozen=True)
+class ChapterLink:
+    title: str
+    href: str
+
+
+def normalize_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def safe_filename(value: Any, fallback: str = "bz888-book") -> str:
+    text = normalize_text(value)
+    text = re.sub(r'[<>:"/\\|?*]+', "_", text).strip(" .")
+    return text or fallback
+
+
+def sha256_text(value: Any) -> str:
+    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+
+
+def is_bz888_url(value: str) -> bool:
+    parsed = urlparse(value)
+    return parsed.scheme in {"http", "https"} and parsed.netloc.lower() == HOST
+
+
+def ensure_bz888_url(value: str) -> str:
+    url = urljoin(BASE_URL, value)
+    if not is_bz888_url(url):
+        raise ValueError(f"unsupported-bz888-url: {value}")
+    return url
+
+
+def response_is_cloudflare_challenge(response: httpx.Response) -> bool:
+    headers = {key.lower(): value.lower() for key, value in response.headers.items()}
+    body = response.text[:4096].lower()
+    evidence = " ".join([
+        str(response.url).lower(),
+        headers.get("server", ""),
+        headers.get("cf-mitigated", ""),
+        headers.get("cf-ray", ""),
+        body,
+    ])
+    has_cloudflare = any(token in evidence for token in [
+        "cloudflare",
+        "cf-mitigated",
+        "cf-ray",
+        "/cdn-cgi/challenge-platform",
+        "challenge-platform",
+    ])
+    has_challenge = any(token in evidence for token in [
+        "challenge",
+        "captcha",
+        "just a moment",
+        "checking your browser",
+        "attention required",
+    ])
+    return (
+        headers.get("cf-mitigated") == "challenge"
+        or "/cdn-cgi/challenge-platform" in evidence
+        or (response.status_code in {403, 429, 503} and has_cloudflare and has_challenge)
+    )
+
+
+def decode_html(content: bytes, content_type: str = "") -> str:
+    header_match = re.search(r"charset=([a-zA-Z0-9_-]+)", content_type or "", re.IGNORECASE)
+    raw_sample = content[:4096].decode("ascii", errors="ignore")
+    meta_match = re.search(r"charset=['\"]?([a-zA-Z0-9_-]+)", raw_sample, re.IGNORECASE)
+    candidates = [
+        header_match.group(1) if header_match else "",
+        meta_match.group(1) if meta_match else "",
+        "gb18030",
+        "gbk",
+        "utf-8",
+    ]
+    seen: set[str] = set()
+    for encoding in candidates:
+        normalized = encoding.lower().strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        try:
+            return content.decode(normalized)
+        except UnicodeDecodeError:
+            continue
+        except LookupError:
+            continue
+    return content.decode("utf-8", errors="replace")
+
+
+async def fetch_public_html(client: httpx.AsyncClient, url: str) -> tuple[str, str]:
+    final_url = ensure_bz888_url(url)
+    response = await client.get(final_url)
+    if response_is_cloudflare_challenge(response):
+        raise RuntimeError(f"blocked-by-cloudflare-challenge: HTTP {response.status_code} at {final_url}")
+    response.raise_for_status()
+    html_text = decode_html(response.content, response.headers.get("content-type", ""))
+    return html_text, str(response.url)
+
+
+def read_fixture_html(fixture_dir: Path, url: str) -> tuple[str, str]:
+    parsed = urlparse(ensure_bz888_url(url))
+    path = parsed.path.strip("/") or "index"
+    if path.endswith("/"):
+        path = f"{path.rstrip('/')}/index"
+    fixture_name = re.sub(r"[^a-zA-Z0-9._-]+", "_", path)
+    candidates = [fixture_dir / fixture_name] if fixture_name.endswith(".html") else []
+    candidates.extend([
+        fixture_dir / f"{fixture_name}.html",
+        fixture_dir / f"{sha256_text(url)[:16]}.html",
+    ])
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.read_text(encoding="utf-8-sig"), url
+    raise FileNotFoundError(f"fixture-not-found: {url}")
+
+
+async def load_html(client: httpx.AsyncClient | None, url: str, fixture_dir: Path | None = None) -> tuple[str, str]:
+    if fixture_dir:
+        return read_fixture_html(fixture_dir, url)
+    if client is None:
+        raise RuntimeError("internal-error: missing http client")
+    return await fetch_public_html(client, url)
+
+
+def parse_book_title(document: HTMLParser, fallback: str) -> str:
+    for selector in ["h1", ".book-title", ".title", "title"]:
+        node = document.css_first(selector)
+        if not node:
+            continue
+        text = normalize_text(node.text(separator=" ", strip=True))
+        if text:
+            return re.sub(r"(最新章节|章节目录|_.*$|-.*$)", "", text).strip() or text
+    return fallback
+
+
+def parse_directory_links(html_text: str, page_url: str, book_path_prefix: str) -> list[ChapterLink]:
+    document = HTMLParser(html_text)
+    links: list[ChapterLink] = []
+    seen: set[str] = set()
+    pattern = re.compile(rf"^{re.escape(book_path_prefix)}/\d+\.html$", re.IGNORECASE)
+    for node in document.css("a[href]"):
+        href = ensure_bz888_url(urljoin(page_url, node.attributes.get("href", "")))
+        path = urlparse(href).path.rstrip("/")
+        if not pattern.match(path):
+            continue
+        title = normalize_text(node.text(separator=" ", strip=True))
+        if not title:
+            title = Path(path).stem
+        if href in seen:
+            continue
+        seen.add(href)
+        links.append(ChapterLink(title=title, href=href))
+    return links
+
+
+def chapter_sort_key(chapter: ChapterLink) -> tuple[int, str]:
+    match = re.search(r"/(\d+)\.html$", urlparse(chapter.href).path)
+    return (int(match.group(1)) if match else 0, chapter.title)
+
+
+async def collect_directory(
+    client: httpx.AsyncClient | None,
+    book_url: str,
+    *,
+    fixture_dir: Path | None = None,
+    max_pages: int = 8,
+) -> tuple[str, list[ChapterLink]]:
+    detail_url = ensure_bz888_url(book_url).rstrip("/") + "/"
+    parsed = urlparse(detail_url)
+    book_path_prefix = parsed.path.rstrip("/")
+    if not re.match(r"^/\d+/\d+$", book_path_prefix):
+        raise ValueError(f"unsupported-bz888-book-url: {book_url}")
+
+    first_html, first_final_url = await load_html(client, detail_url, fixture_dir)
+    title = parse_book_title(HTMLParser(first_html), fallback=book_path_prefix.rsplit("/", 1)[-1])
+    collected: list[ChapterLink] = []
+    seen: set[str] = set()
+
+    for page_index in range(1, max_pages + 1):
+        if page_index == 1:
+            page_html = first_html
+            page_url = first_final_url
+        else:
+            page_url = f"{detail_url.rstrip('/')}_{page_index}/"
+            try:
+                page_html, page_url = await load_html(client, page_url, fixture_dir)
+            except FileNotFoundError:
+                break
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    break
+                raise
+        page_links = parse_directory_links(page_html, page_url, book_path_prefix)
+        new_links = [item for item in page_links if item.href not in seen]
+        for item in new_links:
+            seen.add(item.href)
+            collected.append(item)
+        if page_index > 1 and not new_links:
+            break
+
+    collected.sort(key=chapter_sort_key)
+    if not collected:
+        raise RuntimeError(f"chapter-index-empty: {detail_url}")
+    return title, collected
+
+
+def extract_chapter_body(html_text: str, page_url: str) -> tuple[str, list[str]]:
+    document = HTMLParser(html_text)
+    title = ""
+    for selector in ["h1", ".chapter-title", ".title", "title"]:
+        node = document.css_first(selector)
+        if node:
+            title = normalize_text(node.text(separator=" ", strip=True))
+            if title:
+                break
+    for selector in ["#ChapterView .page-content", "#ChapterView .bd", "#content", ".content", ".chapter-content", "article"]:
+        node = document.css_first(selector)
+        if not node:
+            continue
+        raw_html = node.html or ""
+        raw_html = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", raw_html)
+        raw_html = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", raw_html)
+        raw_html = re.sub(r"(?i)<br\s*/?>", "\n", raw_html)
+        raw_html = re.sub(r"(?i)</p\s*>", "\n", raw_html)
+        raw_html = re.sub(r"(?i)</div\s*>", "\n", raw_html)
+        raw_html = re.sub(r"(?is)<[^>]+>", " ", raw_html)
+        text = html.unescape(raw_html)
+        paragraphs = [
+            normalize_text(line)
+            for line in re.split(r"[\r\n]+", text)
+            if normalize_text(line)
+        ]
+        if paragraphs:
+            return title or page_url, paragraphs
+    raise RuntimeError(f"chapter-content-empty: {page_url}")
+
+
+async def fetch_chapter(
+    client: httpx.AsyncClient | None,
+    chapter: ChapterLink,
+    *,
+    fixture_dir: Path | None = None,
+) -> dict[str, Any]:
+    html_text, final_url = await load_html(client, chapter.href, fixture_dir)
+    page_title, paragraphs = extract_chapter_body(html_text, final_url)
+    return {
+        "title": chapter.title or page_title,
+        "href": chapter.href,
+        "finalUrl": final_url,
+        "paragraphs": paragraphs,
+        "bodyTextLength": sum(len(item) for item in paragraphs),
+    }
+
+
+async def download_book(args: argparse.Namespace) -> dict[str, Any]:
+    if not args.book_url and not args.book_title:
+        raise SystemExit("Missing --book-url or --book-title")
+    fixture_dir = Path(args.fixture_dir).resolve() if args.fixture_dir else None
+    out_root = Path(args.out_dir or "book-content").resolve()
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    limits = httpx.Limits(max_connections=max(1, args.concurrency), max_keepalive_connections=max(1, args.concurrency))
+    timeout = httpx.Timeout(args.timeout, connect=args.timeout)
+    async with httpx.AsyncClient(
+        headers=DEFAULT_HEADERS,
+        follow_redirects=True,
+        timeout=timeout,
+        limits=limits,
+        trust_env=False,
+    ) as client:
+        active_client = None if fixture_dir else client
+        book_url = args.book_url
+        if not book_url:
+            book_url = await resolve_book_url_by_title(active_client, args.book_title, fixture_dir=fixture_dir)
+        title, chapters = await collect_directory(
+            active_client,
+            book_url,
+            fixture_dir=fixture_dir,
+            max_pages=args.max_pages,
+        )
+        if args.metadata_only:
+            return {
+                "host": HOST,
+                "mode": "metadata-only",
+                "bookTitle": title,
+                "bookUrl": ensure_bz888_url(book_url),
+                "chapterCount": len(chapters),
+                "firstChapter": chapters[0].href,
+                "lastChapter": chapters[-1].href,
+            }
+
+        semaphore = asyncio.Semaphore(max(1, args.concurrency))
+
+        async def guarded_fetch(chapter: ChapterLink) -> dict[str, Any]:
+            async with semaphore:
+                return await fetch_chapter(active_client, chapter, fixture_dir=fixture_dir)
+
+        chapter_results = await asyncio.gather(*(guarded_fetch(chapter) for chapter in chapters))
+
+    run_id = f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}_bz888_{sha256_text(book_url)[:10]}"
+    run_dir = out_root / run_id
+    downloads_dir = run_dir / "downloads"
+    downloads_dir.mkdir(parents=True, exist_ok=True)
+    txt_path = downloads_dir / f"{safe_filename(title)}.txt"
+    manifest_path = run_dir / "manifest.json"
+    chapters_path = run_dir / "chapters.json"
+
+    txt_lines = [title, f"Source: {ensure_bz888_url(book_url)}", ""]
+    for index, chapter in enumerate(chapter_results, start=1):
+        txt_lines.extend([
+            chapter["title"],
+            "",
+            *[f"  {paragraph}" for paragraph in chapter["paragraphs"]],
+            "",
+        ])
+        chapter["chapterIndex"] = index
+
+    txt_path.write_text("\n".join(txt_lines).rstrip() + "\n", encoding="utf-8")
+    chapters_path.write_text(json.dumps(chapter_results, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    manifest = {
+        "host": HOST,
+        "mode": "bz888-public-direct",
+        "bookTitle": title,
+        "bookUrl": ensure_bz888_url(book_url),
+        "chapterCount": len(chapter_results),
+        "downloadFile": str(txt_path),
+        "chaptersFile": str(chapters_path),
+        "blockedByChallenge": False,
+        "cookieMode": "none",
+    }
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return {**manifest, "manifestPath": str(manifest_path), "isComplete": True}
+
+
+async def resolve_book_url_by_title(
+    client: httpx.AsyncClient | None,
+    book_title: str,
+    *,
+    fixture_dir: Path | None,
+) -> str:
+    query_url = f"{BASE_URL}ss/?searchkey={quote_plus(book_title)}"
+    html_text, final_url = await load_html(client, query_url, fixture_dir)
+    document = HTMLParser(html_text)
+    for node in document.css("a[href]"):
+        href = ensure_bz888_url(urljoin(final_url, node.attributes.get("href", "")))
+        path = urlparse(href).path.rstrip("/")
+        if re.match(r"^/\d+/\d+$", path):
+            text = normalize_text(node.text(separator=" ", strip=True))
+            if not text or book_title in text or text in book_title:
+                return href
+    raise RuntimeError(f"book-not-found: {book_title}")
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "BZ888-only public HTML downloader. It does not read browser cookies, "
+            "does not use downloader SessionView, and stops on Cloudflare challenge."
+        )
+    )
+    parser.add_argument("--book-url")
+    parser.add_argument("--book-title")
+    parser.add_argument("--out-dir", default="book-content")
+    parser.add_argument("--fixture-dir")
+    parser.add_argument("--metadata-only", action="store_true")
+    parser.add_argument("--max-pages", type=int, default=8)
+    parser.add_argument("--concurrency", type=int, default=8)
+    parser.add_argument("--timeout", type=float, default=15.0)
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        result = asyncio.run(download_book(args))
+    except Exception as exc:  # noqa: BLE001
+        sys.stderr.write(f"{exc}\n")
+        return 1
+    sys.stdout.write(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

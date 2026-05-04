@@ -2,7 +2,14 @@
 
 import path from 'node:path';
 
-import { ensureDir } from '../../infra/io.mjs';
+import {
+  ensureDir,
+  writeTextFile,
+} from '../../infra/io.mjs';
+import {
+  prepareRedactedArtifactJson,
+  prepareRedactedArtifactJsonWithAudit,
+} from '../capability/security-guard.mjs';
 import { compactSlug } from '../../shared/normalize.mjs';
 import { timestampForRun } from './contracts.mjs';
 
@@ -32,7 +39,27 @@ export async function buildDownloadRunLayout(plan = {}, options = {}) {
     queuePath: path.join(runDir, 'queue.json'),
     downloadsJsonlPath: path.join(runDir, 'downloads.jsonl'),
     reportMarkdownPath: path.join(runDir, 'report.md'),
+    redactionAuditPath: path.join(runDir, 'redaction-audit.json'),
+    lifecycleEventPath: path.join(runDir, 'lifecycle-event.json'),
+    lifecycleEventRedactionAuditPath: path.join(runDir, 'lifecycle-event-redaction-audit.json'),
     planPath: path.join(runDir, 'plan.json'),
+    planRedactionAuditPath: path.join(runDir, 'plan-redaction-audit.json'),
     resolvedTaskPath: path.join(runDir, 'resolved-task.json'),
+    standardTaskListPath: path.join(runDir, 'standard-task-list.json'),
   };
+}
+
+export async function writeRedactedDownloadJsonArtifact(filePath, value, options = {}) {
+  const {
+    auditPath,
+    ...redactionOptions
+  } = options;
+  const prepared = auditPath
+    ? prepareRedactedArtifactJsonWithAudit(value, redactionOptions)
+    : prepareRedactedArtifactJson(value, redactionOptions);
+  const { json } = prepared;
+  await writeTextFile(filePath, json);
+  if (auditPath) {
+    await writeTextFile(auditPath, prepared.auditJson);
+  }
 }

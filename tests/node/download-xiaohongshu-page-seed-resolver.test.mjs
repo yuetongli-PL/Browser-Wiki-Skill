@@ -213,6 +213,7 @@ test('xiaohongshu fetched HTML stays behind network gate and supports injected f
   }
 
   let injectedFetchUrl = '';
+  let injectedFetchHeaders = {};
   const { resolved } = await resolveXiaohongshu({
     site: 'xiaohongshu',
     input: 'https://www.xiaohongshu.com/explore/662233445566778899aabbd1',
@@ -229,8 +230,9 @@ test('xiaohongshu fetched HTML stays behind network gate and supports injected f
       Referer: 'https://www.xiaohongshu.com/',
     },
   }, {
-    mockFetchImpl: async (url) => {
+    mockFetchImpl: async (url, options = {}) => {
       injectedFetchUrl = url;
+      injectedFetchHeaders = options.headers ?? {};
       return {
         ok: true,
         url,
@@ -249,12 +251,16 @@ test('xiaohongshu fetched HTML stays behind network gate and supports injected f
   });
 
   assert.equal(injectedFetchUrl, 'https://www.xiaohongshu.com/explore/662233445566778899aabbd1');
+  assert.equal(injectedFetchHeaders.Cookie, 'a1=secret-cookie');
+  assert.equal(injectedFetchHeaders.Referer, 'https://www.xiaohongshu.com/');
+  assert.equal(injectedFetchHeaders['x-s'], 'fresh-signature');
   assert.equal(resolved.resources.length, 2);
   assert.deepEqual(resolved.resources.map((resource) => resource.url), [
     'https://ci.xiaohongshu.example.test/fetched/image.jpg',
     'https://sns-video.example.test/fetched/video.mp4',
   ]);
   assert.equal(resolved.resources[0].metadata.sourceType, 'fetched-html');
+  assert.equal(Object.hasOwn(resolved.resources[0].headers, 'Cookie'), false);
   assert.equal(resolved.metadata.resolution.sourceType, 'fetched-html');
   assert.equal(resolved.metadata.resolution.fetchSource, 'injected-fetch');
   assert.equal(resolved.metadata.resolution.networkGateUsed, false);
@@ -266,6 +272,106 @@ test('xiaohongshu fetched HTML stays behind network gate and supports injected f
   assert.equal(resolved.metadata.resolution.headerFreshness.cookieEvidence, true);
   assert.equal(resolved.metadata.resolution.headerFreshness.freshnessClaimed, true);
   assert.equal(JSON.stringify(resolved.metadata.resolution.headerFreshness).includes('secret-cookie'), false);
+  assert.equal(JSON.stringify(resolved).includes('secret-cookie'), false);
+});
+
+test('xiaohongshu fetched HTML ignores risk page static assets', async () => {
+  const { resolved } = await resolveXiaohongshu({
+    site: 'xiaohongshu',
+    input: 'https://www.xiaohongshu.com/explore/662233445566778899aabbff',
+    dryRun: true,
+  }, null, {
+    mockFetchImpl: async () => ({
+      ok: true,
+      url: 'https://www.xiaohongshu.com/404?error_code=300031&verifyMsg=',
+      async text() {
+        return `
+          <html>
+            <body>
+              <p>Sorry, This Page Isn't Available Right Now.</p>
+              <img src="https://picasso-static.xiaohongshu.com/fe-platform/error.png">
+            </body>
+          </html>
+        `;
+      },
+    }),
+  });
+
+  assert.equal(resolved.resources.length, 0);
+  assert.equal(resolved.completeness.reason, 'legacy-downloader-required');
+});
+
+test('xiaohongshu native resolver consumes fresh evidence producer seeds without raw session material', async () => {
+  let producerCalled = false;
+  const { resolved } = await resolveXiaohongshu({
+    site: 'xiaohongshu',
+    input: 'https://www.xiaohongshu.com/explore/662233445566778899aabbfd',
+    dryRun: true,
+    resolveNetwork: true,
+  }, {
+    siteKey: 'xiaohongshu',
+    status: 'ready',
+    headers: {
+      Cookie: 'sid=synthetic-xhs-native-cookie',
+      Referer: 'https://www.xiaohongshu.com/',
+    },
+  }, {
+    allowNetworkResolve: true,
+    resolveXiaohongshuFreshEvidence: async (input, options) => {
+      producerCalled = true;
+      assert.equal(input, 'https://www.xiaohongshu.com/explore/662233445566778899aabbfd');
+      assert.equal(options.allowNetworkResolve, true);
+      return {
+        contractVersion: 'xiaohongshu-fresh-evidence-v1',
+        siteKey: 'xiaohongshu',
+        sourceType: 'fresh-page-evidence',
+        status: 'resource-seeds-provided',
+        resourceSeeds: [{
+          id: 'fresh-image-1',
+          url: 'https://ci.xiaohongshu.example.test/fresh/image.jpg',
+          mediaType: 'image',
+          title: 'Fresh Evidence Note',
+          noteId: '662233445566778899aabbfd',
+          sourceUrl: input,
+          referer: input,
+          headers: {
+            Cookie: 'sid=synthetic-xhs-native-cookie',
+            'User-Agent': 'Fresh Evidence UA',
+            Referer: input,
+          },
+          metadata: {
+            noteId: '662233445566778899aabbfd',
+            sourceType: 'fresh-page-evidence',
+          },
+        }],
+        headerFreshness: {
+          contractVersion: 'xiaohongshu-header-freshness-v1',
+          headerNames: ['Referer', 'User-Agent'],
+          requestHeaderNames: ['Referer', 'User-Agent'],
+          sessionHeaderNames: [],
+          resolverHeaderNames: [],
+          requiredHeaderNames: ['User-Agent'],
+          missingRequiredHeaders: [],
+          freshnessStatus: 'fresh-evidence-produced',
+          cookieEvidence: true,
+        },
+        resolution: {
+          sourceType: 'fresh-page-evidence',
+          resolvedNotes: 1,
+        },
+      };
+    },
+  });
+
+  assert.equal(producerCalled, true);
+  assert.equal(resolved.resources.length, 1);
+  assert.equal(resolved.resources[0].url, 'https://ci.xiaohongshu.example.test/fresh/image.jpg');
+  assert.equal(resolved.resources[0].headers['User-Agent'], 'Fresh Evidence UA');
+  assert.equal(Object.hasOwn(resolved.resources[0].headers, 'Cookie'), false);
+  assert.equal(resolved.metadata.resolution.sourceType, 'fresh-page-evidence');
+  assert.equal(resolved.metadata.resolution.headerFreshness.freshnessStatus, 'fresh-evidence-produced');
+  assert.equal(resolved.completeness.reason, 'xiaohongshu-resource-seeds-provided');
+  assert.equal(JSON.stringify(resolved).includes('synthetic-xhs-native-cookie'), false);
 });
 
 test('xiaohongshu native resolver maps search, author, and followed mock notes to resources', async () => {

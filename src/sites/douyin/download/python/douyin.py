@@ -1587,6 +1587,93 @@ def build_summary_view(manifest: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+SENSITIVE_PERSISTENCE_KEYS = {
+    "authorization",
+    "authtoken",
+    "browserexport",
+    "browserprofileroot",
+    "cookie",
+    "cookies",
+    "cookiesexport",
+    "cookiesfile",
+    "cookiespath",
+    "csrf",
+    "downloadheaders",
+    "headers",
+    "msToken".lower(),
+    "preferencespath",
+    "profilepath",
+    "sessdata",
+    "sessionid",
+    "token",
+    "userdatadir",
+}
+
+SENSITIVE_PERSISTENCE_VALUE_RE = re.compile(
+    r"(Authorization:\s*Bearer\s+[^\s`\"']+|"
+    r"Bearer\s+[^\s`\"']+|"
+    r"Cookie:\s*[^\n`\"']+|"
+    r"(?:access_token|refresh_token|csrf|msToken|sessionid|SESSDATA)=[^&\s`\"']+|"
+    r"(?:[A-Za-z]:[\\/]|/)[^\s`\"']*(?:profile|cookie|browser)[^\s`\"']*)",
+    re.IGNORECASE,
+)
+
+SENSITIVE_PERSISTENCE_TEXT_RE = re.compile(
+    r"\b(?:authorization|browser|cookie|cookies|csrf|profile|sessdata|sessionid|token)\b",
+    re.IGNORECASE,
+)
+
+
+def redact_sensitive_persistence_text(value: str) -> str:
+    redacted = SENSITIVE_PERSISTENCE_VALUE_RE.sub("[redacted]", value)
+    if SENSITIVE_PERSISTENCE_TEXT_RE.search(redacted):
+        return "[redacted]"
+    return redacted
+
+
+def sanitize_profile_health_for_persistence(profile_health: Any) -> dict[str, Any] | None:
+    if not isinstance(profile_health, dict):
+        return None
+    sanitized: dict[str, Any] = {}
+    for key in ("exists", "loginStateLikelyAvailable", "healthy"):
+        if key in profile_health:
+            sanitized[key] = bool(profile_health.get(key))
+    if "usableForCookies" in profile_health:
+        sanitized["loginStateReusable"] = bool(profile_health.get("usableForCookies"))
+    warnings = profile_health.get("warnings") or []
+    if isinstance(warnings, list) and warnings:
+        sanitized["warningCount"] = len(warnings)
+        sanitized["warnings"] = [
+            redact_sensitive_persistence_text(str(warning))
+            for warning in warnings
+        ]
+    return sanitized
+
+
+def sanitize_manifest_value_for_persistence(value: Any) -> Any:
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for key, nested_value in value.items():
+            key_text = str(key)
+            key_normalized = key_text.replace("_", "").replace("-", "").lower()
+            if key_text == "profileHealth":
+                sanitized[key_text] = sanitize_profile_health_for_persistence(nested_value)
+                continue
+            if key_normalized in SENSITIVE_PERSISTENCE_KEYS:
+                continue
+            sanitized[key_text] = sanitize_manifest_value_for_persistence(nested_value)
+        return sanitized
+    if isinstance(value, list):
+        return [sanitize_manifest_value_for_persistence(item) for item in value]
+    if isinstance(value, str):
+        return redact_sensitive_persistence_text(value)
+    return value
+
+
+def sanitize_legacy_manifest_for_persistence(manifest: dict[str, Any]) -> dict[str, Any]:
+    return sanitize_manifest_value_for_persistence(manifest)
+
+
 def resolve_tool_state(settings: dict[str, Any], downloader_config: dict[str, Any], run_dir: Path) -> dict[str, Any]:
     user_data_dir = resolve_persistent_user_data_dir(
         "https://www.douyin.com/",
@@ -1881,6 +1968,7 @@ def download_douyin(inputs: list[str], options: dict[str, Any] | None = None) ->
         "statistics": statistics,
         "warnings": tool_state["warnings"],
     }
+    manifest = sanitize_legacy_manifest_for_persistence(manifest)
     manifest["summaryView"] = build_summary_view(manifest)
     manifest["reportMarkdown"] = build_report_markdown(manifest)
     write_json(run_dir / "download-manifest.json", manifest)

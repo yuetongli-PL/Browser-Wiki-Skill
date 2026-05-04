@@ -19,7 +19,9 @@ No live commands are executed unless both --live and --execute are present.
 Options:
   --live                            Acknowledge live smoke planning. Required before dry-run or execute plans.
   --dry-run                         Emit the bounded command plan without running it. Default after --live.
+  --plan-json                       Emit a machine-readable no-write plan to stdout.
   --execute                         Run commands sequentially and write a run manifest.
+  --approval-id <id>                Record the operator approval id in plan/manifest metadata.
   --fail-fast                       Stop after the first non-zero command. Default: continue and summarize all cases.
   --case <id>                       Run one matrix case. Can be repeated.
   --site <x|instagram|all>          Filter site-specific cases. Required.
@@ -82,6 +84,8 @@ export function parseArgs(argv) {
   const options = {
     live: false,
     execute: false,
+    planJson: false,
+    approvalId: null,
     failFast: false,
     cases: [],
     site: null,
@@ -129,10 +133,28 @@ export function parseArgs(argv) {
         options.execute = false;
         markExplicit('dryRun');
         break;
+      case '--plan-json':
+        if (options.execute) {
+          throw new Error('--execute cannot be combined with --plan-json');
+        }
+        options.planJson = true;
+        markExplicit('planJson');
+        break;
       case '--execute':
+        if (options.planJson) {
+          throw new Error('--execute cannot be combined with --plan-json');
+        }
         options.execute = true;
         markExplicit('execute');
         break;
+      case '--approval-id':
+      case '--live-approval-id': {
+        const { value, nextIndex } = readValue(argv, index, token);
+        options.approvalId = value;
+        markExplicit('approvalId');
+        index = nextIndex;
+        break;
+      }
       case '--fail-fast':
         options.failFast = true;
         break;
@@ -261,8 +283,29 @@ function knownCaseIds() {
   ];
 }
 
+function expandCaseDependencies(caseIds = []) {
+  const expanded = [];
+  const seen = new Set();
+  const add = (id) => {
+    if (!seen.has(id)) {
+      seen.add(id);
+      expanded.push(id);
+    }
+  };
+  for (const id of caseIds) {
+    if (id === 'x-auth-doctor') {
+      add('x-session-health');
+    }
+    if (id === 'instagram-auth-doctor') {
+      add('instagram-session-health');
+    }
+    add(id);
+  }
+  return expanded;
+}
+
 function selectedCaseIdsFromOptions(options) {
-  if (options.cases.length > 0) return [...options.cases];
+  if (options.cases.length > 0) return expandCaseDependencies(options.cases);
   return knownCaseIds().filter((id) => {
     const sites = selectedSitesFromOptions(options);
     return sites.some((site) => id === `${site}-kb-refresh` || id.startsWith(`${site}-`));
@@ -417,6 +460,8 @@ function kbRefreshArgs(site, options, runRoot) {
   ];
   if (options.execute) {
     args.unshift('--execute');
+  } else {
+    args.unshift('--plan-only');
   }
   addOptional(args, '--browser-path', options.browserPath);
   addOptional(args, '--browser-profile-root', options.browserProfileRoot);
@@ -607,19 +652,19 @@ export function buildMatrix(options, runId) {
   ];
 }
 
-function filterMatrix(matrix, options) {
+export function filterMatrix(matrix, options) {
   let selected = matrix;
   if (options.site !== 'all') {
     selected = selected.filter((entry) => entry.site === options.site);
   }
   if (options.cases.length > 0) {
-    const wanted = new Set(options.cases);
-    selected = selected.filter((entry) => wanted.has(entry.id));
     const known = new Set(matrix.map((entry) => entry.id));
-    const unknown = [...wanted].filter((id) => !known.has(id));
+    const unknown = [...new Set(options.cases)].filter((id) => !known.has(id));
     if (unknown.length > 0) {
       throw new Error(`Unknown --case id(s): ${unknown.join(', ')}`);
     }
+    const wanted = new Set(expandCaseDependencies(options.cases));
+    selected = selected.filter((entry) => wanted.has(entry.id));
   }
   return selected;
 }
@@ -634,6 +679,45 @@ function shellQuote(value) {
 
 function formatCommand(entry) {
   return [entry.command, ...entry.args].map(shellQuote).join(' ');
+}
+
+export function buildPlanJson(entries, options, runId) {
+  return {
+    runId,
+    mode: options.execute ? 'execute' : 'dry-run',
+    noWrite: !options.execute,
+    status: 'planned',
+    generatedAt: new Date().toISOString(),
+    repoRoot: REPO_ROOT,
+    runRoot: path.resolve(options.runRoot),
+    artifactRootPlannedOnly: !options.execute,
+    options: {
+      site: options.site,
+      cases: options.cases,
+      xAccount: normalizeHandle(options.xAccount),
+      igAccount: normalizeHandle(options.igAccount),
+      date: options.date,
+      maxItems: options.maxItems,
+      maxUsers: options.maxUsers,
+      maxMediaDownloads: options.maxMediaDownloads,
+      timeout: options.timeout,
+      caseTimeout: options.caseTimeout,
+      approvalId: options.approvalId,
+      headless: options.headless,
+      failFast: options.failFast,
+    },
+    commands: entries.map((entry) => ({
+      id: entry.id,
+      site: entry.site,
+      category: entry.category,
+      purpose: entry.purpose,
+      artifactType: entry.artifactType,
+      artifactRoot: entry.artifactRoot,
+      command: formatCommand(entry),
+      commandArray: [entry.command, ...entry.args],
+      writesArtifactsWhenExecuted: true,
+    })),
+  };
 }
 
 function printPlan(entries, options) {
@@ -994,6 +1078,33 @@ export function classifyDoctorReport(report) {
   return { verdict: 'unknown', reason: 'doctor-report-unclassified' };
 }
 
+export function classifyAuthDoctorReport(report) {
+  const authHealth = report?.authHealth ?? report?.auth ?? null;
+  const scenarios = Array.isArray(report?.scenarios) ? report.scenarios : [];
+  const authScenarios = scenarios.filter((scenario) => scenario?.authRequired === true);
+  const blockedAuthScenario = authScenarios.find((scenario) => (
+    normalizedStatus(scenario.status) === 'blocked'
+    || isBlockedReasonCode(scenario.reasonCode)
+  ));
+  if (authHealth?.available === false || blockedAuthScenario) {
+    return {
+      verdict: 'blocked',
+      reason: blockedAuthScenario?.reasonCode ?? 'auth-unavailable',
+    };
+  }
+  const failedAuthScenario = authScenarios.find((scenario) => isDoctorFailureStatus(scenario.status));
+  if (failedAuthScenario) {
+    return {
+      verdict: 'failed',
+      reason: failedAuthScenario.reasonCode ?? failedAuthScenario.id ?? 'auth-scenario-failed',
+    };
+  }
+  if (authScenarios.length > 0 && authScenarios.every((scenario) => isDoctorPassLikeStatus(scenario.status))) {
+    return { verdict: 'passed', reason: null };
+  }
+  return classifyDoctorReport(report);
+}
+
 async function summarizeSiteDoctorArtifacts(entry) {
   const latest = await locateLatestDoctorReport(entry.artifactRoot);
   if (!latest) {
@@ -1006,7 +1117,9 @@ async function summarizeSiteDoctorArtifacts(entry) {
     };
   }
   const report = await readJsonFile(latest.reportPath);
-  const classification = classifyDoctorReport(report);
+  const classification = String(entry?.id ?? '').endsWith('-auth-doctor')
+    ? classifyAuthDoctorReport(report)
+    : classifyDoctorReport(report);
   return {
     type: entry.artifactType,
     found: true,
@@ -1209,6 +1322,7 @@ async function executePlan(entries, options, runId) {
       riskBackoffMs: options.riskBackoffMs,
       riskRetries: options.riskRetries,
       apiRetries: options.apiRetries,
+      approvalId: options.approvalId,
       headless: options.headless,
       failFast: options.failFast,
     },
@@ -1273,6 +1387,10 @@ async function main(argv) {
   const selected = filterMatrix(matrix, options);
   if (selected.length === 0) {
     throw new Error('No commands selected.');
+  }
+  if (options.planJson) {
+    process.stdout.write(`${JSON.stringify(buildPlanJson(selected, options, runId), null, 2)}\n`);
+    return;
   }
   printPlan(selected, options);
   if (!options.execute) {

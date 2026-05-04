@@ -36,6 +36,7 @@ export const DEFAULT_BROWSER_PATHS = {
 };
 
 const DEVTOOLS_POLL_INTERVAL_MS = 100;
+export const DEFAULT_GRACEFUL_EXIT_TIMEOUT_MS = 15_000;
 
 export function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -281,7 +282,7 @@ export async function shutdownBrowser(
   {
     cleanupUserDataDirOnShutdown = true,
     gracefulClose = null,
-    gracefulExitTimeoutMs = 5_000,
+    gracefulExitTimeoutMs = DEFAULT_GRACEFUL_EXIT_TIMEOUT_MS,
     forceKillTimeoutMs = 2_000,
     waitForProfileFlushOnShutdown = !cleanupUserDataDirOnShutdown,
   } = {},

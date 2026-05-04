@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   aggregateRefreshStatus,
@@ -13,6 +15,30 @@ import {
   parseArgs,
   schedulePolicyForOptions,
 } from '../../scripts/social-kb-refresh.mjs';
+
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+const SCRIPT = path.join(REPO_ROOT, 'scripts', 'social-kb-refresh.mjs');
+
+function execNode(args) {
+  return new Promise((resolve, reject) => {
+    const child = execFile(process.execPath, [SCRIPT, ...args], {
+      cwd: REPO_ROOT,
+      windowsHide: true,
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+    child.on('error', reject);
+    child.on('close', (exitCode) => {
+      if (exitCode === 0) {
+        resolve({ stdout, stderr });
+        return;
+      }
+      reject(new Error(`node exited ${exitCode}\n${stderr}`));
+    });
+  });
+}
 
 function fakeEntry(rootDir, id, args) {
   const artifactRoot = path.join(rootDir, id);
@@ -144,6 +170,34 @@ test('social-kb-refresh dry-run manifest records artifact contract without execu
   assert.deepEqual(manifest.options.cases, ['instagram-challenge']);
   assert.equal(manifest.options.failFast, true);
   assert.equal(manifest.options.caseTimeout, '300000');
+});
+
+test('social-kb-refresh plan-only mode emits a no-write audit plan', async (t) => {
+  const rootDir = await mkdtemp(path.join(os.tmpdir(), 'bwk-social-kb-plan-only-'));
+  t.after(() => rm(rootDir, { recursive: true, force: true }));
+
+  const { stdout } = await execNode([
+    '--plan-json',
+    '--run-root',
+    rootDir,
+    '--case',
+    'x-login-wall',
+  ]);
+  const plan = JSON.parse(stdout);
+
+  assert.equal(plan.mode, 'dry-run');
+  assert.equal(plan.noWrite, true);
+  assert.equal(plan.manifestPath, null);
+  assert.equal(plan.commands.length, 1);
+  assert.equal(plan.commands[0].id, 'x-login-wall');
+  assert.deepEqual(await readdir(rootDir), []);
+});
+
+test('social-kb-refresh refuses execute with no-write plan mode', () => {
+  assert.throws(
+    () => parseArgs(['--execute', '--plan-only']),
+    /--execute cannot be combined/u,
+  );
 });
 
 test('social-kb-refresh continues after failures by default and aggregates final status', async (t) => {

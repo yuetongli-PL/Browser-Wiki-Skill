@@ -2,9 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 
-import { siteLogin } from '../../scripts/site-login.mjs';
+import {
+  siteLogin,
+  writeSiteLoginReportArtifacts,
+} from '../../scripts/site-login.mjs';
+import { REDACTION_PLACEHOLDER } from '../../src/sites/capability/security-guard.mjs';
+import { reasonCodeSummary } from '../../src/sites/capability/reason-codes.mjs';
 
 function createResolvedProfile(workspace) {
   return {
@@ -219,12 +224,198 @@ test('siteLogin writes identity-aware report fields for authenticated sessions',
     assert.equal(report.site.browserAttachedVia, 'existing-target');
     assert.equal(report.warnings.includes('compat warning'), true);
     assert.equal(report.reports.json.endsWith('site-login-report.json'), true);
+    assert.equal(report.reports.jsonRedactionAudit.endsWith('site-login-report.redaction-audit.json'), true);
+    assert.equal(report.reports.markdownRedactionAudit.endsWith('site-login-report.md.redaction-audit.json'), true);
+    const persistedReport = JSON.parse(await readFile(report.reports.json, 'utf8'));
+    const persistedMarkdown = await readFile(report.reports.markdown, 'utf8');
+    const persistedAudit = JSON.parse(await readFile(report.reports.jsonRedactionAudit, 'utf8'));
+    const rawUserDataDir = path.join(workspace, 'profiles', 'bilibili.com');
+    assert.equal(persistedReport.site.profilePath, REDACTION_PLACEHOLDER);
+    assert.equal(persistedReport.site.userDataDir, REDACTION_PLACEHOLDER);
+    assert.equal(persistedReport.auth.status, 'authenticated');
+    assert.equal(persistedMarkdown.includes(rawUserDataDir), false);
+    assert.equal(persistedMarkdown.includes('profiles/www.bilibili.com.json'), false);
+    assert.equal(persistedAudit.redactedPaths.includes('site.profilePath'), true);
+    assert.equal(persistedAudit.redactedPaths.includes('site.userDataDir'), true);
     assert.equal(closed, true);
     assert.equal(openCalls, 2);
     assert.deepEqual(startupUrls, [
       'https://www.bilibili.com/',
       'https://www.bilibili.com/',
     ]);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('siteLogin report writer fails closed before persistent report writes when redaction cannot complete', async () => {
+  const recovery = reasonCodeSummary('redaction-failed');
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-login-redaction-fail-'));
+  const reportDir = path.join(workspace, 'report');
+  const circularReport = {
+    site: {
+      url: 'https://www.bilibili.com/',
+      host: 'www.bilibili.com',
+      profilePath: 'C:/Users/example/profiles/www.bilibili.com.json',
+      userDataDir: 'C:/Users/example/profiles/bilibili.com',
+      loginUrl: 'https://passport.bilibili.com/login?access_token=synthetic-site-login-token',
+    },
+    auth: {
+      status: 'authenticated',
+      credentialsSource: 'Bearer synthetic-site-login-auth',
+      autoLogin: true,
+      waitedForManualLogin: false,
+      loginStateDetected: true,
+      identityConfirmed: true,
+      persistenceVerified: true,
+      reopenVerificationPassed: true,
+      challengeRequired: false,
+      networkIdentityFingerprint: {
+        fingerprint: 'synthetic-site-login-fingerprint',
+      },
+    },
+    warnings: [],
+    reports: {},
+  };
+  circularReport.self = circularReport;
+
+  try {
+    await assert.rejects(
+      () => writeSiteLoginReportArtifacts(circularReport, {
+        reportDir,
+        jsonPath: path.join(reportDir, 'site-login-report.json'),
+        jsonAuditPath: path.join(reportDir, 'site-login-report.redaction-audit.json'),
+        markdownPath: path.join(reportDir, 'site-login-report.md'),
+        markdownAuditPath: path.join(reportDir, 'site-login-report.md.redaction-audit.json'),
+      }),
+      (error) => {
+        assert.equal(error.name, 'SiteLoginReportRedactionFailure');
+        assert.equal(error.reasonCode, 'redaction-failed');
+        assert.equal(error.retryable, recovery.retryable);
+        assert.equal(error.cooldownNeeded, recovery.cooldownNeeded);
+        assert.equal(error.isolationNeeded, recovery.isolationNeeded);
+        assert.equal(error.manualRecoveryNeeded, recovery.manualRecoveryNeeded);
+        assert.equal(error.degradable, recovery.degradable);
+        assert.equal(error.artifactWriteAllowed, recovery.artifactWriteAllowed);
+        assert.equal(error.catalogAction, recovery.catalogAction);
+        assert.equal(JSON.stringify(error).includes('synthetic-site-login'), false);
+        return true;
+      },
+    );
+    await assert.rejects(
+      () => readdir(reportDir),
+      /ENOENT/u,
+    );
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('siteLogin report writer preserves existing artifacts when redaction fails closed', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-login-redaction-preserve-'));
+  const reportDir = path.join(workspace, 'report');
+  const paths = {
+    jsonPath: path.join(reportDir, 'site-login-report.json'),
+    jsonAuditPath: path.join(reportDir, 'site-login-report.redaction-audit.json'),
+    markdownPath: path.join(reportDir, 'site-login-report.md'),
+    markdownAuditPath: path.join(reportDir, 'site-login-report.md.redaction-audit.json'),
+  };
+  const sentinelFiles = [
+    [paths.jsonPath, '{"status":"before"}\n'],
+    [paths.jsonAuditPath, '{"audit":"before"}\n'],
+    [paths.markdownPath, '# before\n'],
+    [paths.markdownAuditPath, '{"markdownAudit":"before"}\n'],
+  ];
+  const circularReport = {
+    site: {
+      url: 'https://www.bilibili.com/',
+      profilePath: 'C:/Users/example/profiles/www.bilibili.com.json',
+      loginUrl: 'https://passport.bilibili.com/login?access_token=synthetic-site-login-token',
+    },
+    auth: {
+      status: 'authenticated',
+      credentialsSource: 'Bearer synthetic-site-login-auth',
+    },
+    warnings: [],
+    reports: {},
+  };
+  circularReport.self = circularReport;
+
+  try {
+    await mkdir(reportDir, { recursive: true });
+    await Promise.all(sentinelFiles.map(([filePath, content]) => writeFile(filePath, content)));
+
+    await assert.rejects(
+      () => writeSiteLoginReportArtifacts(circularReport, {
+        reportDir,
+        ...paths,
+      }),
+      (error) => {
+        assert.equal(error.name, 'SiteLoginReportRedactionFailure');
+        assert.equal(error.reasonCode, 'redaction-failed');
+        assert.equal(error.artifactWriteAllowed, false);
+        assert.equal(JSON.stringify(error).includes('synthetic-site-login'), false);
+        return true;
+      },
+    );
+
+    for (const [filePath, content] of sentinelFiles) {
+      assert.equal(await readFile(filePath, 'utf8'), content);
+    }
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('siteLogin report writer redacts session identity from persisted artifacts', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-login-session-identity-redaction-'));
+  const reportDir = path.join(workspace, 'report');
+  const rawLeaseId = 'lease-site-login-session-identity';
+  const rawFingerprint = 'fingerprint-site-login-session-identity';
+  const report = {
+    site: {
+      url: 'https://www.bilibili.com/',
+      host: 'www.bilibili.com',
+      profilePath: 'C:/Users/example/profiles/www.bilibili.com.json',
+      userDataDir: 'C:/Users/example/profiles/bilibili.com',
+      sessionLeaseId: rawLeaseId,
+    },
+    auth: {
+      status: 'authenticated',
+      autoLogin: true,
+      waitedForManualLogin: false,
+      loginStateDetected: true,
+      identityConfirmed: true,
+      persistenceVerified: true,
+      reopenVerificationPassed: true,
+      challengeRequired: false,
+      networkIdentityFingerprint: {
+        fingerprint: rawFingerprint,
+      },
+    },
+    warnings: [],
+    reports: {},
+  };
+
+  try {
+    await writeSiteLoginReportArtifacts(report, {
+      reportDir,
+      jsonPath: path.join(reportDir, 'site-login-report.json'),
+      jsonAuditPath: path.join(reportDir, 'site-login-report.redaction-audit.json'),
+      markdownPath: path.join(reportDir, 'site-login-report.md'),
+      markdownAuditPath: path.join(reportDir, 'site-login-report.md.redaction-audit.json'),
+    });
+
+    const persistedReport = JSON.parse(await readFile(path.join(reportDir, 'site-login-report.json'), 'utf8'));
+    const persistedMarkdown = await readFile(path.join(reportDir, 'site-login-report.md'), 'utf8');
+    const persistedAudit = JSON.parse(await readFile(path.join(reportDir, 'site-login-report.redaction-audit.json'), 'utf8'));
+
+    assert.equal(persistedReport.site.sessionLeaseId, REDACTION_PLACEHOLDER);
+    assert.equal(persistedReport.auth.networkIdentityFingerprint, REDACTION_PLACEHOLDER);
+    assert.equal(persistedMarkdown.includes(rawLeaseId), false);
+    assert.equal(persistedMarkdown.includes(rawFingerprint), false);
+    assert.equal(persistedAudit.redactedPaths.includes('site.sessionLeaseId'), true);
+    assert.equal(persistedAudit.redactedPaths.includes('auth.networkIdentityFingerprint'), true);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

@@ -29,6 +29,7 @@ test('download site argv builders live in per-site module files', async () => {
     'douyin.mjs',
     'xiaohongshu.mjs',
     '22biqu.mjs',
+    'bz888.mjs',
     'social.mjs',
   ]) {
     await access(path.join(moduleDir, fileName));
@@ -52,9 +53,9 @@ test('download site argv builders live in per-site module files', async () => {
 test('download site modules expose all configured legacy download sites', () => {
   assert.deepEqual(
     listDownloadSiteModules().map((module) => module.siteKey).sort(),
-    ['22biqu', 'bilibili', 'douyin', 'instagram', 'x', 'xiaohongshu'],
+    ['22biqu', 'bilibili', 'bz888', 'douyin', 'instagram', 'x', 'xiaohongshu'],
   );
-  for (const siteKey of ['bilibili', 'douyin', 'xiaohongshu', '22biqu', 'x', 'instagram']) {
+  for (const siteKey of ['bilibili', 'douyin', 'xiaohongshu', '22biqu', 'bz888', 'x', 'instagram']) {
     assert.equal(getDownloadSiteModule(siteKey)?.siteKey, siteKey);
   }
 });
@@ -187,7 +188,7 @@ for (const fixture of [
             resolvedMediaUrl: 'https://v3-web.example.test/video/play.mp4',
             resolvedTitle: 'Douyin Native Clip',
             requestedUrl: 'https://www.douyin.com/video/1234567890123456789',
-            headers: { Cookie: 'session=1' },
+            headers: { Cookie: 'session=1', Accept: 'video/mp4' },
           },
         ],
       },
@@ -200,8 +201,9 @@ for (const fixture of [
       fileName: '0001-Douyin Native Clip.mp4',
       mediaType: 'video',
       referer: 'https://www.douyin.com/video/1234567890123456789',
-      headerName: 'Cookie',
-      headerValue: 'session=1',
+      headerName: 'Accept',
+      headerValue: 'video/mp4',
+      forbiddenHeaderName: 'Cookie',
     },
   },
   {
@@ -261,11 +263,142 @@ for (const fixture of [
     assert.equal(resolved.resources[0].referer, fixture.expected.referer);
     assert.equal(resolved.resources[0].headers['Accept-Language'], 'zh-CN');
     assert.equal(resolved.resources[0].headers[fixture.expected.headerName], fixture.expected.headerValue);
+    if (fixture.expected.forbiddenHeaderName) {
+      assert.equal(resolved.resources[0].headers[fixture.expected.forbiddenHeaderName], undefined);
+    }
     assert.equal(resolved.metadata.resolver.method, fixture.expected.method);
     assert.equal(resolved.completeness.reason, fixture.expected.reason);
     assert.equal(resolved.completeness.complete, true);
   });
 }
+
+test('bilibili native resolver consumes catalog handoff endpoints for UP-space evidence', async () => {
+  const definition = await resolveDownloadSiteDefinition({ site: 'bilibili' }, { workspaceRoot: REPO_ROOT });
+  const request = {
+    site: 'bilibili',
+    input: 'https://space.bilibili.com/123456',
+    maxItems: 1,
+    plannerHandoff: {
+      siteKey: 'bilibili',
+      taskType: 'video',
+      taskList: {
+        items: [
+          {
+            kind: 'request',
+            endpoint: 'https://api.bilibili.com/x/space/wbi/arc/search',
+            method: 'GET',
+          },
+          {
+            kind: 'request',
+            endpoint: 'https://api.bilibili.com/x/web-interface/view',
+            method: 'GET',
+          },
+          {
+            kind: 'request',
+            endpoint: 'https://api.bilibili.com/x/player/playurl',
+            method: 'GET',
+          },
+        ],
+      },
+    },
+    dryRun: true,
+  };
+  const calls = [];
+  const mockFetchImpl = async (url) => {
+    const parsed = new URL(url);
+    calls.push(parsed);
+    if (parsed.pathname === '/x/space/wbi/arc/search') {
+      return {
+        code: 0,
+        data: {
+          list: {
+            vlist: [
+              {
+                bvid: 'BV1catalog',
+                aid: 42,
+                title: 'Catalog Handoff Video',
+                arcurl: 'https://www.bilibili.com/video/BV1catalog/',
+              },
+            ],
+          },
+        },
+      };
+    }
+    if (parsed.pathname === '/x/web-interface/view') {
+      return {
+        code: 0,
+        data: {
+          bvid: 'BV1catalog',
+          aid: 42,
+          title: 'Catalog Handoff Video',
+          pages: [
+            {
+              cid: 987654,
+              page: 1,
+              part: 'P1',
+            },
+          ],
+        },
+      };
+    }
+    if (parsed.pathname === '/x/player/playurl') {
+      return {
+        code: 0,
+        data: {
+          dash: {
+            video: [
+              {
+                id: 80,
+                bandwidth: 2000,
+                baseUrl: 'https://upos.example.test/catalog-video.m4s',
+              },
+            ],
+            audio: [
+              {
+                id: 30280,
+                bandwidth: 128,
+                baseUrl: 'https://upos.example.test/catalog-audio.m4s',
+              },
+            ],
+          },
+        },
+      };
+    }
+    return { code: -404, data: {} };
+  };
+
+  const plan = await createDownloadPlan(request, {
+    workspaceRoot: REPO_ROOT,
+    definition,
+  });
+  const resolved = await resolveDownloadResources(plan, {
+    siteKey: 'bilibili',
+    status: 'ready',
+  }, {
+    request,
+    workspaceRoot: REPO_ROOT,
+    definition,
+    allowNetworkResolve: true,
+    mockFetchImpl,
+  });
+
+  assert.equal(resolved.siteKey, 'bilibili');
+  assert.equal(resolved.resources.length, 2);
+  assert.equal(resolved.resources[0].url, 'https://upos.example.test/catalog-video.m4s');
+  assert.equal(resolved.resources[1].url, 'https://upos.example.test/catalog-audio.m4s');
+  assert.equal(resolved.metadata.resolver.method, 'native-bilibili-resource-seeds');
+  assert.equal(resolved.completeness.reason, 'bilibili-resource-seeds-provided');
+  assert.equal(resolved.completeness.complete, true);
+  assert.deepEqual(calls.map((call) => call.pathname), [
+    '/x/space/wbi/arc/search',
+    '/x/web-interface/view',
+    '/x/player/playurl',
+  ]);
+  assert.equal(calls[0].searchParams.get('mid'), '123456');
+  assert.equal(calls[0].searchParams.get('ps'), '1');
+  assert.equal(calls[1].searchParams.get('bvid'), 'BV1catalog');
+  assert.equal(calls[2].searchParams.get('cid'), '987654');
+});
 
 for (const fixture of [
   { site: 'bilibili', input: 'BV1legacyFallback' },
@@ -390,6 +523,17 @@ test('download site modules build legacy argv per site', async () => {
   assert.equal(book.command, 'pypy3');
   assert.equal(book.args.includes('--book-url'), true);
   assert.equal(book.args.includes('https://www.22biqu.com/biqu1/123/'), true);
+
+  const bzPlan = await createDownloadPlan({
+    site: 'bz888',
+    input: 'https://www.bz888888888.com/book/123/456.html',
+    dryRun: false,
+  }, { workspaceRoot: REPO_ROOT, definition: await resolveDownloadSiteDefinition({ site: 'bz888' }, { workspaceRoot: REPO_ROOT }) });
+  const bz = buildLegacyDownloadCommand(bzPlan, null, { pythonPath: 'pypy3' }, { workspaceRoot: REPO_ROOT, layout });
+  assert.equal(bz.command, 'pypy3');
+  assert.equal(bz.args.includes('--book-url'), true);
+  assert.equal(bz.args.includes('https://www.bz888888888.com/book/123/456.html'), true);
+  assert.equal(bz.args.includes('download'), false);
 });
 
 test('social download module maps request fields to legacy action argv', async () => {
@@ -461,7 +605,7 @@ test('social download module maps request fields to legacy action argv', async (
 
 test('site registry points download planner and resolver at modules', async () => {
   const registry = await readJsonFile(path.join(REPO_ROOT, 'config', 'site-registry.json'));
-  for (const host of ['www.22biqu.com', 'www.bilibili.com', 'www.douyin.com', 'www.xiaohongshu.com', 'x.com', 'www.instagram.com']) {
+  for (const host of ['www.22biqu.com', 'www.bz888888888.com', 'www.bilibili.com', 'www.douyin.com', 'www.xiaohongshu.com', 'x.com', 'www.instagram.com']) {
     assert.equal(registry.sites[host].downloadPlanner, 'src/sites/downloads/modules.mjs');
     assert.equal(registry.sites[host].downloadResolver, 'src/sites/downloads/modules.mjs');
   }

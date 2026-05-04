@@ -31,9 +31,12 @@ const HELP = `Usage:
   node scripts/social-kb-refresh.mjs [--execute] [--fail-fast] [--case <id>] [--site x|instagram|all] [--surface <name>] [options]
 
 Defaults to dry-run plan mode. Dry-run writes a manifest with commands and expected artifacts, but does not touch live sites.
+Use --plan-only or --plan-json for no-write audit planning.
 
 Options:
   --execute                         Run selected site-doctor commands sequentially.
+  --plan-only                       Emit a no-write text plan without creating a manifest.
+  --plan-json                       Emit a no-write machine-readable plan to stdout.
   --fail-fast                       Stop after the first failed, blocked, or timed-out scenario. Default: continue.
   --case <id>                       Run one scenario refresh case. Can be repeated.
   --site <x|instagram|all>          Filter site-specific cases. Default: all.
@@ -105,6 +108,8 @@ function readValue(argv, index, flag) {
 export function parseArgs(argv) {
   const options = {
     execute: false,
+    planOnly: false,
+    planJson: false,
     failFast: false,
     cases: [],
     site: 'all',
@@ -137,6 +142,9 @@ export function parseArgs(argv) {
         options.help = true;
         break;
       case '--execute':
+        if (options.planOnly) {
+          throw new Error('--execute cannot be combined with --plan-only or --plan-json');
+        }
         options.execute = true;
         break;
       case '--fail-fast':
@@ -144,6 +152,21 @@ export function parseArgs(argv) {
         break;
       case '--dry-run':
         options.execute = false;
+        break;
+      case '--plan-only':
+        if (options.execute) {
+          throw new Error('--execute cannot be combined with --plan-only or --plan-json');
+        }
+        options.execute = false;
+        options.planOnly = true;
+        break;
+      case '--plan-json':
+        if (options.execute) {
+          throw new Error('--execute cannot be combined with --plan-only or --plan-json');
+        }
+        options.execute = false;
+        options.planOnly = true;
+        options.planJson = true;
         break;
       case '--watch':
         options.watch = true;
@@ -220,6 +243,9 @@ export function parseArgs(argv) {
   if (options.account) {
     options.xAccount = options.account;
     options.igAccount = options.account;
+  }
+  if (options.execute && options.planOnly) {
+    throw new Error('--execute cannot be combined with --plan-only or --plan-json');
   }
   if (!['x', 'instagram', 'all'].includes(String(options.site))) {
     throw new Error(`Invalid --site: ${options.site}`);
@@ -592,7 +618,11 @@ async function writeManifest(manifestPath, manifest) {
 function printPlan(entries, options, manifestPath) {
   const mode = options.execute ? 'execute' : 'dry-run';
   process.stdout.write(`social-kb-refresh ${mode} plan (${entries.length} command(s))\n`);
-  process.stdout.write(`Manifest: ${manifestPath}\n\n`);
+  if (options.planOnly) {
+    process.stdout.write('Manifest: no-write plan only\n\n');
+  } else {
+    process.stdout.write(`Manifest: ${manifestPath}\n\n`);
+  }
   const schedule = schedulePolicyForOptions(options);
   if (schedule.enabled) {
     process.stdout.write(`Schedule: ${schedule.mode}, interval=${schedule.intervalMinutes} minute(s), maxWatchIterations=${schedule.maxWatchIterations ?? 'unbounded'}\n\n`);
@@ -877,10 +907,17 @@ export async function main(argv) {
   const runDir = path.join(path.resolve(options.runRoot), runId);
   const manifestPath = path.join(runDir, 'manifest.json');
   const manifest = buildRunManifest(selected, options, runId, manifestPath);
-  await writeManifest(manifestPath, manifest);
+  if (options.planJson) {
+    process.stdout.write(`${JSON.stringify({ ...manifest, noWrite: true, manifestPath: null }, null, 2)}\n`);
+    return;
+  }
+  if (!options.planOnly) {
+    await writeManifest(manifestPath, manifest);
+  }
   printPlan(selected, options, manifestPath);
   if (!options.execute) {
-    process.stdout.write('Dry-run only. Re-run with --execute to run live commands; the manifest above is the planned artifact contract.\n');
+    const artifactNote = options.planOnly ? 'No manifest was written.' : 'The manifest above is the planned artifact contract.';
+    process.stdout.write(`Dry-run only. Re-run with --execute to run live commands; ${artifactNote}\n`);
     return;
   }
   if (options.watch) {

@@ -7,7 +7,14 @@ import { fileURLToPath } from 'node:url';
 
 import { openBrowserSession } from '../../infra/browser/session.mjs';
 import { resolveSiteBrowserSessionOptions, inspectLoginState } from '../../infra/auth/site-auth.mjs';
-import { ensureDir, readJsonFile, writeJsonFile } from '../../infra/io.mjs';
+import { ensureDir, readJsonFile, writeTextFile } from '../../infra/io.mjs';
+import {
+  REDACTION_PLACEHOLDER,
+  assertNoForbiddenPatterns,
+  prepareRedactedArtifactJsonWithAudit,
+  redactValue,
+} from '../../sites/capability/security-guard.mjs';
+import { reasonCodeSummary } from '../../sites/capability/reason-codes.mjs';
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(MODULE_DIR, '..', '..', '..');
@@ -37,13 +44,14 @@ function usage() {
   return `Usage:
   node scripts/social-auth-import.mjs --site x --cookie-file <cookies.json|cookies.txt> --execute
   node scripts/social-auth-import.mjs --site x --cookie-header-env X_COOKIE_HEADER --execute
-  node scripts/social-auth-import.mjs --site x --cookie-header "auth_token=...; ct0=..." --execute
+  node scripts/social-auth-import.mjs --site x --cookie-header "auth_token=...; ct0=..." --allow-argv-cookie-header --execute
 
 Options:
   --site x|instagram        Target site. Default: x.
   --cookie-file <path>      Cookie source file. Supports JSON, Netscape cookies.txt, raw Cookie header, or Set-Cookie lines.
-  --cookie-header <value>   Raw Cookie header. Prefer --cookie-header-env to avoid shell history.
+  --cookie-header <value>   Raw Cookie header. Blocked unless --allow-argv-cookie-header is also set.
   --cookie-header-env <var> Read a raw Cookie header from an environment variable.
+  --allow-argv-cookie-header Allow --cookie-header after explicit acknowledgement. Prefer --cookie-header-env.
   --domain <domain>         Default cookie domain for header-only cookies. Default comes from --site.
   --run-root <dir>          Output root. Default: runs/social-auth-import.
   --execute                 Actually import cookies. Without this, only writes a dry-run manifest.
@@ -52,6 +60,65 @@ Options:
   --user-data-dir <dir>     Override the persistent browser profile directory.
   --browser-path <path>     Override Chrome/Chromium executable.
   --browser-profile-root <dir> Override Browser-Wiki-Skill profile root.`;
+}
+
+export function socialAuthImportRedactionAuditPath(manifestPath) {
+  const resolved = path.resolve(manifestPath);
+  const ext = path.extname(resolved);
+  const base = ext ? resolved.slice(0, -ext.length) : resolved;
+  return `${base}.redaction-audit.json`;
+}
+
+function toSocialAuthImportRedactionFailure(error) {
+  const recovery = reasonCodeSummary('redaction-failed');
+  const failure = new Error('Social auth import manifest redaction failed');
+  failure.name = 'SocialAuthImportManifestRedactionFailure';
+  failure.code = 'redaction-failed';
+  failure.reasonCode = 'redaction-failed';
+  failure.retryable = recovery.retryable;
+  failure.cooldownNeeded = recovery.cooldownNeeded;
+  failure.isolationNeeded = recovery.isolationNeeded;
+  failure.manualRecoveryNeeded = recovery.manualRecoveryNeeded;
+  failure.degradable = recovery.degradable;
+  failure.artifactWriteAllowed = recovery.artifactWriteAllowed;
+  failure.catalogAction = recovery.catalogAction;
+  failure.causeSummary = {
+    name: error?.name ?? 'Error',
+    code: error?.code ?? null,
+  };
+  return failure;
+}
+
+export function prepareSocialAuthImportManifestArtifact(manifest) {
+  try {
+    const safeManifest = {
+      ...manifest,
+      userDataDir: manifest.userDataDir ? REDACTION_PLACEHOLDER : manifest.userDataDir,
+    };
+    return prepareRedactedArtifactJsonWithAudit(safeManifest);
+  } catch (error) {
+    throw toSocialAuthImportRedactionFailure(error);
+  }
+}
+
+export async function writeSocialAuthImportManifest(manifestPath, manifest) {
+  const resolvedManifestPath = path.resolve(manifestPath);
+  const redactionAudit = socialAuthImportRedactionAuditPath(resolvedManifestPath);
+  const prepared = prepareSocialAuthImportManifestArtifact({
+    ...manifest,
+    artifacts: {
+      ...(manifest.artifacts ?? {}),
+      redactionAudit,
+    },
+  });
+  await writeTextFile(redactionAudit, prepared.auditJson);
+  await writeTextFile(resolvedManifestPath, prepared.json);
+  return {
+    manifestPath: resolvedManifestPath,
+    redactionAudit,
+    value: prepared.value,
+    audit: prepared.auditValue,
+  };
 }
 
 export function parseArgs(argv = process.argv.slice(2)) {
@@ -68,6 +135,7 @@ export function parseArgs(argv = process.argv.slice(2)) {
     userDataDir: null,
     browserPath: null,
     browserProfileRoot: null,
+    allowArgvCookieHeader: false,
   };
 
   const readValue = (index) => {
@@ -103,6 +171,9 @@ export function parseArgs(argv = process.argv.slice(2)) {
         index = parsed.nextIndex;
         break;
       }
+      case '--allow-argv-cookie-header':
+        options.allowArgvCookieHeader = true;
+        break;
       case '--cookie-header-env': {
         const parsed = readValue(index);
         options.cookieHeaderEnv = parsed.value;
@@ -161,6 +232,11 @@ export function parseArgs(argv = process.argv.slice(2)) {
 
   if (!SITE_CONFIG[options.site]) {
     throw new Error(`Unsupported site: ${options.site}`);
+  }
+  if (options.cookieHeader && options.allowArgvCookieHeader !== true) {
+    throw new Error(
+      'Raw --cookie-header is blocked because argv can be persisted by shells/process listings; use --cookie-header-env or add --allow-argv-cookie-header for an explicit bounded import.',
+    );
   }
   if (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0) {
     throw new Error('--timeout must be a positive number');
@@ -436,7 +512,7 @@ export async function runImport(options = {}) {
   };
 
   if (!options.execute) {
-    await writeJsonFile(manifestPath, manifest);
+    await writeSocialAuthImportManifest(manifestPath, manifest);
     return manifest;
   }
 
@@ -502,9 +578,48 @@ export async function runImport(options = {}) {
       manifest.shutdown = await session.close();
     }
     manifest.finishedAt = new Date().toISOString();
-    await writeJsonFile(manifestPath, manifest);
+    await writeSocialAuthImportManifest(manifestPath, manifest);
   }
   return manifest;
+}
+
+function toSocialAuthImportCliSummaryRedactionFailure(error) {
+  const recovery = reasonCodeSummary('redaction-failed');
+  const failure = new Error('Social auth import CLI summary redaction failed');
+  failure.name = 'SocialAuthImportCliSummaryRedactionFailure';
+  failure.code = 'redaction-failed';
+  failure.reasonCode = 'redaction-failed';
+  failure.retryable = recovery.retryable;
+  failure.cooldownNeeded = recovery.cooldownNeeded;
+  failure.isolationNeeded = recovery.isolationNeeded;
+  failure.manualRecoveryNeeded = recovery.manualRecoveryNeeded;
+  failure.degradable = recovery.degradable;
+  failure.artifactWriteAllowed = recovery.artifactWriteAllowed;
+  failure.catalogAction = recovery.catalogAction;
+  failure.causeSummary = {
+    name: error?.name ?? 'Error',
+    code: error?.code ?? null,
+  };
+  return failure;
+}
+
+export function socialAuthImportCliSummary(manifest) {
+  try {
+    const summary = {
+      status: manifest.status,
+      mode: manifest.mode,
+      site: manifest.site,
+      cookieSummary: manifest.cookieSummary,
+      auth: manifest.auth,
+      manifestPath: manifest.manifestPath,
+      userDataDir: manifest.userDataDir ? REDACTION_PLACEHOLDER : manifest.userDataDir,
+    };
+    const redacted = redactValue(summary).value;
+    assertNoForbiddenPatterns(JSON.stringify(redacted));
+    return redacted;
+  } catch (error) {
+    throw toSocialAuthImportCliSummaryRedactionFailure(error);
+  }
 }
 
 export async function main(argv = process.argv.slice(2)) {
@@ -514,15 +629,7 @@ export async function main(argv = process.argv.slice(2)) {
     return 0;
   }
   const manifest = await runImport(options);
-  console.log(JSON.stringify({
-    status: manifest.status,
-    mode: manifest.mode,
-    site: manifest.site,
-    cookieSummary: manifest.cookieSummary,
-    auth: manifest.auth,
-    manifestPath: manifest.manifestPath,
-    userDataDir: manifest.userDataDir,
-  }, null, 2));
+  console.log(JSON.stringify(socialAuthImportCliSummary(manifest), null, 2));
   return manifest.status === 'failed' || manifest.status === 'imported-not-authenticated' ? 1 : 0;
 }
 

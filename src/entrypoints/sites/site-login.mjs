@@ -5,7 +5,7 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 import { initializeCliUtf8, writeJsonStdout } from '../../infra/cli.mjs';
-import { ensureDir, writeJsonFile, writeTextFile } from '../../infra/io.mjs';
+import { ensureDir, writeTextFile } from '../../infra/io.mjs';
 import { sanitizeHost } from '../../shared/normalize.mjs';
 import { openBrowserSession } from '../../infra/browser/session.mjs';
 import { inspectPersistentProfileHealth } from '../../infra/browser/profile-store.mjs';
@@ -25,9 +25,27 @@ import {
   releaseSessionLease,
 } from '../../infra/auth/site-session-governance.mjs';
 import { resolveProfilePathForUrl } from '../../sites/core/profiles.mjs';
+import {
+  REDACTION_PLACEHOLDER,
+  SECURITY_GUARD_SCHEMA_VERSION,
+  assertNoForbiddenPatterns,
+  prepareRedactedArtifactJson,
+  prepareRedactedArtifactJsonWithAudit,
+  redactValue,
+} from '../../sites/capability/security-guard.mjs';
+import { reasonCodeSummary } from '../../sites/capability/reason-codes.mjs';
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(MODULE_DIR, '..', '..', '..');
+
+const SITE_LOGIN_REPORT_PROFILE_KEYS = Object.freeze(new Set([
+  'profilePath',
+  'browserProfileRoot',
+  'userDataDir',
+  'networkIdentityFingerprint',
+  'sessionLeaseId',
+  'fingerprint',
+]));
 
 const DEFAULT_OPTIONS = {
   outDir: path.join(REPO_ROOT, 'runs', 'sites', 'site-login'),
@@ -188,6 +206,120 @@ function buildReportMarkdown(report) {
     ...(report.warnings.length > 0 ? report.warnings.map((warning) => `- ${warning}`) : ['- none']),
   ];
   return lines.join('\n');
+}
+
+function isPlainObject(value) {
+  return value !== null
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+function auditPath(pathParts) {
+  return pathParts.join('.');
+}
+
+function redactSiteLoginProfileRefs(value, pathParts = [], audit = {
+  schemaVersion: SECURITY_GUARD_SCHEMA_VERSION,
+  redactedPaths: [],
+  findings: [],
+}) {
+  if (Array.isArray(value)) {
+    return {
+      value: value.map((item, index) => redactSiteLoginProfileRefs(item, [...pathParts, String(index)], audit).value),
+      audit,
+    };
+  }
+  if (!isPlainObject(value)) {
+    return { value, audit };
+  }
+  const output = {};
+  for (const [key, child] of Object.entries(value)) {
+    const childPath = [...pathParts, key];
+    if (SITE_LOGIN_REPORT_PROFILE_KEYS.has(key)) {
+      output[key] = REDACTION_PLACEHOLDER;
+      audit.redactedPaths.push(auditPath(childPath));
+      continue;
+    }
+    output[key] = redactSiteLoginProfileRefs(child, childPath, audit).value;
+  }
+  return { value: output, audit };
+}
+
+function mergeRedactionAudits(...audits) {
+  const redactedPaths = [];
+  const findings = [];
+  for (const audit of audits) {
+    if (!audit || typeof audit !== 'object') {
+      continue;
+    }
+    redactedPaths.push(...(Array.isArray(audit.redactedPaths) ? audit.redactedPaths : []));
+    findings.push(...(Array.isArray(audit.findings) ? audit.findings : []));
+  }
+  return {
+    schemaVersion: SECURITY_GUARD_SCHEMA_VERSION,
+    redactedPaths: [...new Set(redactedPaths)],
+    findings,
+  };
+}
+
+function createSiteLoginReportRedactionFailure(error) {
+  const recovery = reasonCodeSummary('redaction-failed');
+  const causeSummary = redactValue({
+    name: error instanceof Error ? error.name : undefined,
+    code: error && typeof error === 'object' ? error.code : undefined,
+  }).value;
+  const failure = new Error('Redaction failed for site-login report; persistent report write blocked');
+  failure.name = 'SiteLoginReportRedactionFailure';
+  failure.code = 'redaction-failed';
+  failure.reasonCode = 'redaction-failed';
+  failure.retryable = recovery.retryable;
+  failure.cooldownNeeded = recovery.cooldownNeeded;
+  failure.isolationNeeded = recovery.isolationNeeded;
+  failure.manualRecoveryNeeded = recovery.manualRecoveryNeeded;
+  failure.degradable = recovery.degradable;
+  failure.artifactWriteAllowed = recovery.artifactWriteAllowed;
+  failure.catalogAction = recovery.catalogAction;
+  failure.causeSummary = causeSummary;
+  return failure;
+}
+
+export function prepareSiteLoginReportArtifacts(report) {
+  try {
+    const profileRedacted = redactSiteLoginProfileRefs(report);
+    const preparedJson = prepareRedactedArtifactJsonWithAudit(profileRedacted.value);
+    const markdown = buildReportMarkdown(preparedJson.value);
+    const redactedMarkdown = redactValue(String(markdown ?? ''));
+    const markdownText = String(redactedMarkdown.value ?? '');
+    assertNoForbiddenPatterns(markdownText);
+    const jsonAudit = mergeRedactionAudits(profileRedacted.audit, preparedJson.auditValue);
+    const markdownAudit = mergeRedactionAudits(profileRedacted.audit, redactedMarkdown.audit);
+    return {
+      json: preparedJson.json,
+      jsonAudit: prepareRedactedArtifactJson(jsonAudit).json,
+      markdown: markdownText,
+      markdownAudit: prepareRedactedArtifactJson(markdownAudit).json,
+      value: preparedJson.value,
+    };
+  } catch (error) {
+    throw createSiteLoginReportRedactionFailure(error);
+  }
+}
+
+export async function writeSiteLoginReportArtifacts(report, {
+  reportDir,
+  jsonPath,
+  jsonAuditPath,
+  markdownPath,
+  markdownAuditPath,
+}) {
+  const prepared = prepareSiteLoginReportArtifacts(report);
+  await ensureDir(reportDir);
+  await writeTextFile(jsonPath, prepared.json);
+  await writeTextFile(jsonAuditPath, prepared.jsonAudit);
+  await writeTextFile(markdownPath, prepared.markdown);
+  await writeTextFile(markdownAuditPath, prepared.markdownAudit);
+  return prepared.value;
 }
 
 function uniqueUrls(values = []) {
@@ -594,7 +726,9 @@ export async function siteLogin(inputUrl, options = {}, deps = {}) {
   const settings = mergeOptions(inputUrl, options);
   const reportDir = path.join(settings.outDir, `${formatTimestampForDir()}_${sanitizeHost(settings.host)}`);
   const reportJsonPath = path.join(reportDir, 'site-login-report.json');
+  const reportJsonAuditPath = path.join(reportDir, 'site-login-report.redaction-audit.json');
   const reportMarkdownPath = path.join(reportDir, 'site-login-report.md');
+  const reportMarkdownAuditPath = path.join(reportDir, 'site-login-report.md.redaction-audit.json');
   const runtime = {
     openBrowserSession,
     resolveSiteAuthProfile,
@@ -608,8 +742,6 @@ export async function siteLogin(inputUrl, options = {}, deps = {}) {
     releaseSessionLease,
     ...deps,
   };
-
-  await ensureDir(reportDir);
 
   const authProfile = await runtime.resolveSiteAuthProfile(inputUrl, {
     profilePath: settings.profilePath,
@@ -839,7 +971,9 @@ export async function siteLogin(inputUrl, options = {}, deps = {}) {
       warnings,
       reports: {
         json: reportJsonPath,
+        jsonRedactionAudit: reportJsonAuditPath,
         markdown: reportMarkdownPath,
+        markdownRedactionAudit: reportMarkdownAuditPath,
       },
     };
 
@@ -869,8 +1003,13 @@ export async function siteLogin(inputUrl, options = {}, deps = {}) {
       (warning) => !shouldSuppressHistoricalProfileWarning(warning, reopenVerification, primaryCloseSummary),
     );
 
-    await writeJsonFile(reportJsonPath, report);
-    await writeTextFile(reportMarkdownPath, buildReportMarkdown(report));
+    await writeSiteLoginReportArtifacts(report, {
+      reportDir,
+      jsonPath: reportJsonPath,
+      jsonAuditPath: reportJsonAuditPath,
+      markdownPath: reportMarkdownPath,
+      markdownAuditPath: reportMarkdownAuditPath,
+    });
     return report;
   } finally {
     if (!closed && session) {

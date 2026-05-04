@@ -1,19 +1,49 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   assertLiveSmokeBoundary,
   buildMatrix,
+  buildPlanJson,
+  classifyAuthDoctorReport,
   classifyDoctorReport,
   classifyKbRefreshManifest,
   classifySocialActionManifest,
   evaluateLiveSmokeBoundary,
+  filterMatrix,
   parseArgs,
   summarizeSocialActionArtifacts,
 } from '../../scripts/social-live-verify.mjs';
+
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+const SCRIPT = path.join(REPO_ROOT, 'scripts', 'social-live-verify.mjs');
+
+function execNode(args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = execFile(process.execPath, [SCRIPT, ...args], {
+      cwd: REPO_ROOT,
+      windowsHide: true,
+      ...options,
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+    child.on('error', reject);
+    child.on('close', (exitCode) => {
+      if (exitCode === 0) {
+        resolve({ stdout, stderr });
+        return;
+      }
+      reject(new Error(`node exited ${exitCode}\n${stderr}`));
+    });
+  });
+}
 
 function boundedArgs(extra = []) {
   return [
@@ -103,9 +133,36 @@ test('social-live-verify forwards case timeout into KB refresh commands', () => 
   const xKbRefresh = matrix.find((entry) => entry.id === 'x-kb-refresh');
 
   assert.ok(xKbRefresh);
+  assert.equal(xKbRefresh.args.includes('--plan-only'), true);
   const timeoutIndex = xKbRefresh.args.indexOf('--case-timeout');
   assert.notEqual(timeoutIndex, -1);
   assert.equal(xKbRefresh.args[timeoutIndex + 1], '1234');
+});
+
+test('social-live-verify emits machine-readable no-write plan metadata', () => {
+  const options = parseArgs(boundedArgs(['--plan-json', '--approval-id', 'codex-live-ok', '--case', 'x-kb-refresh']));
+  const selected = buildMatrix(options, 'run-json').filter((entry) => entry.id === 'x-kb-refresh');
+  const plan = buildPlanJson(selected, options, 'run-json');
+
+  assert.equal(plan.mode, 'dry-run');
+  assert.equal(plan.noWrite, true);
+  assert.equal(plan.options.approvalId, 'codex-live-ok');
+  assert.equal(plan.status, 'planned');
+  assert.equal(plan.commands.length, 1);
+  assert.equal(plan.commands[0].id, 'x-kb-refresh');
+  assert.equal(plan.commands[0].commandArray.includes('--plan-only'), true);
+  assert.equal(plan.commands[0].commandArray.includes('codex-live-ok'), false);
+});
+
+test('social-live-verify --plan-json writes no run artifact', async (t) => {
+  const rootDir = await mkdtemp(path.join(os.tmpdir(), 'bwk-social-live-plan-json-'));
+  t.after(() => rm(rootDir, { recursive: true, force: true }));
+
+  const { stdout } = await execNode(boundedArgs(['--plan-json', '--case', 'x-full-archive', '--run-root', rootDir]));
+  const plan = JSON.parse(stdout);
+
+  assert.equal(plan.noWrite, true);
+  assert.deepEqual(await readdir(rootDir), []);
 });
 
 test('social-live-verify includes unified session health before auth doctor cases', () => {
@@ -118,6 +175,17 @@ test('social-live-verify includes unified session health before auth doctor case
   assert.ok(authDoctor);
   assert.match(sessionHealth.args.join(' '), /session\.mjs health --site x/u);
   assert.match(sessionHealth.args.join(' '), /--run-dir .*x-session-health/u);
+  assert.match(authDoctor.args.join(' '), /--session-manifest .*x-session-health.*manifest\.json/u);
+});
+
+test('social-live-verify auto-selects session health dependency for scoped auth doctor cases', () => {
+  const options = parseArgs(boundedArgs(['--case', 'x-auth-doctor']));
+  const selected = filterMatrix(buildMatrix(options, 'run-1'), options);
+  const ids = selected.map((entry) => entry.id);
+  const authDoctor = selected.find((entry) => entry.id === 'x-auth-doctor');
+
+  assert.deepEqual(ids, ['x-session-health', 'x-auth-doctor']);
+  assert.ok(authDoctor);
   assert.match(authDoctor.args.join(' '), /--session-manifest .*x-session-health.*manifest\.json/u);
 });
 
@@ -181,11 +249,43 @@ test('social-live-verify classifies site-doctor fail statuses as failed', () => 
   });
 });
 
+test('social-live-verify classifies auth doctor from authenticated scenarios', () => {
+  const classification = classifyAuthDoctorReport({
+    authHealth: { available: true },
+    scenarios: [
+      { id: 'home-search-post-detail-author', status: 'fail', reasonCode: null, authRequired: false },
+      { id: 'home-auth', status: 'pass', reasonCode: 'ok', authRequired: true },
+      { id: 'notifications', status: 'pass', reasonCode: 'ok', authRequired: true },
+      { id: 'bookmarks', status: 'pass', reasonCode: 'ok', authRequired: true },
+    ],
+  });
+
+  assert.deepEqual(classification, {
+    verdict: 'passed',
+    reason: null,
+  });
+});
+
 test('social-live-verify classifies auth-only skipped scenarios as blocked', () => {
   const classification = classifyDoctorReport({
     authHealth: { available: true },
     scenarios: [
       { id: 'home-auth', status: 'skipped', reasonCode: 'not-logged-in' },
+    ],
+  });
+
+  assert.deepEqual(classification, {
+    verdict: 'blocked',
+    reason: 'not-logged-in',
+  });
+});
+
+test('social-live-verify keeps auth doctor blocked when authenticated scenarios lose login', () => {
+  const classification = classifyAuthDoctorReport({
+    authHealth: { available: true },
+    scenarios: [
+      { id: 'home-search-post-detail-author', status: 'pass', reasonCode: 'ok', authRequired: false },
+      { id: 'home-auth', status: 'skipped', reasonCode: 'not-logged-in', authRequired: true },
     ],
   });
 

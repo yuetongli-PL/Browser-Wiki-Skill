@@ -8,6 +8,10 @@ import {
   readExistingBrowserDevTools,
   shutdownBrowser,
 } from './launcher.mjs';
+import {
+  observedRequestFromNetworkCaptureEvent,
+  responseSummaryFromNetworkCaptureEvent,
+} from '../../sites/capability/network-capture.mjs';
 
 export const SNAPSHOT_STYLES = ['display', 'visibility', 'opacity', 'position', 'z-index'];
 export const NETWORK_IDLE_QUIET_MS = 500;
@@ -18,6 +22,8 @@ const RUNTIME_EVALUATE_RETRY_DELAY_MS = 150;
 const SESSION_OPEN_RETRY_DELAY_MS = 250;
 const DEFAULT_SESSION_OPEN_RETRIES = 2;
 const DOM_QUIET_RECOVERY_READY_TIMEOUT_MS = 2_000;
+const DEFAULT_NETWORK_CAPTURE_REQUEST_LIMIT = 100;
+const PENDING_NETWORK_CAPTURE_SITE_KEY = 'pending-site';
 
 function formatEvaluationError(result, fallback) {
   return (
@@ -71,21 +77,95 @@ function cloneJson(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-function createNetworkTracker(client, sessionId) {
+export function createNetworkTracker(client, sessionId, {
+  maxObservedRequests = DEFAULT_NETWORK_CAPTURE_REQUEST_LIMIT,
+  maxObservedResponseSummaries = maxObservedRequests,
+} = {}) {
   const inflight = new Set();
+  const observedRequests = [];
+  const observedRequestsById = new Map();
+  const observedResponseSummaries = [];
   let lastActivityAt = Date.now();
+  const observedRequestLimit = Math.max(0, Number(maxObservedRequests) || 0);
+  const observedResponseSummaryLimit = Math.max(0, Number(maxObservedResponseSummaries) || 0);
 
   const markActivity = () => {
     lastActivityAt = Date.now();
   };
 
+  const appendObservedRequest = (event) => {
+    if (observedRequestLimit <= 0) {
+      return;
+    }
+    try {
+      const observed = observedRequestFromNetworkCaptureEvent(event, {
+        siteKey: PENDING_NETWORK_CAPTURE_SITE_KEY,
+      });
+      observedRequests.push(observed);
+      if (observed.id) {
+        observedRequestsById.set(observed.id, observed);
+      }
+    } catch {
+      return;
+    }
+    if (observedRequests.length > observedRequestLimit) {
+      const removed = observedRequests.splice(0, observedRequests.length - observedRequestLimit);
+      for (const request of removed) {
+        if (request.id) {
+          observedRequestsById.delete(request.id);
+        }
+      }
+    }
+  };
+
+  const appendObservedResponseSummary = (event) => {
+    if (observedResponseSummaryLimit <= 0) {
+      return;
+    }
+    const { params } = event ?? {};
+    const requestId = params?.requestId;
+    const observedRequest = requestId ? observedRequestsById.get(requestId) : null;
+    if (!observedRequest || Object.hasOwn(params ?? {}, 'body')) {
+      return;
+    }
+    try {
+      observedResponseSummaries.push(responseSummaryFromNetworkCaptureEvent({
+        method: 'Network.responseReceived',
+        params: {
+          requestId: params.requestId,
+          type: params.type,
+          timestamp: params.timestamp,
+          response: params.response,
+        },
+      }, {
+        observedRequest,
+      }));
+    } catch {
+      return;
+    }
+    if (observedResponseSummaries.length > observedResponseSummaryLimit) {
+      observedResponseSummaries.splice(0, observedResponseSummaries.length - observedResponseSummaryLimit);
+    }
+  };
+
   const offRequest = client.on(
     'Network.requestWillBeSent',
-    ({ params }) => {
+    (event) => {
+      const { params } = event ?? {};
       if (!params?.requestId) {
         return;
       }
       inflight.add(params.requestId);
+      appendObservedRequest(event);
+      markActivity();
+    },
+    { sessionId },
+  );
+
+  const offResponse = client.on(
+    'Network.responseReceived',
+    (event) => {
+      appendObservedResponseSummary(event);
       markActivity();
     },
     { sessionId },
@@ -113,8 +193,45 @@ function createNetworkTracker(client, sessionId) {
       }
       throw new Error(`Timed out waiting for network idle (${inflight.size} inflight requests remained)`);
     },
+    getObservedRequests({ siteKey, limit } = {}) {
+      const normalizedSiteKey = String(siteKey ?? '').trim();
+      if (!normalizedSiteKey) {
+        throw new Error('Network tracker observed request siteKey is required');
+      }
+      const readLimit = limit === undefined ? observedRequests.length : Math.max(0, Number(limit) || 0);
+      if (readLimit <= 0) {
+        return [];
+      }
+      return observedRequests.slice(-readLimit).map((request) => ({
+        ...cloneJson(request),
+        siteKey: normalizedSiteKey,
+      }));
+    },
+    getObservedResponseSummaries({ siteKey, limit } = {}) {
+      const normalizedSiteKey = String(siteKey ?? '').trim();
+      if (!normalizedSiteKey) {
+        throw new Error('Network tracker observed response summary siteKey is required');
+      }
+      const readLimit = limit === undefined ? observedResponseSummaries.length : Math.max(0, Number(limit) || 0);
+      if (readLimit <= 0) {
+        return [];
+      }
+      return observedResponseSummaries.slice(-readLimit).map((summary) => ({
+        ...cloneJson(summary),
+        siteKey: normalizedSiteKey,
+      }));
+    },
+    clearObservedRequests() {
+      observedRequests.length = 0;
+      observedRequestsById.clear();
+      observedResponseSummaries.length = 0;
+    },
+    clearObservedResponseSummaries() {
+      observedResponseSummaries.length = 0;
+    },
     dispose() {
       offRequest();
+      offResponse();
       offFinished();
       offFailed();
     },
@@ -195,6 +312,14 @@ export class BrowserSession {
     this.helperReady = new Set();
     this.closed = false;
     this.metrics = createEmptyMetrics();
+  }
+
+  getObservedNetworkRequests(options = {}) {
+    return this.networkTracker?.getObservedRequests?.(options) ?? [];
+  }
+
+  getObservedNetworkResponseSummaries(options = {}) {
+    return this.networkTracker?.getObservedResponseSummaries?.(options) ?? [];
   }
 
   async send(method, params = {}, timeoutMs = this.timeoutMs) {

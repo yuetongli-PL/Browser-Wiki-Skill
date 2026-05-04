@@ -2,11 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 
 import { capture } from '../../src/entrypoints/pipeline/capture.mjs';
 import { derivePageFacts, expandStates } from '../../src/entrypoints/pipeline/expand-states.mjs';
 import { BrowserSession } from '../../src/infra/browser/session.mjs';
+import { API_RESPONSE_CAPTURE_SUMMARY_SCHEMA_VERSION } from '../../src/sites/capability/api-candidates.mjs';
+import { requireReasonCodeDefinition } from '../../src/sites/capability/reason-codes.mjs';
+import { REDACTION_PLACEHOLDER } from '../../src/sites/capability/security-guard.mjs';
 
 async function createInitialManifest(workspace, url) {
   const captureDir = path.join(workspace, 'initial-capture');
@@ -42,6 +45,170 @@ async function createInitialManifest(workspace, url) {
   await writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
   return manifestPath;
 }
+
+test('expand top-level manifest redacts synthetic query secrets before persisting', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-expand-top-redaction-'));
+  const sensitiveUrl = 'https://example.com/?refresh_token=synthetic-expand-token';
+  const manifestPath = await createInitialManifest(workspace, sensitiveUrl);
+  const fakeSession = {
+    currentViewKey: sensitiveUrl,
+    async navigateAndWait(url) {
+      this.currentViewKey = url;
+    },
+    async invokeHelperMethod(methodName) {
+      if (methodName === 'pageComputeStateSignature') {
+        return {
+          finalUrl: sensitiveUrl,
+          title: 'Initial Page',
+          viewportWidth: 1280,
+          viewportHeight: 720,
+          pageType: 'home',
+          fingerprint: {
+            url: sensitiveUrl,
+            title: 'Initial Page',
+            bodyText: 'initial',
+          },
+          pageFacts: null,
+        };
+      }
+      if (methodName === 'pageDiscoverTriggers') {
+        return [];
+      }
+      throw new Error(`unexpected helper method: ${methodName}`);
+    },
+    async close() {},
+  };
+
+  try {
+    const manifest = await expandStates(sensitiveUrl, {
+      initialManifestPath: manifestPath,
+      outDir: path.join(workspace, 'expanded'),
+      runtimeFactory: async () => fakeSession,
+      maxTriggers: 0,
+      maxCapturedStates: 0,
+      searchQueries: [],
+      captureChapterArtifacts: false,
+    });
+
+    const persisted = JSON.parse(await readFile(path.join(manifest.outDir, 'states-manifest.json'), 'utf8'));
+    assert.equal(JSON.stringify(persisted).includes('synthetic-expand-token'), false);
+    assert.match(persisted.inputUrl, /\[REDACTED\]/u);
+    assert.equal(typeof persisted.redactionAudit, 'string');
+    const audit = JSON.parse(await readFile(persisted.redactionAudit, 'utf8'));
+    assert.equal(JSON.stringify(audit).includes('synthetic-expand-token'), false);
+    assert.equal(audit.redactedPaths.includes('inputUrl'), true);
+    assert.equal(audit.redactedPaths.includes('baseUrl'), true);
+    const initialState = JSON.parse(await readFile(persisted.states[0].files.manifest, 'utf8'));
+    assert.equal(JSON.stringify(initialState).includes('synthetic-expand-token'), false);
+    assert.match(initialState.inputUrl, /\[REDACTED\]/u);
+    assert.equal(typeof initialState.files.redactionAudit, 'string');
+    const initialAudit = JSON.parse(await readFile(initialState.files.redactionAudit, 'utf8'));
+    assert.equal(JSON.stringify(initialAudit).includes('synthetic-expand-token'), false);
+    assert.equal(initialAudit.redactedPaths.includes('inputUrl'), true);
+    assert.equal(initialAudit.redactedPaths.includes('finalUrl'), true);
+    assert.equal(manifest.inputUrl.includes('synthetic-expand-token'), true);
+    assert.equal(manifest.states[0].files.redactionAudit, initialState.files.redactionAudit);
+    assert.equal(manifest.redactionAudit, persisted.redactionAudit);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('expand captured state manifest redacts synthetic query secrets before persisting', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-expand-captured-redaction-'));
+  const baseUrl = 'https://example.com/';
+  const detailUrl = 'https://example.com/books/1?refresh_token=synthetic-expand-token';
+  const manifestPath = await createInitialManifest(workspace, baseUrl);
+  const screenshotBase64 = Buffer.from('expand-redaction-image').toString('base64');
+  const views = {
+    [baseUrl]: {
+      signature: {
+        finalUrl: baseUrl,
+        title: 'Home',
+        viewportWidth: 1280,
+        viewportHeight: 720,
+        pageType: 'home',
+        fingerprint: { state: 'home' },
+        pageFacts: null,
+      },
+      triggers: [{
+        kind: 'content-link',
+        label: 'Open Detail',
+        href: detailUrl,
+        locator: { tagName: 'a', role: 'link' },
+      }],
+    },
+    [detailUrl]: {
+      signature: {
+        finalUrl: detailUrl,
+        title: 'Detail',
+        viewportWidth: 1280,
+        viewportHeight: 720,
+        pageType: 'content-detail',
+        fingerprint: { state: 'detail' },
+        pageFacts: null,
+      },
+      triggers: [],
+    },
+  };
+  const fakeSession = {
+    currentViewKey: baseUrl,
+    async navigateAndWait(url) {
+      this.currentViewKey = url;
+    },
+    async waitForSettled() {},
+    async invokeHelperMethod(methodName) {
+      if (methodName === 'pageComputeStateSignature') {
+        return views[this.currentViewKey].signature;
+      }
+      if (methodName === 'pageDiscoverTriggers') {
+        return views[this.currentViewKey].triggers;
+      }
+      throw new Error(`unexpected helper method: ${methodName}`);
+    },
+    async captureHtml() {
+      return `<html><body>${this.currentViewKey}</body></html>`;
+    },
+    async captureSnapshot() {
+      return { view: this.currentViewKey };
+    },
+    async captureScreenshot() {
+      return {
+        data: screenshotBase64,
+        usedViewportFallback: false,
+        primaryError: null,
+      };
+    },
+    async close() {},
+  };
+
+  try {
+    const manifest = await expandStates(baseUrl, {
+      initialManifestPath: manifestPath,
+      outDir: path.join(workspace, 'expanded'),
+      runtimeFactory: async () => fakeSession,
+      maxTriggers: 1,
+      maxCapturedStates: 1,
+      searchQueries: [],
+      captureChapterArtifacts: false,
+    });
+
+    const capturedState = manifest.states.find((state) => state.status === 'captured');
+    assert.ok(capturedState);
+    const persisted = JSON.parse(await readFile(capturedState.files.manifest, 'utf8'));
+    assert.equal(JSON.stringify(persisted).includes('synthetic-expand-token'), false);
+    assert.match(persisted.finalUrl, /\[REDACTED\]/u);
+    assert.equal(typeof persisted.files.redactionAudit, 'string');
+    const audit = JSON.parse(await readFile(persisted.files.redactionAudit, 'utf8'));
+    assert.equal(JSON.stringify(audit).includes('synthetic-expand-token'), false);
+    assert.equal(audit.redactedPaths.includes('finalUrl'), true);
+    assert.equal(audit.redactedPaths.includes('trigger.href'), true);
+    assert.equal(capturedState.finalUrl.includes('synthetic-expand-token'), true);
+    assert.equal(capturedState.files.redactionAudit, persisted.files.redactionAudit);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
 
 function createXiaohongshuSiteProfile() {
   return {
@@ -345,6 +512,133 @@ test('capture keeps manifest shape and screenshot fallback behavior when runtime
   }
 });
 
+test('capture writes runtime observed network requests into redacted api candidates', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-capture-runtime-network-'));
+  const screenshotBase64 = Buffer.from('network-image').toString('base64');
+  const observedSiteKeys = [];
+  const observedResponseSiteKeys = [];
+
+  const fakeSession = {
+    async navigateAndWait() {},
+    async captureHtml() {
+      return '<html><body>captured network</body></html>';
+    },
+    async captureSnapshot() {
+      return { documents: [{ nodes: [] }] };
+    },
+    async captureScreenshot() {
+      return {
+        data: screenshotBase64,
+        usedViewportFallback: false,
+        primaryError: null,
+      };
+    },
+    async getPageMetadata() {
+      return {
+        finalUrl: 'https://example.com/final',
+        title: 'Captured Network',
+        viewportWidth: 1200,
+        viewportHeight: 800,
+      };
+    },
+    async getObservedNetworkRequests({ siteKey }) {
+      observedSiteKeys.push(siteKey);
+      return [
+        {
+          siteKey,
+          method: 'GET',
+          url: 'https://example.com/api/feed?access_token=synthetic-capture-runtime-token&safe=1',
+          headers: {
+            authorization: 'Bearer synthetic-capture-runtime-token',
+            accept: 'application/json',
+          },
+          body: {
+            csrf: 'synthetic-capture-runtime-csrf',
+            safe: true,
+          },
+          source: 'browser-network-tracker',
+        },
+      ];
+    },
+    async getObservedNetworkResponseSummaries({ siteKey }) {
+      observedResponseSiteKeys.push(siteKey);
+      return [
+        {
+          schemaVersion: API_RESPONSE_CAPTURE_SUMMARY_SCHEMA_VERSION,
+          candidateId: 'synthetic-runtime-response-candidate',
+          siteKey,
+          statusCode: 200,
+          contentType: 'application/json',
+          headerNames: ['content-type'],
+          metadata: {
+            requestId: 'synthetic-runtime-response-request',
+            resourceType: 'XHR',
+          },
+        },
+      ];
+    },
+    async close() {},
+  };
+
+  try {
+    const manifest = await capture('https://example.com/', {
+      outDir: workspace,
+      siteProfile: {
+        siteKey: 'example',
+      },
+      runtimeFactory: async () => fakeSession,
+    });
+
+    assert.equal(manifest.status, 'success');
+    assert.deepEqual(observedSiteKeys, ['example']);
+    assert.deepEqual(observedResponseSiteKeys, ['example']);
+    assert.equal(manifest.networkRequests[0].headers.authorization, REDACTION_PLACEHOLDER);
+    assert.equal(manifest.networkRequests[0].body.csrf, REDACTION_PLACEHOLDER);
+    assert.equal(manifest.networkResponseSummaries[0].siteKey, 'example');
+    assert.equal(manifest.networkResponseSummaries[0].statusCode, 200);
+    assert.equal(Object.hasOwn(manifest.networkResponseSummaries[0], 'headers'), false);
+    assert.equal(Object.hasOwn(manifest.networkResponseSummaries[0], 'endpoint'), false);
+    assert.equal(Object.hasOwn(manifest.networkResponseSummaries[0], 'catalogEntry'), false);
+    assert.equal(JSON.stringify(manifest).includes('synthetic-capture-runtime-token'), false);
+    assert.equal(JSON.stringify(manifest).includes('synthetic-capture-runtime-csrf'), false);
+
+    const written = JSON.parse(await readFile(manifest.files.manifest, 'utf8'));
+    assert.equal(written.networkRequests.length, 1);
+    assert.equal(written.networkResponseSummaries.length, 1);
+    assert.equal(written.networkRequests[0].siteKey, 'example');
+    assert.equal(written.networkResponseSummaries[0].siteKey, 'example');
+    assert.equal(written.networkResponseSummaries[0].candidateId, 'synthetic-runtime-response-candidate');
+    assert.equal(Object.hasOwn(written.networkResponseSummaries[0], 'headers'), false);
+    assert.equal(Object.hasOwn(written.networkResponseSummaries[0], 'endpoint'), false);
+    assert.equal(Object.hasOwn(written.networkResponseSummaries[0], 'catalogEntry'), false);
+    assert.equal(written.networkRequests[0].headers.authorization, REDACTION_PLACEHOLDER);
+    assert.equal(written.networkRequests[0].body.csrf, REDACTION_PLACEHOLDER);
+    assert.equal(written.files.apiCandidates.length, 1);
+    assert.equal(written.files.apiCandidateRedactionAudits.length, 1);
+    assert.equal(JSON.stringify(written).includes('synthetic-capture-runtime-token'), false);
+    assert.equal(JSON.stringify(written).includes('synthetic-capture-runtime-csrf'), false);
+
+    const candidate = JSON.parse(await readFile(written.files.apiCandidates[0], 'utf8'));
+    assert.equal(candidate.status, 'observed');
+    assert.equal(candidate.siteKey, 'example');
+    assert.equal(candidate.source, 'browser-network-tracker');
+    assert.equal(candidate.request.headers.authorization, REDACTION_PLACEHOLDER);
+    assert.equal(candidate.request.body.csrf, REDACTION_PLACEHOLDER);
+    assert.equal(Object.hasOwn(written.files, 'apiCatalog'), false);
+    assert.equal(Object.hasOwn(written.files, 'apiCatalogEntry'), false);
+    await assert.rejects(
+      () => access(path.join(path.dirname(manifest.files.manifest), 'api-catalog')),
+      /ENOENT/u,
+    );
+    await assert.rejects(
+      () => access(path.join(path.dirname(manifest.files.manifest), 'catalog')),
+      /ENOENT/u,
+    );
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test('capture preserves Douyin challenge evidence and marks the manifest as anti-crawl partial', async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-capture-douyin-challenge-'));
   const screenshotBase64 = Buffer.from('douyin-image').toString('base64');
@@ -397,6 +691,7 @@ test('capture preserves Douyin challenge evidence and marks the manifest as anti
 
     assert.equal(manifest.status, 'partial');
     assert.equal(manifest.error?.code, 'ANTI_CRAWL_CHALLENGE');
+    assert.equal(requireReasonCodeDefinition(manifest.error?.code, { family: 'capture' }).code, 'ANTI_CRAWL_CHALLENGE');
     assert.match(manifest.error?.message ?? '', /anti-crawl challenge/i);
     assert.equal(manifest.finalUrl, 'https://www.douyin.com/');
     assert.equal(manifest.title, '验证码中间页');
@@ -433,6 +728,7 @@ test('capture falls back to the input URL when a fatal Douyin CDP timeout occurs
     assert.equal(manifest.finalUrl, 'https://www.douyin.com/user/self?showTab=post');
     assert.equal(manifest.title, '');
     assert.equal(manifest.error?.code, 'HTML_CAPTURE_FAILED');
+    assert.equal(requireReasonCodeDefinition(manifest.error?.code, { family: 'capture' }).code, 'HTML_CAPTURE_FAILED');
     assert.match(manifest.error?.message ?? '', /captureHtml is not a function/u);
     assert.equal(closed, true);
   } finally {

@@ -1,10 +1,12 @@
 // @ts-check
 
 import { spawn } from 'node:child_process';
-import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
+
+import { writeSocialManifestJsonWithAudit } from '../tools/social-redaction.mjs';
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(MODULE_DIR, '..');
@@ -344,7 +346,7 @@ function commandManifest(command) {
   };
 }
 
-function buildManifest(plan, options, manifestPath) {
+export function buildManifest(plan, options, manifestPath) {
   return {
     runId: plan.runId,
     mode: options.execute ? 'execute' : 'dry-run',
@@ -531,8 +533,7 @@ async function locateLatestManifest(runRoot) {
 }
 
 async function writeManifest(manifestPath, manifest) {
-  await mkdir(path.dirname(manifestPath), { recursive: true });
-  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+  await writeSocialManifestJsonWithAudit(manifestPath, manifest);
 }
 
 async function executeSiteRecovery(site, options) {

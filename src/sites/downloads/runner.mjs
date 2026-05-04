@@ -1,6 +1,7 @@
 // @ts-check
 
 import {
+  readJsonFile,
   writeJsonFile,
   writeJsonLines,
   writeTextFile,
@@ -10,12 +11,20 @@ import {
   normalizeDownloadRunManifest,
   normalizeResolvedDownloadTask,
   normalizeSessionLease,
+  normalizeSessionLeaseConsumerHeaders,
 } from './contracts.mjs';
-import { buildDownloadRunLayout } from './artifacts.mjs';
-import { executeResolvedDownloadTask } from './executor.mjs';
+import {
+  buildDownloadRunLayout,
+  writeRedactedDownloadJsonArtifact,
+} from './artifacts.mjs';
+import {
+  assertRuntimeDownloadCompatibility,
+  executeResolvedDownloadTask,
+} from './executor.mjs';
 import { executeLegacyDownloadTask } from './legacy-executor.mjs';
 import {
   createDownloadPlan,
+  resolverDependenciesFromRuntime,
   resolveDownloadResources,
 } from './modules.mjs';
 import {
@@ -32,6 +41,25 @@ import {
 import {
   sessionOptionsFromRunManifest,
 } from '../sessions/manifest-bridge.mjs';
+import {
+  composeLifecycleSubscribers,
+  createLifecycleArtifactWriterSubscriber,
+  dispatchLifecycleEvent,
+  normalizeLifecycleEvent,
+} from '../capability/lifecycle-events.mjs';
+import { matchCapabilityHooksForLifecycleEvent } from '../capability/capability-hook.mjs';
+import { assertSchemaCompatible } from '../capability/compatibility-registry.mjs';
+import { isKnownReasonCode } from '../capability/reason-codes.mjs';
+import { normalizeRiskTransition } from '../capability/risk-state.mjs';
+import { normalizeStandardTaskList } from '../capability/standard-task-list.mjs';
+import {
+  assertPlannerPolicyRuntimeHandoffCompatibility,
+} from '../capability/planner-policy-handoff.mjs';
+import {
+  assertNoForbiddenPatterns,
+  prepareRedactedArtifactJsonWithAudit,
+  redactValue,
+} from '../capability/security-guard.mjs';
 import { renderSessionTraceabilityLines } from './session-report.mjs';
 
 const AUTH_REQUIRED_KEYS = [
@@ -79,25 +107,6 @@ function allowNetworkResolve(request = {}, options = {}) {
     || request.resolveNetwork === true;
 }
 
-const RESOLVER_DEP_KEYS = Object.freeze([
-  'resolveBilibiliApiEvidence',
-  'resolveDouyinMediaBatch',
-  'enumerateDouyinAuthorVideos',
-  'queryDouyinFollow',
-  'queryXiaohongshuFollow',
-]);
-
-function resolverDepsFrom(options = {}, deps = {}) {
-  const result = {};
-  for (const key of RESOLVER_DEP_KEYS) {
-    const value = deps[key] ?? options[key];
-    if (typeof value === 'function') {
-      result[key] = value;
-    }
-  }
-  return result;
-}
-
 function sessionStatus(value = {}) {
   return String(value?.status ?? 'ready').trim() || 'ready';
 }
@@ -143,8 +152,44 @@ function nativeFallbackTrace(resolvedTask = {}) {
   return trace;
 }
 
+async function loadResumeResolvedTask(plan, options = {}) {
+  if (!Boolean(options.resume ?? plan.resume ?? false)) {
+    return null;
+  }
+  const layout = await buildDownloadRunLayout(plan, options);
+  try {
+    const artifact = await readJsonFile(layout.resolvedTaskPath);
+    const normalized = normalizeResolvedDownloadTask(artifact, plan);
+    return normalized.resources.length > 0 ? normalized : null;
+  } catch {
+    return null;
+  }
+}
+
 function cliQuote(value) {
   return `"${String(value).replace(/"/gu, '\\"')}"`;
+}
+
+function standardTaskListFromTerminalTask(resolvedTask = null, plan = {}) {
+  const taskList = normalizeStandardTaskList({
+    siteKey: resolvedTask?.siteKey ?? plan.siteKey,
+    taskType: resolvedTask?.taskType ?? plan.taskType,
+    policyRef: plan.id ? `download-plan:${plan.id}:policy` : undefined,
+    items: (Array.isArray(resolvedTask?.resources) ? resolvedTask.resources : []).map((resource, index) => ({
+      id: resource.id ?? `resource-${index + 1}`,
+      kind: 'download',
+      endpoint: resource.url,
+      method: resource.method,
+      retry: {
+        retries: plan.policy?.retries ?? 0,
+        retryBackoffMs: plan.policy?.retryBackoffMs ?? 0,
+      },
+      cacheKey: resource.metadata?.cacheKey ?? resource.id,
+      dedupKey: resource.metadata?.dedupKey ?? resource.id ?? resource.url,
+    })),
+  });
+  assertSchemaCompatible('StandardTaskList', taskList);
+  return taskList;
 }
 
 function buildResumeCommand(plan, layout) {
@@ -176,6 +221,48 @@ function normalizeHealthAsLease(health = {}, plan = {}, purpose = 'download') {
   });
 }
 
+const RAW_UNIFIED_SESSION_LEASE_FIELDS = [
+  'headers',
+  'cookies',
+  'profilePath',
+  'browserProfileRoot',
+  'userDataDir',
+  'csrf',
+  'csrfToken',
+  'token',
+  'authorization',
+  'Authorization',
+  'cookie',
+  'Cookie',
+  'sessionId',
+  'accessToken',
+  'refreshToken',
+];
+
+function sanitizeUnifiedSessionLease(lease = {}) {
+  const result = { ...lease };
+  for (const field of RAW_UNIFIED_SESSION_LEASE_FIELDS) {
+    delete result[field];
+  }
+  return result;
+}
+
+function sanitizeDownloaderVisibleSessionLease(lease = {}) {
+  const result = { ...lease };
+  const consumerHeaders = normalizeSessionLeaseConsumerHeaders(lease);
+  for (const field of RAW_UNIFIED_SESSION_LEASE_FIELDS) {
+    delete result[field];
+  }
+  delete result.governanceLease;
+  if (Object.keys(consumerHeaders).length > 0 || !lease.sessionView) {
+    result.headers = consumerHeaders;
+  }
+  if (!lease.sessionView) {
+    result.cookies = [];
+  }
+  return result;
+}
+
 function annotateSessionLeaseProvider(lease = {}, unifiedSessionOptions = {}) {
   if (!unifiedSessionOptions.sessionHealthManifest) {
     return {
@@ -183,11 +270,15 @@ function annotateSessionLeaseProvider(lease = {}, unifiedSessionOptions = {}) {
       provider: lease.provider ?? 'legacy-session-provider',
     };
   }
+  const safeLease = unifiedSessionOptions.sessionView
+    ? sanitizeUnifiedSessionLease(lease)
+    : { ...lease };
   return {
-    ...lease,
+    ...safeLease,
     provider: 'unified-session-runner',
     healthManifest: unifiedSessionOptions.sessionHealthManifest.artifacts?.manifest
       ?? unifiedSessionOptions.sessionManifestPath,
+    sessionView: unifiedSessionOptions.sessionView,
   };
 }
 
@@ -239,6 +330,138 @@ function explainTerminalManifest(manifest) {
   return 'No download was attempted for this terminal runner state.';
 }
 
+function normalizeLifecycleText(value) {
+  const text = String(value ?? '').trim();
+  return text || undefined;
+}
+
+function downloadLifecycleContext(manifest = {}) {
+  const traceId = normalizeLifecycleText(manifest.runId);
+  return {
+    traceId,
+    correlationId: normalizeLifecycleText(manifest.planId ?? traceId),
+  };
+}
+
+function riskStateLifecycleSummary(riskState = undefined) {
+  if (!riskState || typeof riskState !== 'object' || Array.isArray(riskState)) {
+    return undefined;
+  }
+  return {
+    schemaVersion: riskState.schemaVersion,
+    state: riskState.state,
+    reasonCode: riskState.reasonCode,
+    scope: riskState.scope,
+    recovery: riskState.recovery
+      ? {
+        retryable: riskState.recovery.retryable,
+        cooldownNeeded: riskState.recovery.cooldownNeeded,
+        isolationNeeded: riskState.recovery.isolationNeeded,
+        manualRecoveryNeeded: riskState.recovery.manualRecoveryNeeded,
+        degradable: riskState.recovery.degradable,
+        artifactWriteAllowed: riskState.recovery.artifactWriteAllowed,
+        catalogAction: riskState.recovery.catalogAction,
+        discardCatalog: riskState.recovery.discardCatalog,
+      }
+      : undefined,
+    transition: riskState.transition
+      ? {
+        from: riskState.transition.from,
+        to: riskState.transition.to,
+      }
+      : undefined,
+  };
+}
+
+function capabilityHookMatchSummaryForLifecycleEvent(lifecycleEvent, {
+  capabilityHookRegistry,
+  capabilityHooks,
+} = {}) {
+  const hooks = capabilityHookRegistry ?? capabilityHooks;
+  if (!hooks) {
+    return undefined;
+  }
+  return matchCapabilityHooksForLifecycleEvent(hooks, lifecycleEvent);
+}
+
+function riskStateForSessionStatus(value = {}) {
+  switch (sessionStatus(value)) {
+    case 'manual-required':
+      return 'manual_recovery_required';
+    case 'expired':
+      return 'auth_expired';
+    case 'quarantine':
+      return 'isolated';
+    case 'blocked':
+      return 'blocked';
+    default:
+      return 'suspicious';
+  }
+}
+
+function riskStateFromBlockedSession({ plan = {}, sessionLease = {}, reason, taskId, observedAt } = {}) {
+  if (isSessionReady(sessionLease)) {
+    return undefined;
+  }
+  const reasonCode = normalizeLifecycleText(reason ?? sessionRiskReason(sessionLease));
+  if (!reasonCode || !isKnownReasonCode(reasonCode)) {
+    return undefined;
+  }
+  return normalizeRiskTransition({
+    from: 'normal',
+    state: riskStateForSessionStatus(sessionLease),
+    reasonCode,
+    siteKey: plan.siteKey,
+    taskId,
+    scope: 'download-session',
+    observedAt,
+  });
+}
+
+function riskStateFromTerminalReason({ plan = {}, status, reason, taskId, observedAt } = {}) {
+  if (!['blocked', 'partial', 'failed', 'skipped'].includes(status)) {
+    return undefined;
+  }
+  const reasonCode = normalizeLifecycleText(reason);
+  if (!reasonCode || !isKnownReasonCode(reasonCode)) {
+    return undefined;
+  }
+  if (reasonCode === 'dry-run') {
+    return undefined;
+  }
+  return normalizeRiskTransition({
+    from: 'normal',
+    state: 'suspicious',
+    reasonCode,
+    siteKey: plan.siteKey,
+    taskId,
+    scope: 'download-terminal',
+    observedAt,
+  });
+}
+
+function riskStateFromTerminalManifest({ plan = {}, sessionLease = {}, status, reason, taskId, observedAt } = {}) {
+  if (status === 'blocked') {
+    const sessionRiskState = riskStateFromBlockedSession({
+      plan,
+      sessionLease,
+      reason,
+      taskId,
+      observedAt,
+    });
+    if (sessionRiskState) {
+      return sessionRiskState;
+    }
+  }
+  return riskStateFromTerminalReason({
+    plan,
+    status,
+    reason,
+    taskId,
+    observedAt,
+  });
+}
+
 function renderTerminalReport(manifest, resolvedTask = null, { plan = null, layout = null } = {}) {
   const lines = [
     '# Download Run',
@@ -275,18 +498,42 @@ function renderTerminalReport(manifest, resolvedTask = null, { plan = null, layo
     `- Queue: ${manifest.artifacts.queue}`,
     `- Downloads JSONL: ${manifest.artifacts.downloadsJsonl}`,
   );
-  return `${lines.join('\n')}\n`;
+  const redacted = redactValue({ report: `${lines.join('\n')}\n` });
+  assertNoForbiddenPatterns(redacted.value.report);
+  return redacted.value.report;
 }
 
-async function writeTerminalManifest({ plan, sessionLease, resolvedTask = null, status, reason, options = {} }) {
+async function writeTerminalManifest({
+  plan,
+  sessionLease,
+  resolvedTask = null,
+  status,
+  reason,
+  options = {},
+  lifecycleEventSubscribers = [],
+  capabilityHookRegistry = undefined,
+  capabilityHooks = undefined,
+}) {
   const layout = await buildDownloadRunLayout(plan, options);
   const normalizedResolvedTask = resolvedTask ? normalizeResolvedDownloadTask(resolvedTask, plan) : null;
-  await writeJsonFile(layout.planPath, plan);
+  await writeRedactedDownloadJsonArtifact(layout.planPath, plan, {
+    auditPath: layout.planRedactionAuditPath,
+  });
   if (normalizedResolvedTask) {
-    await writeJsonFile(layout.resolvedTaskPath, normalizedResolvedTask);
+    await writeRedactedDownloadJsonArtifact(layout.resolvedTaskPath, normalizedResolvedTask);
   }
+  await writeJsonFile(layout.standardTaskListPath, standardTaskListFromTerminalTask(normalizedResolvedTask, plan));
   await writeJsonFile(layout.queuePath, []);
   await writeJsonLines(layout.downloadsJsonlPath, []);
+  const finishedAt = new Date().toISOString();
+  const riskState = riskStateFromTerminalManifest({
+    plan,
+    sessionLease,
+    status,
+    reason,
+    taskId: layout.runId,
+    observedAt: finishedAt,
+  });
   const manifest = normalizeDownloadRunManifest({
     runId: layout.runId,
     planId: plan.id,
@@ -310,18 +557,67 @@ async function writeTerminalManifest({ plan, sessionLease, resolvedTask = null, 
       queue: layout.queuePath,
       downloadsJsonl: layout.downloadsJsonlPath,
       reportMarkdown: layout.reportMarkdownPath,
+      redactionAudit: layout.redactionAuditPath,
+      lifecycleEvent: layout.lifecycleEventPath,
+      lifecycleEventRedactionAudit: layout.lifecycleEventRedactionAuditPath,
       plan: layout.planPath,
+      planRedactionAudit: layout.planRedactionAuditPath,
       resolvedTask: layout.resolvedTaskPath,
+      standardTaskList: layout.standardTaskListPath,
       runDir: layout.runDir,
       filesDir: layout.filesDir,
     },
     liveValidation: options.liveValidation,
     session: sessionLease,
+    riskState,
     legacy: plan.legacy,
-    createdAt: new Date().toISOString(),
-    finishedAt: new Date().toISOString(),
+    createdAt: finishedAt,
+    finishedAt,
   });
-  await writeJsonFile(layout.manifestPath, manifest);
+  let lifecycleEvent = normalizeLifecycleEvent({
+    eventType: 'download.run.terminal',
+    ...downloadLifecycleContext(manifest),
+    taskId: manifest.runId,
+    siteKey: manifest.siteKey,
+    taskType: normalizeLifecycleText(plan.taskType),
+    adapterVersion: normalizeLifecycleText(plan.adapterVersion ?? manifest.adapterVersion),
+    reasonCode: manifest.reason,
+    createdAt: manifest.finishedAt,
+    details: {
+      status: manifest.status,
+      reason: manifest.reason,
+      profileRef: manifest.session?.sessionView?.profileRef,
+      sessionMaterialization: manifest.session?.sessionViewMaterializationAudit,
+      riskSignals: manifest.session?.riskSignals,
+      riskState: riskStateLifecycleSummary(manifest.riskState),
+    },
+  });
+  const capabilityHookMatches = capabilityHookMatchSummaryForLifecycleEvent(lifecycleEvent, {
+    capabilityHookRegistry,
+    capabilityHooks,
+  });
+  if (capabilityHookMatches) {
+    lifecycleEvent = normalizeLifecycleEvent({
+      ...lifecycleEvent,
+      details: {
+        ...lifecycleEvent.details,
+        capabilityHookMatches,
+      },
+    });
+  }
+  assertSchemaCompatible('LifecycleEvent', lifecycleEvent);
+  await dispatchLifecycleEvent(lifecycleEvent, {
+    subscribers: composeLifecycleSubscribers(
+      lifecycleEventSubscribers,
+      createLifecycleArtifactWriterSubscriber({
+        eventPath: layout.lifecycleEventPath,
+        auditPath: layout.lifecycleEventRedactionAuditPath,
+      }),
+    ),
+  });
+  const { json, auditJson } = prepareRedactedArtifactJsonWithAudit(manifest);
+  await writeTextFile(layout.manifestPath, json);
+  await writeTextFile(layout.redactionAuditPath, auditJson);
   await writeTextFile(layout.reportMarkdownPath, renderTerminalReport(manifest, normalizedResolvedTask, {
     plan,
     layout,
@@ -330,6 +626,9 @@ async function writeTerminalManifest({ plan, sessionLease, resolvedTask = null, 
 }
 
 export async function runDownloadTask(request = {}, options = {}, deps = {}) {
+  if (request.plannerHandoff) {
+    assertPlannerPolicyRuntimeHandoffCompatibility(request.plannerHandoff);
+  }
   const workspaceRoot = options.workspaceRoot ?? process.cwd();
   const siteMetadataOptions = options.siteMetadataOptions ?? {};
   const definition = await (deps.resolveDownloadSiteDefinition ?? resolveDownloadSiteDefinition)(request, {
@@ -343,7 +642,7 @@ export async function runDownloadTask(request = {}, options = {}, deps = {}) {
     siteMetadataOptions,
     definition,
   });
-  const sessionPurpose = `download:${plan.taskType}`;
+  const sessionPurpose = 'download';
   const effectiveAuthRequired = marksAuthRequired(request, plan);
   const liveValidationRequiresReadySession = options.liveValidation?.requiresApproval === true
     || request.liveValidation?.requiresApproval === true;
@@ -362,11 +661,17 @@ export async function runDownloadTask(request = {}, options = {}, deps = {}) {
     cookies: request.cookies,
     dryRun: Boolean(options.dryRun ?? plan.policy?.dryRun ?? request.dryRun),
   };
+  const {
+    headers: _requestHeaders,
+    downloadHeaders: _requestDownloadHeaders,
+    cookies: _requestCookies,
+    ...sessionHealthOptions
+  } = sessionOptions;
   const health = plan.sessionRequirement === 'none' && !effectiveAuthRequired
     ? null
     : await (deps.inspectSessionHealth ?? inspectSessionHealth)(
       plan.siteKey,
-      sessionOptions,
+      sessionHealthOptions,
       deps.sessionDeps ?? deps,
     );
 
@@ -375,17 +680,21 @@ export async function runDownloadTask(request = {}, options = {}, deps = {}) {
       normalizeHealthAsLease(health, plan, sessionPurpose),
       unifiedSessionOptions,
     );
+    const downloaderSessionLease = sanitizeDownloaderVisibleSessionLease(sessionLease);
     const manifest = await writeTerminalManifest({
       plan,
-      sessionLease,
+      sessionLease: downloaderSessionLease,
       status: 'blocked',
       reason: sessionRiskReason(sessionLease),
       options,
+      lifecycleEventSubscribers: deps.lifecycleEventSubscribers,
+      capabilityHookRegistry: deps.capabilityHookRegistry,
+      capabilityHooks: deps.capabilityHooks,
     });
     return {
       definition,
       plan,
-      sessionLease,
+      sessionLease: downloaderSessionLease,
       resolvedTask: null,
       manifest,
     };
@@ -400,20 +709,24 @@ export async function runDownloadTask(request = {}, options = {}, deps = {}) {
     deps.sessionDeps ?? deps,
   );
   sessionLease = annotateSessionLeaseProvider(sessionLease, unifiedSessionOptions);
+  let downloaderSessionLease = sanitizeDownloaderVisibleSessionLease(sessionLease);
 
   try {
     if (!isSessionReady(sessionLease) && effectiveAuthRequired) {
       const manifest = await writeTerminalManifest({
         plan,
-        sessionLease,
+        sessionLease: downloaderSessionLease,
         status: 'blocked',
         reason: sessionRiskReason(sessionLease),
         options,
+        lifecycleEventSubscribers: deps.lifecycleEventSubscribers,
+        capabilityHookRegistry: deps.capabilityHookRegistry,
+        capabilityHooks: deps.capabilityHooks,
       });
       return {
         definition,
         plan,
-        sessionLease,
+        sessionLease: downloaderSessionLease,
         resolvedTask: null,
         manifest,
       };
@@ -422,25 +735,39 @@ export async function runDownloadTask(request = {}, options = {}, deps = {}) {
       const blockedLease = sessionLease;
       await (deps.releaseSessionLease ?? releaseSessionLease)(blockedLease, deps.sessionDeps ?? deps);
       sessionLease = createAnonymousPreflightLease(plan, sessionPurpose);
+      downloaderSessionLease = sanitizeDownloaderVisibleSessionLease(sessionLease);
     }
 
-    const resolvedTask = await (deps.resolveDownloadResources ?? resolveDownloadResources)(plan, sessionLease, {
-      request,
-      definition,
-      workspaceRoot,
-      siteMetadataOptions,
-      allowNetworkResolve: allowNetworkResolve(request, options),
-      ...resolverDepsFrom(options, deps),
-      fetchImpl: options.resolverFetchImpl ?? deps.resolverFetchImpl,
-      mockFetchImpl: options.mockResolverFetchImpl ?? deps.mockResolverFetchImpl,
-    });
+    const resolvedTask = await loadResumeResolvedTask(plan, options)
+      ?? await (deps.resolveDownloadResources ?? resolveDownloadResources)(plan, downloaderSessionLease, {
+        request,
+        definition,
+        workspaceRoot,
+        siteMetadataOptions,
+        allowNetworkResolve: allowNetworkResolve(request, options),
+        ...resolverDependenciesFromRuntime(options, deps),
+        fetchImpl: options.resolverFetchImpl ?? deps.resolverFetchImpl,
+        mockFetchImpl: options.mockResolverFetchImpl ?? deps.mockResolverFetchImpl,
+      });
     const normalizedResolvedTask = normalizeResolvedDownloadTask(resolvedTask, plan);
     const dryRun = Boolean(options.dryRun ?? plan.policy?.dryRun ?? request.dryRun);
+    const executionPlan = {
+      ...plan,
+      policy: {
+        ...plan.policy,
+        dryRun,
+      },
+    };
+    assertRuntimeDownloadCompatibility({
+      plan: executionPlan,
+      resolvedTask: normalizedResolvedTask,
+      sessionLease: downloaderSessionLease,
+    });
     if (!dryRun && normalizedResolvedTask.resources.length === 0) {
       if (plan.legacy?.entrypoint) {
         const manifest = await (deps.executeLegacyDownloadTask ?? executeLegacyDownloadTask)(
           plan,
-          sessionLease,
+          downloaderSessionLease,
           request,
           {
             ...options,
@@ -453,23 +780,26 @@ export async function runDownloadTask(request = {}, options = {}, deps = {}) {
         return {
           definition,
           plan,
-          sessionLease,
+          sessionLease: downloaderSessionLease,
           resolvedTask: normalizedResolvedTask,
           manifest,
         };
       }
       const manifest = await writeTerminalManifest({
         plan,
-        sessionLease,
+        sessionLease: downloaderSessionLease,
         resolvedTask: normalizedResolvedTask,
         status: 'skipped',
         reason: 'no-resolved-resources',
         options,
+        lifecycleEventSubscribers: deps.lifecycleEventSubscribers,
+        capabilityHookRegistry: deps.capabilityHookRegistry,
+        capabilityHooks: deps.capabilityHooks,
       });
       return {
         definition,
         plan,
-        sessionLease,
+        sessionLease: downloaderSessionLease,
         resolvedTask: normalizedResolvedTask,
         manifest,
       };
@@ -477,14 +807,8 @@ export async function runDownloadTask(request = {}, options = {}, deps = {}) {
 
     const manifest = await (deps.executeResolvedDownloadTask ?? executeResolvedDownloadTask)(
       normalizedResolvedTask,
-      {
-        ...plan,
-        policy: {
-          ...plan.policy,
-          dryRun,
-        },
-      },
-      sessionLease,
+      executionPlan,
+      downloaderSessionLease,
       {
         ...options,
         dryRun,
@@ -496,7 +820,7 @@ export async function runDownloadTask(request = {}, options = {}, deps = {}) {
     return {
       definition,
       plan,
-      sessionLease,
+      sessionLease: downloaderSessionLease,
       resolvedTask: normalizedResolvedTask,
       manifest,
     };

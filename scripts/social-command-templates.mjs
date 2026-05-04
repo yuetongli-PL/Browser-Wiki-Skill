@@ -174,18 +174,46 @@ export function buildTemplates(options) {
       if (site.followedDate) {
         productionCommands.push(nodeLine(site.action, [...site.followedDate, ...common, '--run-dir', `runs/social-production/${site.site}/followed-date`]));
       }
+      const verifyCommand = nodeLine(path.join('scripts', 'social-live-verify.mjs'), liveSmokeCommon);
+      const planJsonCommand = nodeLine(path.join('scripts', 'social-live-verify.mjs'), ['--plan-json', ...liveSmokeCommon]);
+      const executeVerifyCommand = nodeLine(path.join('scripts', 'social-live-verify.mjs'), ['--execute', ...liveSmokeCommon]);
+      const resumeCommand = nodeLine(path.join('scripts', 'social-live-resume.mjs'), ['--site', site.site, '--state', '<state-or-manifest.json>', '--cooldown-minutes', options.cooldownMinutes, '--max-attempts', '3']);
+      const cooldownCommand = nodeLine(path.join('scripts', 'social-live-resume.mjs'), ['--site', site.site, '--state', '<state-or-manifest.json>', '--cooldown-minutes', options.cooldownMinutes]);
+      const healthCommand = nodeLine(path.join('scripts', 'social-health-watch.mjs'), ['--site', site.site]);
+      const executeHealthCommand = nodeLine(path.join('scripts', 'social-health-watch.mjs'), ['--execute', '--site', site.site]);
+      const kbRefreshCommand = nodeLine(path.join('scripts', 'social-kb-refresh.mjs'), ['--plan-only', '--site', site.site, '--once']);
+      const kbPlanJsonCommand = nodeLine(path.join('scripts', 'social-kb-refresh.mjs'), ['--plan-json', '--site', site.site, '--once']);
+      const kbExecuteCommand = nodeLine(path.join('scripts', 'social-kb-refresh.mjs'), ['--execute', '--site', site.site, '--once']);
+      const kbWatchCommand = nodeLine(path.join('scripts', 'social-kb-refresh.mjs'), ['--execute', '--site', site.site, '--watch', '--schedule-interval-minutes', '720']);
       return {
         site: site.site,
         account: site.account,
         productionCommands,
-        verifyCommand: nodeLine(path.join('scripts', 'social-live-verify.mjs'), liveSmokeCommon),
-        executeVerifyCommand: nodeLine(path.join('scripts', 'social-live-verify.mjs'), ['--execute', ...liveSmokeCommon]),
-        resumeCommand: nodeLine(path.join('scripts', 'social-live-resume.mjs'), ['--site', site.site, '--state', '<state-or-manifest.json>', '--cooldown-minutes', options.cooldownMinutes, '--max-attempts', '3']),
-        cooldownCommand: nodeLine(path.join('scripts', 'social-live-resume.mjs'), ['--site', site.site, '--state', '<state-or-manifest.json>', '--cooldown-minutes', options.cooldownMinutes]),
-        healthCommand: nodeLine(path.join('scripts', 'social-health-watch.mjs'), ['--site', site.site]),
-        executeHealthCommand: nodeLine(path.join('scripts', 'social-health-watch.mjs'), ['--execute', '--site', site.site]),
-        kbRefreshCommand: nodeLine(path.join('scripts', 'social-kb-refresh.mjs'), ['--site', site.site, '--once']),
-        kbWatchCommand: nodeLine(path.join('scripts', 'social-kb-refresh.mjs'), ['--site', site.site, '--watch', '--schedule-interval-minutes', '720']),
+        verifyCommand,
+        planJsonCommand,
+        executeVerifyCommand,
+        resumeCommand,
+        cooldownCommand,
+        healthCommand,
+        executeHealthCommand,
+        kbRefreshCommand,
+        kbPlanJsonCommand,
+        kbExecuteCommand,
+        kbWatchCommand,
+        dryRunCommands: [
+          { label: 'live smoke text plan', risk: 'dry-run', command: verifyCommand },
+          { label: 'live smoke JSON plan', risk: 'dry-run no-write', command: planJsonCommand },
+          { label: 'health plan', risk: 'dry-run', command: healthCommand },
+          { label: 'KB refresh text plan', risk: 'dry-run no-write', command: kbRefreshCommand },
+          { label: 'KB refresh JSON plan', risk: 'dry-run no-write', command: kbPlanJsonCommand },
+        ],
+        executeCommands: [
+          { label: 'live smoke execute', risk: 'execute high-risk', command: executeVerifyCommand },
+          { label: 'health execute', risk: 'execute high-risk', command: executeHealthCommand },
+          { label: 'KB refresh execute once', risk: 'execute high-risk', command: kbExecuteCommand },
+          { label: 'KB refresh scheduled execute', risk: 'execute high-risk', command: kbWatchCommand },
+          ...productionCommands.map((command) => ({ label: 'production action', risk: 'execute high-risk', command })),
+        ],
       };
     }),
   };
@@ -195,16 +223,17 @@ function printText(templates) {
   process.stdout.write('Social command templates\n\n');
   for (const site of templates.sites) {
     process.stdout.write(`${site.site} (${site.account})\n`);
-    for (const command of site.productionCommands) {
-      process.stdout.write(`  production: ${command}\n`);
+    process.stdout.write('  dry-run / no-write:\n');
+    for (const item of site.dryRunCommands) {
+      process.stdout.write(`    ${item.label} [${item.risk}]: ${item.command}\n`);
     }
-    process.stdout.write(`  verify:     ${site.verifyCommand}\n`);
-    process.stdout.write(`  execute:    ${site.executeVerifyCommand}\n`);
-    process.stdout.write(`  resume:     ${site.resumeCommand}\n`);
-    process.stdout.write(`  cooldown:   ${site.cooldownCommand}\n`);
-    process.stdout.write(`  health:     ${site.healthCommand}\n`);
-    process.stdout.write(`  kb once:    ${site.kbRefreshCommand}\n`);
-    process.stdout.write(`  kb watch:   ${site.kbWatchCommand}\n\n`);
+    process.stdout.write('  execute / high-risk:\n');
+    for (const item of site.executeCommands) {
+      process.stdout.write(`    ${item.label} [${item.risk}]: ${item.command}\n`);
+    }
+    process.stdout.write('  recovery / cooldown:\n');
+    process.stdout.write(`    resume: ${site.resumeCommand}\n`);
+    process.stdout.write(`    cooldown: ${site.cooldownCommand}\n\n`);
   }
 }
 

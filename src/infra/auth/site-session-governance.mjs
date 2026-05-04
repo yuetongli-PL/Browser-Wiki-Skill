@@ -4,13 +4,17 @@ import process from 'node:process';
 import { createHash, randomUUID } from 'node:crypto';
 
 import {
-  appendJsonLine,
+  appendTextFile,
   ensureDir,
   pathExists,
   readJsonFile,
-  writeJsonFile,
+  writeTextFile,
 } from '../io.mjs';
 import { cleanText, toArray, uniqueSortedStrings } from '../../shared/normalize.mjs';
+import { isKnownReasonCode, normalizeReasonCode } from '../../sites/capability/reason-codes.mjs';
+import { normalizeRiskTransition } from '../../sites/capability/risk-state.mjs';
+import { prepareRedactedArtifactJsonWithAudit } from '../../sites/capability/security-guard.mjs';
+import { normalizeHealthSignal } from '../../sites/capability/site-health-recovery.mjs';
 
 const DEFAULT_KEEPALIVE_INTERVAL_MINUTES = 120;
 const DEFAULT_RISK_COOLDOWN_MINUTES = 60;
@@ -80,8 +84,53 @@ function hashValue(value) {
   return createHash('sha256').update(stableStringify(value)).digest('hex');
 }
 
+function normalizeRiskCauseCode(value) {
+  return normalizeReasonCode(value) || null;
+}
+
 function resolveStateFile(userDataDir, filename) {
   return path.join(path.resolve(userDataDir), STATE_DIRNAME, filename);
+}
+
+export function siteSessionGovernanceRedactionAuditPath(filePath) {
+  const resolvedPath = path.resolve(filePath);
+  if (/\.jsonl$/iu.test(resolvedPath)) {
+    return resolvedPath.replace(/\.jsonl$/iu, '.redaction-audit.jsonl');
+  }
+  if (/\.json$/iu.test(resolvedPath)) {
+    return resolvedPath.replace(/\.json$/iu, '.redaction-audit.json');
+  }
+  return `${resolvedPath}.redaction-audit.json`;
+}
+
+async function writeRedactionAuditedJsonFile(filePath, payload) {
+  const prepared = prepareRedactedArtifactJsonWithAudit(payload);
+  const auditPath = siteSessionGovernanceRedactionAuditPath(filePath);
+  await ensureDir(path.dirname(filePath));
+  await ensureDir(path.dirname(auditPath));
+  await writeTextFile(auditPath, prepared.auditJson);
+  await writeTextFile(filePath, prepared.json);
+  return {
+    filePath,
+    redactionAuditPath: auditPath,
+    value: prepared.value,
+    redactionAudit: prepared.auditValue,
+  };
+}
+
+async function appendRedactionAuditedJsonLine(filePath, payload) {
+  const prepared = prepareRedactedArtifactJsonWithAudit(payload, { space: 0 });
+  const auditPath = siteSessionGovernanceRedactionAuditPath(filePath);
+  await ensureDir(path.dirname(filePath));
+  await ensureDir(path.dirname(auditPath));
+  await appendTextFile(auditPath, `${prepared.auditJson}\n`);
+  await appendTextFile(filePath, `${prepared.json}\n`);
+  return {
+    filePath,
+    redactionAuditPath: auditPath,
+    value: prepared.value,
+    redactionAudit: prepared.auditValue,
+  };
 }
 
 async function readJsonFileOrNull(filePath) {
@@ -285,8 +334,7 @@ export async function writeHealthyNetworkFingerprint(userDataDir, fingerprint) {
     return null;
   }
   const filePath = resolveStateFile(userDataDir, HEALTHY_NETWORK_STATE_FILE);
-  await ensureDir(path.dirname(filePath));
-  await writeJsonFile(filePath, fingerprint);
+  await writeRedactionAuditedJsonFile(filePath, fingerprint);
   return filePath;
 }
 
@@ -344,7 +392,7 @@ export async function acquireSessionLease(userDataDir, options = {}) {
         waitedMs,
         ...processInfo(),
       };
-      await writeJsonFile(filePath, lease);
+      await writeRedactionAuditedJsonFile(filePath, lease);
       ACTIVE_LEASES.set(resolvedDir, {
         lease,
         refCount: 1,
@@ -393,7 +441,7 @@ export async function releaseSessionLease(lease) {
   const persistedLease = await readJsonFileOrNull(filePath);
   if (persistedLease?.leaseId && persistedLease.leaseId === lease?.leaseId) {
     try {
-      await writeJsonFile(filePath, {
+      await writeRedactionAuditedJsonFile(filePath, {
         ...persistedLease,
         releasedAt: new Date().toISOString(),
         released: true,
@@ -438,14 +486,13 @@ export async function writeProfileQuarantine(userDataDir, payload = {}, options 
   const quarantine = {
     createdAt: now.toISOString(),
     until: until.toISOString(),
-    riskCauseCode: cleanText(payload.riskCauseCode) || null,
+    riskCauseCode: normalizeRiskCauseCode(payload.riskCauseCode),
     riskAction: cleanText(payload.riskAction) || null,
     antiCrawlSignals: uniqueSortedStrings(toArray(payload.antiCrawlSignals).filter(Boolean)),
     note: cleanText(payload.note) || null,
   };
   const filePath = resolveStateFile(userDataDir, QUARANTINE_STATE_FILE);
-  await ensureDir(path.dirname(filePath));
-  await writeJsonFile(filePath, quarantine);
+  await writeRedactionAuditedJsonFile(filePath, quarantine);
   return quarantine;
 }
 
@@ -475,7 +522,7 @@ export async function appendRiskLedgerEvent(userDataDir, event = {}) {
     recordedAt: new Date().toISOString(),
     ...event,
   };
-  await appendJsonLine(filePath, payload);
+  await appendRedactionAuditedJsonLine(filePath, payload);
   return filePath;
 }
 
@@ -491,8 +538,7 @@ export async function writeAuthSessionState(userDataDir, state = null) {
     return null;
   }
   const filePath = resolveStateFile(userDataDir, AUTH_SESSION_STATE_FILE);
-  await ensureDir(path.dirname(filePath));
-  await writeJsonFile(filePath, state);
+  await writeRedactionAuditedJsonFile(filePath, state);
   return filePath;
 }
 
@@ -542,7 +588,7 @@ export function summarizeAuthSessionState(state = null, authConfig = null, optio
     sessionReuseVerifications: Number(state?.counts?.sessionReuseVerifications ?? 0),
     failedKeepalives: Number(state?.counts?.failedKeepalives ?? 0),
     lastRiskAt: cleanText(state?.lastRiskAt) || null,
-    lastRiskCauseCode: cleanText(state?.lastRiskCauseCode) || null,
+    lastRiskCauseCode: normalizeRiskCauseCode(state?.lastRiskCauseCode),
     lastRiskAction: cleanText(state?.lastRiskAction) || null,
     lastWarmupAt: cleanText(state?.lastWarmupAt) || null,
     lastWarmupCompleted: state?.lastWarmupCompleted === true,
@@ -555,25 +601,28 @@ export function classifyRiskFromContext(context = {}) {
   const antiCrawlSource = antiCrawlSignals.join(' ');
   if (context.concurrentProfileUse === true) {
     return {
-      riskCauseCode: 'concurrent-profile-use',
+      riskCauseCode: normalizeRiskCauseCode('concurrent-profile-use'),
       riskAction: 'wait-for-active-session',
     };
   }
-  if (context.profileHealth?.healthy === false) {
+  if (
+    context.profileHealth?.healthy === false
+    && !['missing', 'uninitialized'].includes(cleanText(context.profileHealth?.profileLifecycle))
+  ) {
     return {
-      riskCauseCode: 'profile-health-risk',
+      riskCauseCode: normalizeRiskCauseCode('profile-health-risk'),
       riskAction: 'rebuild-profile',
     };
   }
   if (context.networkDrift?.driftDetected === true) {
     return {
-      riskCauseCode: 'network-identity-drift',
+      riskCauseCode: normalizeRiskCauseCode('network-identity-drift'),
       riskAction: 'run-keepalive-before-auth',
     };
   }
   if (/rate-limit|too-many|\u9891\u7e41|\u7a0d\u540e\u518d\u8bd5/u.test(antiCrawlSource)) {
     return {
-      riskCauseCode: 'request-burst',
+      riskCauseCode: normalizeRiskCauseCode('request-burst'),
       riskAction: 'cooldown-and-retry-later',
     };
   }
@@ -582,19 +631,19 @@ export function classifyRiskFromContext(context = {}) {
       && context.identityConfirmed !== true
       && context.loginStateDetected !== true;
     return {
-      riskCauseCode: sessionInvalid ? 'session-invalid' : 'browser-fingerprint-risk',
+      riskCauseCode: normalizeRiskCauseCode(sessionInvalid ? 'session-invalid' : 'browser-fingerprint-risk'),
       riskAction: sessionInvalid ? 'run-keepalive-or-auto-login' : 'use-visible-browser-warmup',
     };
   }
   if (context.authRequired === true && context.authAvailable === false) {
     return {
-      riskCauseCode: 'session-invalid',
+      riskCauseCode: normalizeRiskCauseCode('session-invalid'),
       riskAction: 'run-keepalive-or-auto-login',
     };
   }
   if (antiCrawlSignals.length > 0) {
     return {
-      riskCauseCode: 'unknown-risk',
+      riskCauseCode: normalizeRiskCauseCode('unknown-risk'),
       riskAction: 'manual-investigation',
     };
   }
@@ -609,6 +658,63 @@ export function shouldQuarantineRisk(context = {}) {
   return antiCrawlSignals.some((value) => /verify|captcha|challenge|middle/u.test(value));
 }
 
+export function normalizeSessionGovernanceHealthRisk({
+  siteId,
+  riskCauseCode,
+  riskAction,
+  affectedCapability = 'session.reuse',
+  metadata = {},
+} = {}) {
+  if (!riskCauseCode) {
+    return null;
+  }
+  return normalizeHealthSignal({
+    rawSignal: riskCauseCode,
+    affectedCapability,
+    metadata: {
+      riskAction,
+      ...metadata,
+    },
+  }, {
+    siteId,
+  });
+}
+
+function riskStateForPolicyDecision(decision = {}, context = {}) {
+  if (decision.allowed !== false) {
+    return undefined;
+  }
+  const reasonCode = normalizeRiskCauseCode(decision.riskCauseCode);
+  if (!isKnownReasonCode(reasonCode)) {
+    return undefined;
+  }
+  const stateByReasonCode = {
+    'network-identity-drift': 'cooldown',
+    'concurrent-profile-use': 'cooldown',
+    'browser-fingerprint-risk': 'isolated',
+  };
+  const state = stateByReasonCode[reasonCode];
+  if (!state) {
+    return undefined;
+  }
+  const observedAt = context.now instanceof Date
+    ? context.now.toISOString()
+    : cleanText(context.observedAt) || undefined;
+  return normalizeRiskTransition({
+    from: 'normal',
+    state,
+    reasonCode,
+    scope: 'profile',
+    taskId: cleanText(context.operation) || undefined,
+    observedAt,
+  });
+}
+
+function withPolicyRiskState(decision = {}, context = {}) {
+  const riskState = riskStateForPolicyDecision(decision, context);
+  return riskState ? { ...decision, riskState } : decision;
+}
+
 export function evaluateSessionPolicy(options = {}) {
   const operation = cleanText(options.operation) || 'unknown';
   const policy = resolveAuthSessionPolicy(options.authConfig);
@@ -616,34 +722,67 @@ export function evaluateSessionPolicy(options = {}) {
   const networkDrift = options.networkDrift ?? { driftDetected: false, reasons: [] };
 
   if (options.concurrentProfileUse === true) {
-    return {
+    const decision = withPolicyRiskState({
       allowed: false,
-      riskCauseCode: 'concurrent-profile-use',
+      riskCauseCode: normalizeRiskCauseCode('concurrent-profile-use'),
       riskAction: 'wait-for-active-session',
       profileQuarantined: Boolean(quarantine),
       networkIdentityFingerprint: options.networkFingerprint ?? null,
+    }, {
+      operation,
+      now: options.now,
+    });
+    return {
+      ...decision,
+      healthRisk: normalizeSessionGovernanceHealthRisk({
+        siteId: options.siteId ?? options.siteKey,
+        riskCauseCode: decision.riskCauseCode,
+        riskAction: decision.riskAction,
+      }),
     };
   }
 
   if (quarantine && !['site-login', 'site-keepalive', 'site-doctor'].includes(operation)) {
-    return {
+    const decision = withPolicyRiskState({
       allowed: false,
-      riskCauseCode: cleanText(quarantine.riskCauseCode) || 'browser-fingerprint-risk',
+      riskCauseCode: normalizeRiskCauseCode(quarantine.riskCauseCode) || normalizeRiskCauseCode('browser-fingerprint-risk'),
       riskAction: cleanText(quarantine.riskAction) || 'cooldown-and-retry-later',
       profileQuarantined: true,
       networkIdentityFingerprint: options.networkFingerprint ?? null,
+    }, {
+      operation,
+      now: options.now,
+    });
+    return {
+      ...decision,
+      healthRisk: normalizeSessionGovernanceHealthRisk({
+        siteId: options.siteId ?? options.siteKey,
+        riskCauseCode: decision.riskCauseCode,
+        riskAction: decision.riskAction,
+      }),
     };
   }
 
   if (policy.requireStableNetworkForAuthenticatedFlows && networkDrift.driftDetected === true) {
     const allowed = ['site-login', 'site-keepalive', 'site-doctor'].includes(operation);
-    return {
+    const decision = withPolicyRiskState({
       allowed,
-      riskCauseCode: 'network-identity-drift',
+      riskCauseCode: normalizeRiskCauseCode('network-identity-drift'),
       riskAction: allowed ? 'keepalive-only' : 'run-keepalive-before-auth',
       profileQuarantined: Boolean(quarantine),
       networkIdentityFingerprint: options.networkFingerprint ?? null,
       driftReasons: networkDrift.reasons ?? [],
+    }, {
+      operation,
+      now: options.now,
+    });
+    return {
+      ...decision,
+      healthRisk: normalizeSessionGovernanceHealthRisk({
+        siteId: options.siteId ?? options.siteKey,
+        riskCauseCode: decision.riskCauseCode,
+        riskAction: decision.riskAction,
+      }),
     };
   }
 
@@ -687,6 +826,7 @@ export async function prepareSiteSessionGovernance(inputUrl, authContext = {}, s
   const quarantine = await readProfileQuarantine(userDataDir, { now: options.now });
   const policyDecision = evaluateSessionPolicy({
     operation,
+    siteId: cleanText(options.siteId ?? options.siteKey ?? authContext?.siteId ?? authContext?.siteKey ?? settings.siteId),
     authConfig,
     networkFingerprint,
     networkDrift,
@@ -722,7 +862,7 @@ export async function finalizeSiteSessionGovernance(governance = {}, result = {}
     authAvailable: result.authAvailable,
     identityConfirmed: result.identityConfirmed === true,
     loginStateDetected: result.loginStateDetected === true,
-    profileHealth: result.profileHealth ?? null,
+    profileHealth: recoveredHealthySession ? null : result.profileHealth ?? null,
     networkDrift: governance.networkDrift,
     concurrentProfileUse: governance.leaseResult?.concurrentProfileUse === true,
   });
@@ -743,7 +883,9 @@ export async function finalizeSiteSessionGovernance(governance = {}, result = {}
     }
   }
 
-  const riskCauseCode = result.riskCauseCode ?? inheritedRiskCauseCode ?? classifiedRisk.riskCauseCode ?? null;
+  const riskCauseCode = normalizeRiskCauseCode(
+    result.riskCauseCode ?? inheritedRiskCauseCode ?? classifiedRisk.riskCauseCode,
+  );
   const riskAction = result.riskAction ?? inheritedRiskAction ?? classifiedRisk.riskAction ?? null;
 
   if (governance.userDataDir && shouldQuarantineRisk({ antiCrawlSignals })) {
@@ -792,7 +934,7 @@ export async function finalizeSiteSessionGovernance(governance = {}, result = {}
         ? new Date(now.getTime() + (authPolicy.keepaliveIntervalMinutes * 60_000)).toISOString()
         : cleanText(previousState.nextSuggestedKeepaliveAt) || null,
       lastRiskAt: riskCauseCode ? nowIso : cleanText(previousState.lastRiskAt) || null,
-      lastRiskCauseCode: riskCauseCode ?? (cleanText(previousState.lastRiskCauseCode) || null),
+      lastRiskCauseCode: riskCauseCode ?? normalizeRiskCauseCode(previousState.lastRiskCauseCode),
       lastRiskAction: riskAction ?? (cleanText(previousState.lastRiskAction) || null),
       lastAntiCrawlSignals: antiCrawlSignals.length
         ? antiCrawlSignals
@@ -832,6 +974,14 @@ export async function finalizeSiteSessionGovernance(governance = {}, result = {}
   return {
     riskCauseCode,
     riskAction,
+    healthRisk: normalizeSessionGovernanceHealthRisk({
+      siteId: options.siteId ?? options.siteKey,
+      riskCauseCode,
+      riskAction,
+      metadata: {
+        antiCrawlSignals,
+      },
+    }),
     sessionLeaseId: governance.lease?.leaseId ?? null,
     networkIdentityFingerprint: governance.networkFingerprint ?? null,
     profileQuarantined,

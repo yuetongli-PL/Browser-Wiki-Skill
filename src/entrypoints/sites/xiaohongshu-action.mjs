@@ -5,12 +5,18 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
-import { initializeCliUtf8, writeJsonStdout } from '../../infra/cli.mjs';
+import { initializeCliUtf8 } from '../../infra/cli.mjs';
 import {
   actionSessionMetadataFromOptions,
   readSessionRunManifest,
   sessionOptionsFromRunManifest,
 } from '../../sites/sessions/manifest-bridge.mjs';
+import {
+  assertNoForbiddenPatterns,
+  prepareRedactedArtifactJsonWithAudit,
+  redactValue,
+} from '../../sites/capability/security-guard.mjs';
+import { reasonCodeSummary } from '../../sites/capability/reason-codes.mjs';
 import { runXiaohongshuAction } from '../../sites/xiaohongshu/actions/router.mjs';
 
 export const XIAOHONGSHU_ACTION_HELP = `Usage:
@@ -167,6 +173,49 @@ function selectCliPayload(result, outputMode) {
   return result;
 }
 
+function toXiaohongshuActionCliOutputRedactionFailure(error) {
+  const recovery = reasonCodeSummary('redaction-failed');
+  const failure = new Error('Xiaohongshu action CLI output redaction failed');
+  failure.name = 'XiaohongshuActionCliOutputRedactionFailure';
+  failure.code = 'redaction-failed';
+  failure.reasonCode = 'redaction-failed';
+  failure.retryable = recovery.retryable;
+  failure.cooldownNeeded = recovery.cooldownNeeded;
+  failure.isolationNeeded = recovery.isolationNeeded;
+  failure.manualRecoveryNeeded = recovery.manualRecoveryNeeded;
+  failure.degradable = recovery.degradable;
+  failure.artifactWriteAllowed = recovery.artifactWriteAllowed;
+  failure.catalogAction = recovery.catalogAction;
+  failure.diagnosticWriteAllowed = false;
+  failure.causeSummary = {
+    name: error?.name ?? 'Error',
+    code: error?.code ?? null,
+  };
+  return failure;
+}
+
+export function xiaohongshuActionCliJson(payload) {
+  try {
+    return `${prepareRedactedArtifactJsonWithAudit(payload).json}\n`;
+  } catch (error) {
+    throw toXiaohongshuActionCliOutputRedactionFailure(error);
+  }
+}
+
+export function xiaohongshuActionCliMarkdown(markdown, fallbackPayload) {
+  try {
+    const text = String(markdown ?? '');
+    if (!text) {
+      return xiaohongshuActionCliJson(fallbackPayload);
+    }
+    const redacted = String(redactValue(text).value ?? '');
+    assertNoForbiddenPatterns(redacted);
+    return redacted;
+  } catch (error) {
+    throw toXiaohongshuActionCliOutputRedactionFailure(error);
+  }
+}
+
 export async function buildXiaohongshuActionRequest(parsed) {
   const items = [...parsed.items, ...parsed.queries];
   const sessionManifestOptions = parsed.sessionManifest
@@ -220,9 +269,12 @@ export async function runXiaohongshuActionCli(argv = process.argv.slice(2)) {
   };
   const outputFormat = String(parsed.outputFormat || 'json').trim().toLowerCase();
   if (outputFormat === 'markdown') {
-    process.stdout.write(result?.download?.reportMarkdown || result?.markdown || '');
+    process.stdout.write(xiaohongshuActionCliMarkdown(
+      result?.download?.reportMarkdown || result?.markdown || '',
+      selectCliPayload(result, parsed.output),
+    ));
   } else {
-    writeJsonStdout(selectCliPayload(result, parsed.output));
+    process.stdout.write(xiaohongshuActionCliJson(selectCliPayload(result, parsed.output)));
   }
   if (result?.ok !== true) {
     process.exitCode = 1;

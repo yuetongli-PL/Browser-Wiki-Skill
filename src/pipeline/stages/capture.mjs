@@ -16,7 +16,41 @@ import {
   createPageStateHelperBundleSource,
   createPageStateHelperFallbackFunction,
 } from '../../shared/page-state-runtime.mjs';
-import { isXiaohongshuUrl } from '../../shared/xiaohongshu-risk.mjs';
+import {
+  normalizeReasonCode,
+  reasonCodeSummary,
+} from '../../sites/capability/reason-codes.mjs';
+import { normalizeRiskTransition } from '../../sites/capability/risk-state.mjs';
+import {
+  composeLifecycleSubscribers,
+  createLifecycleArtifactWriterSubscriber,
+  dispatchLifecycleEvent,
+  normalizeLifecycleEvent,
+} from '../../sites/capability/lifecycle-events.mjs';
+import { matchCapabilityHooksForLifecycleEvent } from '../../sites/capability/capability-hook.mjs';
+import { assertSchemaCompatible } from '../../sites/capability/compatibility-registry.mjs';
+import {
+  assertNoForbiddenPatterns,
+  prepareRedactedArtifactJsonWithAudit,
+  redactValue,
+} from '../../sites/capability/security-guard.mjs';
+import {
+  apiCandidateFromObservedRequest,
+  createApiDiscoveryFailure,
+  validateApiCandidateWithAdapter,
+  writeApiCandidateArtifactsFromCaptureOutput,
+  writeManualApiCandidateVerificationArtifacts,
+  writeSiteAdapterCandidateDecisionArtifacts,
+} from '../../sites/capability/api-discovery.mjs';
+import {
+  createApiCandidateAuthVerificationResult,
+  createApiCandidateMultiAspectVerificationResult,
+  createApiCandidatePaginationVerificationResult,
+  createApiCandidateResponseSchemaVerificationResultFromCaptureSummary,
+  createApiCandidateRiskVerificationResult,
+  writeApiCandidateResponseVerificationResultArtifact,
+} from '../../sites/capability/api-candidates.mjs';
+import { resolveSiteAdapter } from '../../sites/core/adapters/resolver.mjs';
 import { resolveDouyinHeadlessDefault } from '../../sites/douyin/model/site.mjs';
 
 const DEFAULT_OPTIONS = {
@@ -46,7 +80,7 @@ const CAPTURE_HELPER_BUNDLE_SOURCE = createPageStateHelperBundleSource(CAPTURE_H
 const pageComputeStateSignature = createPageStateHelperFallbackFunction(CAPTURE_HELPER_NAMESPACE);
 
 function createError(code, message) {
-  return { code, message };
+  return { code: normalizeReasonCode(code), message };
 }
 
 function isDouyinSiteProfile(siteProfile = null, inputUrl = '') {
@@ -63,21 +97,17 @@ function isDouyinSiteProfile(siteProfile = null, inputUrl = '') {
 }
 
 function isXiaohongshuSiteProfile(siteProfile = null, inputUrl = '') {
-  const profileHost = String(siteProfile?.host ?? '').toLowerCase();
-  if (profileHost === 'www.xiaohongshu.com' || profileHost === 'xiaohongshu.com') {
-    return true;
-  }
-  try {
-    const parsed = new URL(inputUrl);
-    return parsed.hostname === 'www.xiaohongshu.com' || parsed.hostname === 'xiaohongshu.com';
-  } catch {
-    return false;
-  }
+  const adapter = resolveSiteAdapter({
+    host: siteProfile?.host ?? null,
+    inputUrl,
+    profile: siteProfile,
+  });
+  return adapter?.id === 'xiaohongshu' || adapter?.siteKey === 'xiaohongshu';
 }
 
 function resolveCaptureHeadlessDefault(inputUrl, fallback = true, siteProfile = null) {
   const douyinDefault = resolveDouyinHeadlessDefault(inputUrl, fallback, siteProfile);
-  return isXiaohongshuSiteProfile(siteProfile, inputUrl) || isXiaohongshuUrl(inputUrl)
+  return isXiaohongshuSiteProfile(siteProfile, inputUrl)
     ? false
     : douyinDefault;
 }
@@ -244,9 +274,13 @@ function buildManifest({
   snapshotPath,
   screenshotPath,
   manifestPath,
+  traceId,
+  correlationId,
   viewport,
 }) {
   return {
+    traceId,
+    correlationId,
     inputUrl,
     finalUrl: inputUrl,
     title: '',
@@ -275,8 +309,1099 @@ function setManifestError(manifest, code, message) {
   }
 }
 
-async function writeManifest(manifest) {
-  await writeFile(manifest.files.manifest, JSON.stringify(manifest, null, 2), 'utf8');
+function resolveCaptureNetworkSiteKey(inputUrl, siteProfile = null) {
+  const profileKey = String(
+    siteProfile?.siteKey
+    ?? siteProfile?.key
+    ?? siteProfile?.host
+    ?? siteProfile?.domain
+    ?? '',
+  ).trim();
+  if (profileKey) {
+    return profileKey.toLowerCase();
+  }
+
+  try {
+    return new URL(inputUrl).hostname.toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+async function attachObservedNetworkRequests(manifest, session, settings, inputUrl) {
+  if (typeof session?.getObservedNetworkRequests !== 'function') {
+    return;
+  }
+
+  const siteKey = resolveCaptureNetworkSiteKey(inputUrl, settings.siteProfile);
+  if (!siteKey) {
+    return;
+  }
+
+  const observedRequests = await session.getObservedNetworkRequests({ siteKey });
+  if (!Array.isArray(observedRequests) || observedRequests.length === 0) {
+    return;
+  }
+
+  const redacted = redactValue(observedRequests).value;
+  if (Array.isArray(redacted) && redacted.length > 0) {
+    manifest.networkRequests = redacted;
+  }
+}
+
+function setManifestNetworkResponseSummaries(manifest, responseSummaries) {
+  if (!Array.isArray(responseSummaries) || responseSummaries.length === 0) {
+    return;
+  }
+  const redacted = redactValue(responseSummaries).value;
+  if (Array.isArray(redacted) && redacted.length > 0) {
+    for (const summary of redacted) {
+      assertSchemaCompatible('ApiResponseCaptureSummary', summary);
+      for (const field of ['headers', 'endpoint', 'catalogEntry', 'catalogPath', 'request', 'response', 'body']) {
+        if (Object.hasOwn(summary, field)) {
+          throw new Error(`Capture network response summaries must not contain ${field}`);
+        }
+      }
+    }
+    assertNoForbiddenPatterns(redacted);
+    manifest.networkResponseSummaries = redacted;
+  }
+}
+
+function capabilityHookMatchSummaryForLifecycleEvent(lifecycleEvent, {
+  capabilityHookRegistry,
+  capabilityHooks,
+} = {}) {
+  const hooks = capabilityHookRegistry ?? capabilityHooks;
+  if (!hooks) {
+    return undefined;
+  }
+  return matchCapabilityHooksForLifecycleEvent(hooks, lifecycleEvent);
+}
+
+async function attachObservedNetworkResponseSummaries(manifest, session, settings, inputUrl) {
+  if (typeof session?.getObservedNetworkResponseSummaries !== 'function') {
+    return;
+  }
+
+  const siteKey = resolveCaptureNetworkSiteKey(inputUrl, settings.siteProfile);
+  if (!siteKey) {
+    return;
+  }
+
+  const responseSummaries = await session.getObservedNetworkResponseSummaries({ siteKey });
+  if (!Array.isArray(responseSummaries) || responseSummaries.length === 0) {
+    return;
+  }
+
+  setManifestNetworkResponseSummaries(manifest, responseSummaries);
+}
+
+async function writeCaptureApiCandidateAdapterDecisions(manifest, candidateResults = []) {
+  const manifestDir = path.dirname(manifest.files.manifest);
+  const outputDir = manifest.files.apiCandidateDecisionsDir
+    ?? path.join(manifestDir, 'api-candidate-decisions');
+  const redactionAuditDir = manifest.files.apiCandidateDecisionRedactionAuditsDir
+    ?? path.join(manifestDir, 'api-candidate-decision-redaction-audits');
+  const catalogUpgradeDecisionOutputDir = manifest.files.apiCandidateCatalogUpgradeDecisionsDir
+    ?? path.join(manifestDir, 'api-candidate-catalog-upgrade-decisions');
+  const catalogUpgradeDecisionRedactionAuditDir = manifest.files.apiCandidateCatalogUpgradeDecisionRedactionAuditsDir
+    ?? path.join(manifestDir, 'api-candidate-catalog-upgrade-decision-redaction-audits');
+  const catalogUpgradeDecisionLifecycleEventOutputDir =
+    manifest.files.apiCandidateCatalogUpgradeDecisionLifecycleEventsDir
+      ?? path.join(manifestDir, 'api-candidate-catalog-upgrade-decision-lifecycle-events');
+  const catalogUpgradeDecisionLifecycleEventRedactionAuditDir =
+    manifest.files.apiCandidateCatalogUpgradeDecisionLifecycleEventRedactionAuditsDir
+      ?? path.join(manifestDir, 'api-candidate-catalog-upgrade-decision-lifecycle-event-redaction-audits');
+  const lifecycleContext = captureLifecycleContext(manifest);
+  const decisions = await writeSiteAdapterCandidateDecisionArtifacts(candidateResults, {
+    outputDir,
+    redactionAuditDir,
+    catalogUpgradeDecisionOutputDir,
+    catalogUpgradeDecisionRedactionAuditDir,
+    catalogUpgradeDecisionLifecycleEventOutputDir,
+    catalogUpgradeDecisionLifecycleEventRedactionAuditDir,
+    lifecycleEventTraceId: lifecycleContext.traceId,
+    lifecycleEventCorrelationId: lifecycleContext.correlationId,
+    lifecycleEventTaskType: lifecycleContext.taskType,
+    lifecycleEventAdapterVersion: lifecycleContext.adapterVersion,
+    validatedAt: manifest.capturedAt,
+    decidedAt: manifest.capturedAt,
+    evidenceSource: 'capture-api-candidate-artifact',
+    resolveAdapter: ({ host, inputUrl }) => (inputUrl
+      ? resolveSiteAdapter({ inputUrl })
+      : resolveSiteAdapter({ host })),
+  });
+
+  if (decisions.length > 0) {
+    manifest.files.apiCandidateDecisions = decisions.map((decision) => decision.artifactPath);
+    manifest.files.apiCandidateDecisionRedactionAudits = decisions
+      .map((decision) => decision.redactionAuditPath)
+      .filter(Boolean);
+    manifest.files.apiCandidateCatalogUpgradeDecisions = decisions
+      .map((decision) => decision.catalogUpgradeDecisionArtifactPath)
+      .filter(Boolean);
+    manifest.files.apiCandidateCatalogUpgradeDecisionRedactionAudits = decisions
+      .map((decision) => decision.catalogUpgradeDecisionRedactionAuditPath)
+      .filter(Boolean);
+    manifest.files.apiCandidateCatalogUpgradeDecisionLifecycleEvents = decisions
+      .map((decision) => decision.catalogUpgradeDecisionLifecycleEventPath)
+      .filter(Boolean);
+    manifest.files.apiCandidateCatalogUpgradeDecisionLifecycleEventRedactionAudits = decisions
+      .map((decision) => decision.catalogUpgradeDecisionLifecycleEventRedactionAuditPath)
+      .filter(Boolean);
+    manifest.files.apiCandidateDecisionsDir = outputDir;
+    manifest.files.apiCandidateDecisionRedactionAuditsDir = redactionAuditDir;
+    manifest.files.apiCandidateCatalogUpgradeDecisionsDir = catalogUpgradeDecisionOutputDir;
+    manifest.files.apiCandidateCatalogUpgradeDecisionRedactionAuditsDir = catalogUpgradeDecisionRedactionAuditDir;
+    manifest.files.apiCandidateCatalogUpgradeDecisionLifecycleEventsDir =
+      catalogUpgradeDecisionLifecycleEventOutputDir;
+    manifest.files.apiCandidateCatalogUpgradeDecisionLifecycleEventRedactionAuditsDir =
+      catalogUpgradeDecisionLifecycleEventRedactionAuditDir;
+  }
+
+  return decisions;
+}
+
+function summarizeCaptureDecisionResults(decisionResults = []) {
+  const summary = {
+    count: 0,
+    byDecision: {},
+    reasonCodes: {},
+  };
+  for (const result of decisionResults) {
+    const decision = String(result?.decision?.decision ?? 'unknown').trim() || 'unknown';
+    summary.count += 1;
+    summary.byDecision[decision] = (summary.byDecision[decision] ?? 0) + 1;
+    const reasonCode = String(result?.decision?.reasonCode ?? '').trim();
+    if (reasonCode) {
+      summary.reasonCodes[reasonCode] = (summary.reasonCodes[reasonCode] ?? 0) + 1;
+    }
+  }
+  return summary;
+}
+
+function summarizeCaptureCatalogUpgradeDecisionResults(decisionResults = []) {
+  const summary = {
+    count: 0,
+    byDecision: {},
+    reasonCodes: {},
+  };
+  for (const result of decisionResults) {
+    const upgradeDecision = result?.catalogUpgradeDecision;
+    if (!upgradeDecision) {
+      continue;
+    }
+    const decision = String(upgradeDecision.decision ?? 'unknown').trim() || 'unknown';
+    summary.count += 1;
+    summary.byDecision[decision] = (summary.byDecision[decision] ?? 0) + 1;
+    const reasonCode = String(upgradeDecision.reasonCode ?? '').trim();
+    if (reasonCode) {
+      summary.reasonCodes[reasonCode] = (summary.reasonCodes[reasonCode] ?? 0) + 1;
+    }
+  }
+  return summary;
+}
+
+function captureApiRiskStateForReason({
+  reasonCode,
+  siteKey,
+  taskId,
+  scope,
+  observedAt,
+} = {}) {
+  const normalizedReasonCode = normalizeReasonCode(reasonCode);
+  if (!normalizedReasonCode) {
+    return undefined;
+  }
+  const reasonRecovery = reasonCodeSummary(normalizedReasonCode);
+  const state = reasonRecovery.manualRecoveryNeeded
+    ? 'manual_recovery_required'
+    : reasonRecovery.cooldownNeeded
+      ? 'rate_limited'
+      : 'suspicious';
+  const riskState = normalizeRiskTransition({
+    from: 'normal',
+    state,
+    reasonCode: normalizedReasonCode,
+    siteKey,
+    taskId,
+    scope,
+    observedAt,
+  });
+  assertNoForbiddenPatterns(riskState);
+  return {
+    reasonCode: normalizedReasonCode,
+    reasonRecovery,
+    riskState,
+  };
+}
+
+function captureApiDecisionRiskStateSummaries(decisionResults = [], {
+  observedAt,
+} = {}) {
+  return decisionResults
+    .map((result) => {
+      const reasonCode = normalizeCaptureLifecycleText(result?.decision?.reasonCode);
+      if (!reasonCode) {
+        return undefined;
+      }
+      return {
+        source: 'site-adapter-decision',
+        candidateIndex: result?.index,
+        adapterId: normalizeCaptureLifecycleText(result?.decision?.adapterId),
+        decision: normalizeCaptureLifecycleText(result?.decision?.decision),
+        ...captureApiRiskStateForReason({
+          reasonCode,
+          siteKey: normalizeCaptureLifecycleText(result?.decision?.siteKey),
+          taskId: `capture-api-candidate:${result?.index}`,
+          scope: 'capture-site-adapter-decision',
+          observedAt,
+        }),
+      };
+    })
+    .filter(Boolean);
+}
+
+function captureApiCatalogUpgradeRiskStateSummaries(decisionResults = [], {
+  observedAt,
+} = {}) {
+  return decisionResults
+    .map((result) => {
+      const reasonCode = normalizeCaptureLifecycleText(result?.catalogUpgradeDecision?.reasonCode);
+      if (!reasonCode) {
+        return undefined;
+      }
+      return {
+        source: 'api-catalog-upgrade-decision',
+        candidateIndex: result?.index,
+        adapterId: normalizeCaptureLifecycleText(result?.catalogUpgradeDecision?.adapterId),
+        decision: normalizeCaptureLifecycleText(result?.catalogUpgradeDecision?.decision),
+        canEnterCatalog: result?.catalogUpgradeDecision?.canEnterCatalog === true,
+        ...captureApiRiskStateForReason({
+          reasonCode,
+          siteKey: normalizeCaptureLifecycleText(result?.catalogUpgradeDecision?.siteKey),
+          taskId: `capture-api-candidate:${result?.index}`,
+          scope: 'capture-api-catalog-upgrade',
+          observedAt,
+        }),
+      };
+    })
+    .filter(Boolean);
+}
+
+function annotateCaptureApiFailureRiskState(error, {
+  manifest,
+  scope,
+  siteKey,
+  taskId,
+} = {}) {
+  if (!error?.reasonCode && !error?.reasonRecovery) {
+    return error;
+  }
+  const reasonCode = normalizeCaptureLifecycleText(error.reasonCode ?? error.code);
+  if (!reasonCode) {
+    return error;
+  }
+  const riskEvidence = captureApiRiskStateForReason({
+    reasonCode,
+    siteKey: normalizeCaptureLifecycleText(siteKey) ?? resolveCaptureLifecycleSiteKey(manifest),
+    taskId: normalizeCaptureLifecycleText(taskId) ?? normalizeCaptureLifecycleText(manifest?.files?.manifest),
+    scope,
+    observedAt: manifest?.capturedAt,
+  });
+  error.riskState = riskEvidence?.riskState;
+  error.metadata = {
+    ...(error.metadata && typeof error.metadata === 'object' && !Array.isArray(error.metadata)
+      ? error.metadata
+      : {}),
+    reasonRecovery: riskEvidence?.reasonRecovery,
+    riskState: riskEvidence?.riskState,
+  };
+  assertNoForbiddenPatterns(error.metadata);
+  return error;
+}
+
+function responseSchemaVerificationArtifactName(index) {
+  return `response-schema-verification-${String(index + 1).padStart(4, '0')}.json`;
+}
+
+function captureApiCandidateArtifactName(index) {
+  return `candidate-${String(index + 1).padStart(4, '0')}.json`;
+}
+
+function captureApiCandidateDecisionArtifactName(index) {
+  return `decision-${String(index + 1).padStart(4, '0')}.json`;
+}
+
+function captureResponseSchemaVerificationConfig(manifest = {}) {
+  const config = manifest.responseSchemaVerification ?? manifest.apiResponseSchemaVerification;
+  if (!config?.enabled) {
+    return null;
+  }
+  const verifierId = normalizeCaptureLifecycleText(config.verifierId);
+  if (!verifierId) {
+    throw new Error('Capture response schema verification verifierId is required');
+  }
+  const verifiedAt = normalizeCaptureLifecycleText(config.verifiedAt);
+  if (!verifiedAt) {
+    throw new Error('Capture response schema verification verifiedAt is required');
+  }
+  const candidateIds = Array.isArray(config.candidateIds)
+    ? config.candidateIds.map(normalizeCaptureLifecycleText).filter(Boolean)
+    : [normalizeCaptureLifecycleText(config.candidateId)].filter(Boolean);
+  return {
+    verifierId,
+    verifiedAt,
+    candidateIds,
+    metadata: config.metadata && typeof config.metadata === 'object' && !Array.isArray(config.metadata)
+      ? config.metadata
+      : {},
+  };
+}
+
+function normalizeCaptureObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value
+    : {};
+}
+
+function requireCaptureAspectPassed(aspectConfig, label) {
+  const status = normalizeCaptureLifecycleText(aspectConfig.status ?? aspectConfig.result);
+  if (aspectConfig.passed !== true && status !== 'passed' && status !== 'verified') {
+    throw new Error(`Capture multi-aspect verification ${label} input must be explicitly passed`);
+  }
+}
+
+function captureMultiAspectVerificationConfig(manifest = {}) {
+  const config = manifest.apiCandidateVerification
+    ?? manifest.multiAspectVerification
+    ?? manifest.captureApiCandidateVerification;
+  if (!config?.enabled) {
+    return null;
+  }
+  const verifierId = normalizeCaptureLifecycleText(config.verifierId);
+  if (!verifierId) {
+    throw new Error('Capture multi-aspect verification verifierId is required');
+  }
+  const verifiedAt = normalizeCaptureLifecycleText(config.verifiedAt);
+  if (!verifiedAt) {
+    throw new Error('Capture multi-aspect verification verifiedAt is required');
+  }
+  const candidateIds = Array.isArray(config.candidateIds)
+    ? config.candidateIds.map(normalizeCaptureLifecycleText).filter(Boolean)
+    : [normalizeCaptureLifecycleText(config.candidateId)].filter(Boolean);
+  const auth = normalizeCaptureObject(config.authVerification ?? config.auth);
+  const pagination = normalizeCaptureObject(config.paginationVerification ?? config.pagination);
+  const risk = normalizeCaptureObject(config.riskVerification ?? config.risk);
+  for (const [label, aspect] of [
+    ['auth', auth],
+    ['pagination', pagination],
+    ['risk', risk],
+  ]) {
+    if (Object.keys(aspect).length === 0) {
+      throw new Error(`Capture multi-aspect verification ${label} input is required`);
+    }
+    requireCaptureAspectPassed(aspect, label);
+  }
+  return {
+    verifierId,
+    verifiedAt,
+    candidateIds,
+    auth,
+    pagination,
+    risk,
+    metadata: normalizeCaptureObject(config.metadata),
+  };
+}
+
+function captureCandidateFromResultOrRequest(resultOrRequest = {}) {
+  if (resultOrRequest?.candidate) {
+    return resultOrRequest.candidate;
+  }
+  return apiCandidateFromObservedRequest(resultOrRequest);
+}
+
+function buildCaptureResponseSchemaVerificationRecords(manifest, candidateInputs = []) {
+  const config = captureResponseSchemaVerificationConfig(manifest);
+  if (!config) {
+    return [];
+  }
+  const responseSummaries = Array.isArray(manifest.networkResponseSummaries)
+    ? manifest.networkResponseSummaries
+    : [];
+  if (responseSummaries.length === 0) {
+    throw new Error('Capture response schema verification requires networkResponseSummaries');
+  }
+  const candidateById = new Map(candidateInputs
+    .map(captureCandidateFromResultOrRequest)
+    .filter((candidate) => candidate?.id)
+    .map((candidate) => [candidate.id, candidate]));
+  const requestedIds = new Set(config.candidateIds);
+  const selectedSummaries = responseSummaries.filter((summary) => {
+    const candidateId = normalizeCaptureLifecycleText(summary?.candidateId);
+    return requestedIds.size === 0 || requestedIds.has(candidateId);
+  });
+  if (selectedSummaries.length === 0) {
+    throw new Error('Capture response schema verification requires matching response summaries');
+  }
+  for (const candidateId of requestedIds) {
+    if (!selectedSummaries.some((summary) => summary?.candidateId === candidateId)) {
+      throw new Error(`Capture response schema verification response summary not found: ${candidateId}`);
+    }
+  }
+
+  return selectedSummaries.map((summary) => {
+    const candidate = candidateById.get(summary?.candidateId);
+    if (!candidate) {
+      throw new Error(`Capture response schema verification candidate not found: ${summary?.candidateId}`);
+    }
+    return {
+      candidate,
+      verificationResult: createApiCandidateResponseSchemaVerificationResultFromCaptureSummary({
+        candidate,
+        responseSummary: summary,
+        verifierId: config.verifierId,
+        verifiedAt: config.verifiedAt,
+        metadata: {
+          source: 'capture.networkResponseSummaries',
+          captureManifest: manifest.files.manifest,
+          ...config.metadata,
+        },
+      }),
+    };
+  });
+}
+
+function preflightCaptureResponseSchemaVerification(manifest) {
+  if (!captureResponseSchemaVerificationConfig(manifest)) {
+    return;
+  }
+  buildCaptureResponseSchemaVerificationRecords(manifest, manifest.networkRequests ?? []);
+}
+
+function createCaptureAuthVerificationResult(candidate, config) {
+  return createApiCandidateAuthVerificationResult({
+    candidate,
+    verifierId: normalizeCaptureLifecycleText(config.auth.verifierId) ?? `${config.verifierId}-auth`,
+    verifiedAt: normalizeCaptureLifecycleText(config.auth.verifiedAt) ?? config.verifiedAt,
+    status: normalizeCaptureLifecycleText(config.auth.status) ?? 'passed',
+    passed: true,
+    authEvidence: normalizeCaptureObject(config.auth.authEvidence ?? config.auth.evidence ?? config.auth),
+    metadata: {
+      source: 'capture.apiCandidateVerification.auth',
+      ...normalizeCaptureObject(config.auth.metadata),
+    },
+  });
+}
+
+function createCapturePaginationVerificationResult(candidate, config) {
+  return createApiCandidatePaginationVerificationResult({
+    candidate,
+    verifierId: normalizeCaptureLifecycleText(config.pagination.verifierId) ?? `${config.verifierId}-pagination`,
+    verifiedAt: normalizeCaptureLifecycleText(config.pagination.verifiedAt) ?? config.verifiedAt,
+    status: normalizeCaptureLifecycleText(config.pagination.status) ?? 'passed',
+    passed: true,
+    paginationEvidence: normalizeCaptureObject(
+      config.pagination.paginationEvidence
+      ?? config.pagination.evidence
+      ?? config.pagination
+    ),
+    metadata: {
+      source: 'capture.apiCandidateVerification.pagination',
+      ...normalizeCaptureObject(config.pagination.metadata),
+    },
+  });
+}
+
+function createCaptureRiskVerificationResult(candidate, config) {
+  return createApiCandidateRiskVerificationResult({
+    candidate,
+    verifierId: normalizeCaptureLifecycleText(config.risk.verifierId) ?? `${config.verifierId}-risk`,
+    verifiedAt: normalizeCaptureLifecycleText(config.risk.verifiedAt) ?? config.verifiedAt,
+    status: normalizeCaptureLifecycleText(config.risk.status) ?? 'passed',
+    passed: true,
+    riskEvidence: normalizeCaptureObject(config.risk.riskEvidence ?? config.risk.evidence ?? config.risk),
+    metadata: {
+      source: 'capture.apiCandidateVerification.risk',
+      ...normalizeCaptureObject(config.risk.metadata),
+    },
+  });
+}
+
+function buildCaptureMultiAspectVerificationRecords(manifest, candidateInputs = [], decisionResults = []) {
+  const config = captureMultiAspectVerificationConfig(manifest);
+  if (!config) {
+    return [];
+  }
+  if (!captureResponseSchemaVerificationConfig(manifest)) {
+    throw new Error('Capture multi-aspect verification requires responseSchemaVerification');
+  }
+  const responseRecords = buildCaptureResponseSchemaVerificationRecords(manifest, candidateInputs);
+  const requestedIds = new Set(config.candidateIds);
+  const selectedRecords = requestedIds.size === 0
+    ? responseRecords
+    : responseRecords.filter((record) => requestedIds.has(record.candidate.id));
+  if (selectedRecords.length === 0) {
+    throw new Error('Capture multi-aspect verification requires matching response schema verification records');
+  }
+  for (const candidateId of requestedIds) {
+    if (!selectedRecords.some((record) => record.candidate.id === candidateId)) {
+      throw new Error(`Capture multi-aspect verification response schema record not found: ${candidateId}`);
+    }
+  }
+  const decisionByCandidateId = new Map(decisionResults
+    .map((result) => result?.decision)
+    .filter((decision) => decision?.candidateId)
+    .map((decision) => [decision.candidateId, decision]));
+
+  return selectedRecords.map((record) => {
+    const auth = createCaptureAuthVerificationResult(record.candidate, config);
+    const pagination = createCapturePaginationVerificationResult(record.candidate, config);
+    const risk = createCaptureRiskVerificationResult(record.candidate, config);
+    return {
+      candidate: record.candidate,
+      siteAdapterDecision: decisionResults.length > 0
+        ? decisionByCandidateId.get(record.candidate.id)
+        : undefined,
+      verificationResult: createApiCandidateMultiAspectVerificationResult({
+        candidate: record.candidate,
+        verifierId: config.verifierId,
+        verifiedAt: config.verifiedAt,
+        metadata: {
+          source: 'capture.apiCandidateVerification',
+          responseSchemaSource: 'capture.networkResponseSummaries',
+          ...config.metadata,
+        },
+        verificationResults: {
+          responseSchema: record.verificationResult,
+          auth,
+          pagination,
+          risk,
+        },
+      }),
+    };
+  });
+}
+
+function preflightCaptureMultiAspectVerification(manifest) {
+  if (!captureMultiAspectVerificationConfig(manifest)) {
+    return;
+  }
+  buildCaptureMultiAspectVerificationRecords(manifest, manifest.networkRequests ?? []);
+}
+
+function summarizeCaptureResponseSchemaVerificationResults(results = []) {
+  const summary = {
+    count: 0,
+    byStatus: {},
+  };
+  for (const result of results) {
+    const status = String(result?.verificationResult?.status ?? 'unknown').trim() || 'unknown';
+    summary.count += 1;
+    summary.byStatus[status] = (summary.byStatus[status] ?? 0) + 1;
+  }
+  return summary;
+}
+
+async function writeCaptureResponseSchemaVerificationResults(manifest, candidateResults = []) {
+  const records = buildCaptureResponseSchemaVerificationRecords(manifest, candidateResults);
+  if (records.length === 0) {
+    return [];
+  }
+
+  const manifestDir = path.dirname(manifest.files.manifest);
+  const outputDir = manifest.files.apiResponseSchemaVerificationsDir
+    ?? path.join(manifestDir, 'api-response-schema-verifications');
+  const redactionAuditDir = manifest.files.apiResponseSchemaVerificationRedactionAuditsDir
+    ?? path.join(manifestDir, 'api-response-schema-verification-redaction-audits');
+  const results = [];
+  for (const [index, record] of records.entries()) {
+    const artifactName = responseSchemaVerificationArtifactName(index);
+    results.push(await writeApiCandidateResponseVerificationResultArtifact(record.verificationResult, {
+      verificationPath: path.join(outputDir, artifactName),
+      redactionAuditPath: path.join(
+        redactionAuditDir,
+        artifactName.replace(/\.json$/u, '.redaction-audit.json'),
+      ),
+    }));
+  }
+  manifest.files.apiResponseSchemaVerificationsDir = outputDir;
+  manifest.files.apiResponseSchemaVerificationRedactionAuditsDir = redactionAuditDir;
+  manifest.files.apiResponseSchemaVerifications = results.map((result) => result.artifactPath);
+  manifest.files.apiResponseSchemaVerificationRedactionAudits = results
+    .map((result) => result.redactionAuditPath)
+    .filter(Boolean);
+  return results;
+}
+
+function summarizeCaptureVerifiedEvidenceResults(results = []) {
+  const summary = {
+    count: 0,
+    byStatus: {},
+    byEvidenceType: {},
+  };
+  for (const result of results) {
+    const status = String(result?.evidence?.verification?.status ?? 'unknown').trim() || 'unknown';
+    const evidenceType = String(
+      result?.evidence?.verification?.metadata?.evidenceType ?? 'unknown'
+    ).trim() || 'unknown';
+    summary.count += 1;
+    summary.byStatus[status] = (summary.byStatus[status] ?? 0) + 1;
+    summary.byEvidenceType[evidenceType] = (summary.byEvidenceType[evidenceType] ?? 0) + 1;
+  }
+  return summary;
+}
+
+function normalizeCaptureRefArray(value) {
+  return Array.isArray(value) ? value.filter((item) => normalizeCaptureLifecycleText(item)) : [];
+}
+
+function assertCaptureRefArrayPair(manifest, leftKey, rightKey, label) {
+  const left = normalizeCaptureRefArray(manifest.files?.[leftKey]);
+  const right = normalizeCaptureRefArray(manifest.files?.[rightKey]);
+  if (left.length !== right.length) {
+    throw new Error(`Capture ${label} refs require complete redaction audit pairs`);
+  }
+}
+
+function assertCaptureRefValuePair(manifest, leftKey, rightKey, label) {
+  const left = normalizeCaptureLifecycleText(manifest.files?.[leftKey]);
+  const right = normalizeCaptureLifecycleText(manifest.files?.[rightKey]);
+  if (Boolean(left) !== Boolean(right)) {
+    throw new Error(`Capture ${label} refs require lifecycle event and redaction audit pair`);
+  }
+  if (left && right && path.resolve(left) === path.resolve(right)) {
+    throw new Error(`Capture ${label} lifecycle event and redaction audit paths must be distinct`);
+  }
+}
+
+function assertCaptureApiCandidateRefIntegrity(manifest) {
+  assertCaptureRefArrayPair(manifest, 'apiCandidates', 'apiCandidateRedactionAudits', 'api candidate');
+  assertCaptureRefArrayPair(manifest, 'apiCandidateDecisions', 'apiCandidateDecisionRedactionAudits', 'SiteAdapter decision');
+  assertCaptureRefArrayPair(
+    manifest,
+    'apiCandidateCatalogUpgradeDecisions',
+    'apiCandidateCatalogUpgradeDecisionRedactionAudits',
+    'catalog upgrade decision',
+  );
+  assertCaptureRefArrayPair(
+    manifest,
+    'apiCandidateCatalogUpgradeDecisionLifecycleEvents',
+    'apiCandidateCatalogUpgradeDecisionLifecycleEventRedactionAudits',
+    'catalog upgrade decision lifecycle',
+  );
+  assertCaptureRefArrayPair(
+    manifest,
+    'apiResponseSchemaVerifications',
+    'apiResponseSchemaVerificationRedactionAudits',
+    'response schema verification',
+  );
+  assertCaptureRefArrayPair(
+    manifest,
+    'apiCandidateVerifiedEvidence',
+    'apiCandidateVerifiedEvidenceRedactionAudits',
+    'verified evidence',
+  );
+  assertCaptureRefArrayPair(
+    manifest,
+    'apiCandidateVerificationLifecycleEvents',
+    'apiCandidateVerificationLifecycleEventRedactionAudits',
+    'verified evidence lifecycle',
+  );
+  if (normalizeCaptureRefArray(manifest.files?.apiCandidates).length > 0) {
+    assertCaptureRefValuePair(
+      manifest,
+      'apiCandidateLifecycleEvent',
+      'apiCandidateLifecycleEventRedactionAudit',
+      'api candidate lifecycle',
+    );
+  }
+}
+
+function buildCaptureApiCandidateDataFlowRefs(manifest, candidateResults = [], decisionResults = []) {
+  const decisionsByCandidateId = new Map(decisionResults
+    .filter((result) => result?.decision?.candidateId)
+    .map((result) => [result.decision.candidateId, result]));
+  return candidateResults.map((result, index) => {
+    const candidateId = normalizeCaptureLifecycleText(result?.candidate?.id);
+    const decision = decisionsByCandidateId.get(candidateId);
+    return {
+      index,
+      apiCandidate: result?.artifactPath,
+      apiCandidateRedactionAudit: result?.redactionAuditPath,
+      apiCandidateLifecycleEvent: manifest.files.apiCandidateLifecycleEvent,
+      apiCandidateLifecycleEventRedactionAudit: manifest.files.apiCandidateLifecycleEventRedactionAudit,
+      siteAdapterDecision: decision?.artifactPath,
+      siteAdapterDecisionRedactionAudit: decision?.redactionAuditPath,
+      catalogUpgradeDecision: decision?.catalogUpgradeDecisionArtifactPath,
+      catalogUpgradeDecisionRedactionAudit: decision?.catalogUpgradeDecisionRedactionAuditPath,
+      catalogUpgradeDecisionLifecycleEvent: decision?.catalogUpgradeDecisionLifecycleEventPath,
+      catalogUpgradeDecisionLifecycleEventRedactionAudit:
+        decision?.catalogUpgradeDecisionLifecycleEventRedactionAuditPath,
+    };
+  });
+}
+
+function preflightCaptureApiCandidateDataFlow(manifest, {
+  outputDir,
+  decisionOutputDir,
+  lifecycleEventPath,
+  lifecycleEventRedactionAuditPath,
+} = {}) {
+  if (!Array.isArray(manifest.networkRequests) || manifest.networkRequests.length === 0) {
+    return [];
+  }
+  assertCaptureRefValuePair({
+    files: {
+      apiCandidateLifecycleEvent: lifecycleEventPath,
+      apiCandidateLifecycleEventRedactionAudit: lifecycleEventRedactionAuditPath,
+    },
+  }, 'apiCandidateLifecycleEvent', 'apiCandidateLifecycleEventRedactionAudit', 'api candidate lifecycle');
+
+  return manifest.networkRequests.map((request, index) => {
+    const candidate = apiCandidateFromObservedRequest(request);
+    const adapter = resolveSiteAdapter({
+      candidate,
+      host: candidate.siteKey,
+      inputUrl: candidate.endpoint?.url,
+    });
+    if (typeof adapter?.validateApiCandidate !== 'function') {
+      throw annotateCaptureApiFailureRiskState(createApiDiscoveryFailure(
+        'site-adapter-core-api-unidentified',
+        `SiteAdapter could not identify a core API validation path for ${candidate.siteKey}`,
+        {
+          stage: 'capture-site-adapter-preflight',
+          metadata: {
+            candidateIndex: index,
+            siteKey: candidate.siteKey,
+            candidateArtifact: path.join(outputDir, captureApiCandidateArtifactName(index)),
+          },
+        },
+      ), {
+        manifest,
+        scope: 'capture-site-adapter-preflight',
+        siteKey: candidate.siteKey,
+        taskId: `capture-api-candidate:${index}`,
+      });
+    }
+    const candidateArtifact = path.join(outputDir, captureApiCandidateArtifactName(index));
+    const siteAdapterDecisionArtifact = path.join(decisionOutputDir, captureApiCandidateDecisionArtifactName(index));
+    const decision = validateApiCandidateWithAdapter(candidate, adapter, {
+      validatedAt: manifest.capturedAt,
+      scope: {
+        validationMode: 'capture-observed-candidate',
+        candidateArtifact,
+      },
+      evidence: {
+        source: 'capture-api-candidate-artifact',
+        artifactPath: candidateArtifact,
+      },
+    });
+    if (typeof adapter.getApiCatalogUpgradePolicy === 'function') {
+      adapter.getApiCatalogUpgradePolicy({
+        candidate,
+        siteAdapterDecision: decision,
+        decidedAt: manifest.capturedAt,
+        scope: {
+          validationMode: 'capture-observed-candidate',
+          candidateArtifact,
+          siteAdapterDecisionArtifact,
+        },
+        evidence: {
+          source: 'capture-api-candidate-artifact',
+          candidateArtifact,
+          siteAdapterDecisionArtifact,
+        },
+      });
+    }
+    return candidate;
+  });
+}
+
+async function writeCaptureMultiAspectVerificationEvidence(manifest, candidateResults = [], decisionResults = []) {
+  const records = buildCaptureMultiAspectVerificationRecords(manifest, candidateResults, decisionResults);
+  if (records.length === 0) {
+    return [];
+  }
+
+  const manifestDir = path.dirname(manifest.files.manifest);
+  const outputDir = manifest.files.apiCandidateVerifiedEvidenceDir
+    ?? path.join(manifestDir, 'api-candidate-verified-evidence');
+  const redactionAuditDir = manifest.files.apiCandidateVerifiedEvidenceRedactionAuditsDir
+    ?? path.join(manifestDir, 'api-candidate-verified-evidence-redaction-audits');
+  const lifecycleEventOutputDir = manifest.files.apiCandidateVerificationLifecycleEventsDir
+    ?? path.join(manifestDir, 'api-candidate-verification-lifecycle-events');
+  const lifecycleEventRedactionAuditDir = manifest.files.apiCandidateVerificationLifecycleEventRedactionAuditsDir
+    ?? path.join(manifestDir, 'api-candidate-verification-lifecycle-event-redaction-audits');
+  const lifecycleContext = captureLifecycleContext(manifest);
+  const results = await writeManualApiCandidateVerificationArtifacts(records, {
+    outputDir,
+    redactionAuditDir,
+    lifecycleEventOutputDir,
+    lifecycleEventRedactionAuditDir,
+    lifecycleEventTraceId: lifecycleContext.traceId,
+    lifecycleEventCorrelationId: lifecycleContext.correlationId,
+    lifecycleEventTaskType: lifecycleContext.taskType,
+    lifecycleEventAdapterVersion: lifecycleContext.adapterVersion,
+  });
+  manifest.files.apiCandidateVerifiedEvidenceDir = outputDir;
+  manifest.files.apiCandidateVerifiedEvidenceRedactionAuditsDir = redactionAuditDir;
+  manifest.files.apiCandidateVerificationLifecycleEventsDir = lifecycleEventOutputDir;
+  manifest.files.apiCandidateVerificationLifecycleEventRedactionAuditsDir = lifecycleEventRedactionAuditDir;
+  manifest.files.apiCandidateVerifiedEvidence = results.map((result) => result.artifactPath);
+  manifest.files.apiCandidateVerifiedEvidenceRedactionAudits = results
+    .map((result) => result.redactionAuditPath)
+    .filter(Boolean);
+  manifest.files.apiCandidateVerificationLifecycleEvents = results
+    .map((result) => result.lifecycleEventPath)
+    .filter(Boolean);
+  manifest.files.apiCandidateVerificationLifecycleEventRedactionAudits = results
+    .map((result) => result.lifecycleEventRedactionAuditPath)
+    .filter(Boolean);
+  return results;
+}
+
+async function writeCaptureApiCandidates(manifest, {
+  capabilityHookRegistry = undefined,
+  capabilityHooks = undefined,
+} = {}) {
+  if (!Array.isArray(manifest.networkRequests) || manifest.networkRequests.length === 0) {
+    return [];
+  }
+
+  const manifestDir = path.dirname(manifest.files.manifest);
+  const outputDir = manifest.files.apiCandidatesDir ?? path.join(manifestDir, 'api-candidates');
+  const redactionAuditDir = manifest.files.apiCandidateRedactionAuditsDir
+    ?? path.join(manifestDir, 'api-candidate-redaction-audits');
+  const lifecycleEventPath = manifest.files.apiCandidateLifecycleEvent
+    ?? path.join(manifestDir, 'api-candidates-lifecycle-event.json');
+  const lifecycleEventRedactionAuditPath = manifest.files.apiCandidateLifecycleEventRedactionAudit
+    ?? path.join(manifestDir, 'api-candidates-lifecycle-event-redaction-audit.json');
+  const decisionOutputDir = manifest.files.apiCandidateDecisionsDir
+    ?? path.join(manifestDir, 'api-candidate-decisions');
+  try {
+    preflightCaptureApiCandidateDataFlow(manifest, {
+      outputDir,
+      decisionOutputDir,
+      lifecycleEventPath,
+      lifecycleEventRedactionAuditPath,
+    });
+  } catch (error) {
+    throw annotateCaptureApiFailureRiskState(error, {
+      manifest,
+      scope: 'capture-api-candidate-preflight',
+    });
+  }
+  let results;
+  try {
+    results = await writeApiCandidateArtifactsFromCaptureOutput({
+      networkRequests: manifest.networkRequests,
+    }, {
+      outputDir,
+      redactionAuditDir,
+    });
+  } catch (error) {
+    throw annotateCaptureApiFailureRiskState(error, {
+      manifest,
+      scope: 'capture-api-candidate-generation',
+    });
+  }
+  manifest.files.apiCandidatesDir = outputDir;
+  manifest.files.apiCandidateRedactionAuditsDir = redactionAuditDir;
+  manifest.files.apiCandidates = results.map((result) => result.artifactPath);
+  manifest.files.apiCandidateRedactionAudits = results.map((result) => result.redactionAuditPath).filter(Boolean);
+  let decisionResults;
+  try {
+    decisionResults = await writeCaptureApiCandidateAdapterDecisions(manifest, results);
+  } catch (error) {
+    throw annotateCaptureApiFailureRiskState(error, {
+      manifest,
+      scope: 'capture-site-adapter-decision',
+    });
+  }
+  const responseSchemaVerificationResults = await writeCaptureResponseSchemaVerificationResults(manifest, results);
+  const multiAspectVerificationResults = await writeCaptureMultiAspectVerificationEvidence(
+    manifest,
+    results,
+    decisionResults,
+  );
+  manifest.files.apiCandidateLifecycleEvent = lifecycleEventPath;
+  manifest.files.apiCandidateLifecycleEventRedactionAudit = lifecycleEventRedactionAuditPath;
+  assertCaptureApiCandidateRefIntegrity(manifest);
+  manifest.apiCandidateDataFlowRefs = buildCaptureApiCandidateDataFlowRefs(manifest, results, decisionResults);
+  let apiCandidateLifecycleEvent = normalizeLifecycleEvent({
+    eventType: 'capture.api_candidates.written',
+    ...captureLifecycleContext(manifest),
+    taskId: manifest.files.manifest,
+    siteKey: resolveCaptureLifecycleSiteKey(manifest),
+    createdAt: manifest.capturedAt,
+    details: {
+      status: manifest.status,
+      count: results.length,
+      apiCandidates: manifest.files.apiCandidates,
+      apiCandidateRedactionAudits: manifest.files.apiCandidateRedactionAudits,
+      apiCandidateDecisions: manifest.files.apiCandidateDecisions ?? [],
+      apiCandidateDecisionRedactionAudits: manifest.files.apiCandidateDecisionRedactionAudits ?? [],
+      apiCandidateDecisionSummary: summarizeCaptureDecisionResults(decisionResults),
+      apiCandidateRiskStates: captureApiDecisionRiskStateSummaries(decisionResults, {
+        observedAt: manifest.capturedAt,
+      }),
+      apiCandidateCatalogUpgradeDecisions: manifest.files.apiCandidateCatalogUpgradeDecisions ?? [],
+      apiCandidateCatalogUpgradeDecisionRedactionAudits:
+        manifest.files.apiCandidateCatalogUpgradeDecisionRedactionAudits ?? [],
+      apiCandidateCatalogUpgradeDecisionLifecycleEvents:
+        manifest.files.apiCandidateCatalogUpgradeDecisionLifecycleEvents ?? [],
+      apiCandidateCatalogUpgradeDecisionLifecycleEventRedactionAudits:
+        manifest.files.apiCandidateCatalogUpgradeDecisionLifecycleEventRedactionAudits ?? [],
+      apiCandidateCatalogUpgradeDecisionSummary:
+        summarizeCaptureCatalogUpgradeDecisionResults(decisionResults),
+      apiCandidateCatalogUpgradeRiskStates: captureApiCatalogUpgradeRiskStateSummaries(decisionResults, {
+        observedAt: manifest.capturedAt,
+      }),
+      apiResponseSchemaVerifications: manifest.files.apiResponseSchemaVerifications ?? [],
+      apiResponseSchemaVerificationRedactionAudits:
+        manifest.files.apiResponseSchemaVerificationRedactionAudits ?? [],
+      apiResponseSchemaVerificationSummary:
+        summarizeCaptureResponseSchemaVerificationResults(responseSchemaVerificationResults),
+      apiCandidateVerifiedEvidence: manifest.files.apiCandidateVerifiedEvidence ?? [],
+      apiCandidateVerifiedEvidenceRedactionAudits:
+        manifest.files.apiCandidateVerifiedEvidenceRedactionAudits ?? [],
+      apiCandidateVerificationLifecycleEvents:
+        manifest.files.apiCandidateVerificationLifecycleEvents ?? [],
+      apiCandidateVerificationLifecycleEventRedactionAudits:
+        manifest.files.apiCandidateVerificationLifecycleEventRedactionAudits ?? [],
+      apiCandidateVerifiedEvidenceSummary:
+        summarizeCaptureVerifiedEvidenceResults(multiAspectVerificationResults),
+      apiCandidateDataFlowRefs: manifest.apiCandidateDataFlowRefs,
+    },
+  });
+  const capabilityHookMatches = capabilityHookMatchSummaryForLifecycleEvent(apiCandidateLifecycleEvent, {
+    capabilityHookRegistry,
+    capabilityHooks,
+  });
+  if (capabilityHookMatches) {
+    apiCandidateLifecycleEvent = normalizeLifecycleEvent({
+      ...apiCandidateLifecycleEvent,
+      details: {
+        ...apiCandidateLifecycleEvent.details,
+        capabilityHookMatches,
+      },
+    });
+  }
+  assertSchemaCompatible('LifecycleEvent', apiCandidateLifecycleEvent);
+  await dispatchLifecycleEvent(apiCandidateLifecycleEvent, {
+    subscribers: [
+      createLifecycleArtifactWriterSubscriber({
+        eventPath: manifest.files.apiCandidateLifecycleEvent,
+        auditPath: manifest.files.apiCandidateLifecycleEventRedactionAudit,
+      }),
+    ],
+  });
+  return {
+    candidates: results,
+    decisions: decisionResults,
+  };
+}
+
+function normalizeCaptureLifecycleText(value) {
+  const text = String(value ?? '').trim();
+  return text || undefined;
+}
+
+function captureLifecycleContext(manifest = {}) {
+  const traceId = normalizeCaptureLifecycleText(manifest.traceId ?? manifest.runId)
+    ?? `capture:${normalizeCaptureLifecycleText(manifest.capturedAt) ?? 'unknown-time'}`;
+  return {
+    traceId,
+    correlationId: normalizeCaptureLifecycleText(manifest.correlationId ?? manifest.taskId ?? traceId),
+    taskType: normalizeCaptureLifecycleText(manifest.taskType) ?? 'capture',
+    adapterVersion: normalizeCaptureLifecycleText(manifest.adapterVersion) ?? 'capture-stage-v1',
+  };
+}
+
+function resolveCaptureLifecycleSiteKey(manifest = {}) {
+  const explicit = normalizeCaptureLifecycleText(
+    manifest.siteKey
+      ?? manifest.siteProfile?.siteKey
+      ?? manifest.networkRequests?.find((request) => request?.siteKey)?.siteKey,
+  );
+  if (explicit) {
+    return explicit;
+  }
+  for (const value of [manifest.finalUrl, manifest.inputUrl]) {
+    try {
+      const host = new URL(String(value ?? '')).hostname;
+      const normalized = normalizeCaptureLifecycleText(host);
+      if (normalized) {
+        return normalized;
+      }
+    } catch {
+      // Keep invalid capture inputs fail-closed through the lifecycle producer guard.
+    }
+  }
+  return 'unknown-site';
+}
+
+async function writeManifest(manifest, {
+  lifecycleEventSubscribers = [],
+  capabilityHookRegistry = undefined,
+  capabilityHooks = undefined,
+} = {}) {
+  const manifestDir = path.dirname(manifest.files.manifest);
+  const redactionAuditPath = path.join(manifestDir, 'redaction-audit.json');
+  const lifecycleEventPath = path.join(manifestDir, 'lifecycle-event.json');
+  const lifecycleEventRedactionAuditPath = path.join(manifestDir, 'lifecycle-event-redaction-audit.json');
+  manifest.files.redactionAudit = manifest.files.redactionAudit ?? redactionAuditPath;
+  manifest.files.lifecycleEvent = manifest.files.lifecycleEvent ?? lifecycleEventPath;
+  manifest.files.lifecycleEventRedactionAudit = manifest.files.lifecycleEventRedactionAudit ?? lifecycleEventRedactionAuditPath;
+  setManifestNetworkResponseSummaries(manifest, manifest.networkResponseSummaries);
+  preflightCaptureResponseSchemaVerification(manifest);
+  preflightCaptureMultiAspectVerification(manifest);
+  await writeCaptureApiCandidates(manifest, {
+    capabilityHookRegistry,
+    capabilityHooks,
+  });
+  let lifecycleEvent = normalizeLifecycleEvent({
+    eventType: 'capture.manifest.written',
+    ...captureLifecycleContext(manifest),
+    taskId: manifest.files.manifest,
+    siteKey: resolveCaptureLifecycleSiteKey(manifest),
+    reasonCode: manifest.error?.code,
+    createdAt: manifest.capturedAt,
+    details: {
+      status: manifest.status,
+      inputUrl: manifest.inputUrl,
+      finalUrl: manifest.finalUrl,
+      errorCode: manifest.error?.code,
+    },
+  });
+  const capabilityHookMatches = capabilityHookMatchSummaryForLifecycleEvent(lifecycleEvent, {
+    capabilityHookRegistry,
+    capabilityHooks,
+  });
+  if (capabilityHookMatches) {
+    lifecycleEvent = normalizeLifecycleEvent({
+      ...lifecycleEvent,
+      details: {
+        ...lifecycleEvent.details,
+        capabilityHookMatches,
+      },
+    });
+  }
+  assertSchemaCompatible('LifecycleEvent', lifecycleEvent);
+  await dispatchLifecycleEvent(lifecycleEvent, {
+    subscribers: composeLifecycleSubscribers(
+      lifecycleEventSubscribers,
+      createLifecycleArtifactWriterSubscriber({
+        eventPath: manifest.files.lifecycleEvent,
+        auditPath: manifest.files.lifecycleEventRedactionAudit,
+      }),
+    ),
+  });
+  const { json, auditJson } = prepareRedactedArtifactJsonWithAudit(manifest);
+  await writeFile(manifest.files.manifest, json, 'utf8');
+  await writeFile(manifest.files.redactionAudit, auditJson, 'utf8');
 }
 
 async function createOutputLayout(inputUrl, outDir) {
@@ -296,6 +1421,8 @@ async function createOutputLayout(inputUrl, outDir) {
   return {
     outDir: captureDir,
     capturedAt,
+    traceId: `capture:${dirTimestamp}:${host}`,
+    correlationId: `capture:${host}`,
     htmlPath: path.join(captureDir, 'page.html'),
     snapshotPath: path.join(captureDir, 'dom-snapshot.json'),
     screenshotPath: path.join(captureDir, 'screenshot.png'),
@@ -459,8 +1586,8 @@ export async function writeCaptureArtifacts(layout, captureResult) {
   await Promise.all(writes);
 }
 
-export async function writeCaptureManifest(manifest) {
-  await writeManifest(manifest);
+export async function writeCaptureManifest(manifest, options = {}) {
+  await writeManifest(manifest, options);
 }
 
 export async function capture(inputUrl, options = {}) {
@@ -476,6 +1603,8 @@ export async function capture(inputUrl, options = {}) {
     snapshotPath: layout.snapshotPath,
     screenshotPath: layout.screenshotPath,
     manifestPath: layout.manifestPath,
+    traceId: layout.traceId,
+    correlationId: layout.correlationId,
     viewport: settings.viewport,
   });
 
@@ -536,6 +1665,8 @@ export async function capture(inputUrl, options = {}) {
         }
 
         manifest.status = manifest.error ? (artifactCount > 0 ? 'partial' : 'failed') : 'success';
+        await attachObservedNetworkRequests(manifest, session, settings, inputUrl);
+        await attachObservedNetworkResponseSummaries(manifest, session, settings, inputUrl);
         await writeCaptureManifest(manifest);
         await closeSessionQuietly(session);
         return manifest;

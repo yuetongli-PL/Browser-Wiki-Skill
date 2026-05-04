@@ -1,11 +1,19 @@
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
-import { ensureDir, writeJsonFile, writeTextFile } from '../../../infra/io.mjs';
+import { ensureDir, writeTextFile } from '../../../infra/io.mjs';
 import { CdpClient } from '../../../infra/browser/cdp-client.mjs';
 import { delay, detectBrowserPath, readExistingBrowserDevTools } from '../../../infra/browser/launcher.mjs';
 import { resolveSiteAuthProfile, resolveSiteBrowserSessionOptions } from '../../../infra/auth/site-auth.mjs';
 import { inferPageTypeFromUrl } from '../../core/page-types.mjs';
+import {
+  REDACTION_PLACEHOLDER,
+  SECURITY_GUARD_SCHEMA_VERSION,
+  assertNoForbiddenPatterns,
+  prepareRedactedArtifactJson,
+  prepareRedactedArtifactJsonWithAudit,
+  redactValue,
+} from '../../capability/security-guard.mjs';
 
 const AUTH_REQUIRED_DEFAULT_SUBPAGES = Object.freeze([
   'dynamic',
@@ -18,8 +26,83 @@ const AUTH_REQUIRED_DEFAULT_PATH_PREFIXES = Object.freeze([
   '/favlist',
 ]);
 
+const BILIBILI_OPEN_REPORT_PROFILE_KEYS = Object.freeze(new Set([
+  'profilePath',
+  'userDataDir',
+  'usedProfileDir',
+]));
+
 function formatTimestampForDir(date = new Date()) {
   return date.toISOString().replace(/[-:]/g, '').replace(/\.(\d{3})Z$/, '$1Z');
+}
+
+function isPlainObject(value) {
+  return value !== null
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+function auditPath(pathParts) {
+  return pathParts.join('.');
+}
+
+function redactBilibiliOpenProfileRefs(value, pathParts = [], audit = {
+  schemaVersion: SECURITY_GUARD_SCHEMA_VERSION,
+  redactedPaths: [],
+  findings: [],
+}) {
+  if (Array.isArray(value)) {
+    return {
+      value: value.map((item, index) => redactBilibiliOpenProfileRefs(item, [...pathParts, String(index)], audit).value),
+      audit,
+    };
+  }
+  if (!isPlainObject(value)) {
+    return { value, audit };
+  }
+  const output = {};
+  for (const [key, child] of Object.entries(value)) {
+    const childPath = [...pathParts, key];
+    if (BILIBILI_OPEN_REPORT_PROFILE_KEYS.has(key)) {
+      output[key] = REDACTION_PLACEHOLDER;
+      audit.redactedPaths.push(auditPath(childPath));
+      continue;
+    }
+    output[key] = redactBilibiliOpenProfileRefs(child, childPath, audit).value;
+  }
+  return { value: output, audit };
+}
+
+function mergeRedactionAudits(...audits) {
+  const redactedPaths = [];
+  const findings = [];
+  for (const audit of audits) {
+    if (!audit || typeof audit !== 'object') {
+      continue;
+    }
+    redactedPaths.push(...(Array.isArray(audit.redactedPaths) ? audit.redactedPaths : []));
+    findings.push(...(Array.isArray(audit.findings) ? audit.findings : []));
+  }
+  return {
+    schemaVersion: SECURITY_GUARD_SCHEMA_VERSION,
+    redactedPaths: [...new Set(redactedPaths)],
+    findings,
+  };
+}
+
+function createBilibiliOpenReportRedactionFailure(error) {
+  const causeSummary = redactValue({
+    name: error instanceof Error ? error.name : undefined,
+    code: error && typeof error === 'object' ? error.code : undefined,
+  }).value;
+  const failure = new Error('Redaction failed for bilibili open report; persistent report write blocked');
+  failure.name = 'BilibiliOpenReportRedactionFailure';
+  failure.code = 'redaction-failed';
+  failure.reasonCode = 'redaction-failed';
+  failure.artifactWriteAllowed = false;
+  failure.causeSummary = causeSummary;
+  return failure;
 }
 
 function normalizeHostname(value) {
@@ -353,16 +436,44 @@ export async function openBilibiliPageInLocalBrowser(targetUrl, options = {}, de
 
 export const openBilibiliPage = openBilibiliPageInLocalBrowser;
 
+export function prepareBilibiliOpenReportArtifacts(report) {
+  try {
+    const profileRedacted = redactBilibiliOpenProfileRefs(report);
+    const preparedJson = prepareRedactedArtifactJsonWithAudit(profileRedacted.value);
+    const markdown = buildMarkdownReport(preparedJson.value);
+    const redactedMarkdown = redactValue(String(markdown ?? ''));
+    const markdownText = String(redactedMarkdown.value ?? '');
+    assertNoForbiddenPatterns(markdownText);
+    const jsonAudit = mergeRedactionAudits(profileRedacted.audit, preparedJson.auditValue);
+    const markdownAudit = mergeRedactionAudits(profileRedacted.audit, redactedMarkdown.audit);
+    return {
+      json: preparedJson.json,
+      jsonAudit: prepareRedactedArtifactJson(jsonAudit).json,
+      markdown: markdownText,
+      markdownAudit: prepareRedactedArtifactJson(markdownAudit).json,
+    };
+  } catch (error) {
+    throw createBilibiliOpenReportRedactionFailure(error);
+  }
+}
+
 export async function writeBilibiliOpenReport(report, outDir) {
   const reportDir = path.resolve(outDir, `${formatTimestampForDir()}_bilibili-open`);
+  const prepared = prepareBilibiliOpenReportArtifacts(report);
   await ensureDir(reportDir);
   const jsonPath = path.join(reportDir, 'bilibili-open-report.json');
+  const jsonAuditPath = path.join(reportDir, 'bilibili-open-report.redaction-audit.json');
   const markdownPath = path.join(reportDir, 'bilibili-open-report.md');
-  await writeJsonFile(jsonPath, report);
-  await writeTextFile(markdownPath, buildMarkdownReport(report));
+  const markdownAuditPath = path.join(reportDir, 'bilibili-open-report.md.redaction-audit.json');
+  await writeTextFile(jsonPath, prepared.json);
+  await writeTextFile(jsonAuditPath, prepared.jsonAudit);
+  await writeTextFile(markdownPath, prepared.markdown);
+  await writeTextFile(markdownAuditPath, prepared.markdownAudit);
   return {
     dir: reportDir,
     json: jsonPath,
+    jsonRedactionAudit: jsonAuditPath,
     markdown: markdownPath,
+    markdownRedactionAudit: markdownAuditPath,
   };
 }

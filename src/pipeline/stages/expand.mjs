@@ -18,8 +18,12 @@ import {
   derivePageFacts as deriveSharedPageFacts,
   mergePageStateEvidence,
 } from '../../shared/page-state-runtime.mjs';
-import { isXiaohongshuUrl } from '../../shared/xiaohongshu-risk.mjs';
 import { inferPageTypeFromUrl, isContentDetailPageType as isSharedContentDetailPageType } from '../../sites/core/page-types.mjs';
+import { resolveSiteAdapter } from '../../sites/core/adapters/resolver.mjs';
+import {
+  prepareRedactedArtifactJson,
+  prepareRedactedArtifactJsonWithAudit,
+} from '../../sites/capability/security-guard.mjs';
 import { isDouyinSiteProfile, resolveDouyinHeadlessDefault } from '../../sites/douyin/model/site.mjs';
 import {
   resolveDouyinReadySelectors,
@@ -89,11 +93,12 @@ function isDocumentReadyTimeout(error) {
 }
 
 function isXiaohongshuSiteProfile(siteProfile = null, inputUrl = '') {
-  const profileHost = String(siteProfile?.host ?? '').toLowerCase();
-  if (profileHost === 'www.xiaohongshu.com' || profileHost === 'xiaohongshu.com') {
-    return true;
-  }
-  return isXiaohongshuUrl(inputUrl);
+  const adapter = resolveSiteAdapter({
+    host: siteProfile?.host ?? null,
+    inputUrl,
+    profile: siteProfile,
+  });
+  return adapter?.id === 'xiaohongshu' || adapter?.siteKey === 'xiaohongshu';
 }
 
 function resolveExpandHeadlessDefault(inputUrl, fallback = true, siteProfile = null) {
@@ -1200,7 +1205,11 @@ function buildTopLevelManifest(inputUrl, baseUrl, layout) {
 }
 
 async function writeTopLevelManifest(manifestPath, manifest) {
-  await writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
+  const redactionAuditPath = path.join(path.dirname(manifestPath), 'redaction-audit.json');
+  manifest.redactionAudit = manifest.redactionAudit ?? redactionAuditPath;
+  const { json, auditJson } = prepareRedactedArtifactJsonWithAudit(manifest);
+  await writeFile(manifestPath, json, 'utf8');
+  await writeFile(manifest.redactionAudit, auditJson, 'utf8');
 }
 
 async function resolveInitialManifest(options) {
@@ -1279,6 +1288,7 @@ async function captureCurrentState({
   siteProfile,
 }) {
   const files = buildStateFiles(stateDir);
+  files.redactionAudit = path.join(stateDir, 'redaction-audit.json');
   const capturedAt = new Date().toISOString();
   let hardFailure = null;
   let warning = null;
@@ -1375,7 +1385,9 @@ async function captureCurrentState({
     error: hardFailure ?? warning,
   };
 
-  await writeFile(files.manifest, JSON.stringify(manifest, null, 2), 'utf8');
+  const { json, auditJson } = prepareRedactedArtifactJsonWithAudit(manifest);
+  await writeFile(files.manifest, json, 'utf8');
+  await writeFile(files.redactionAudit, auditJson, 'utf8');
   return manifest;
 }
 
@@ -1399,6 +1411,7 @@ async function copyInitialState(initialManifest, layout, dedupKey, liveInitialSi
   const stateId = 's0000';
   const stateDir = path.join(layout.statesDir, `${stateId}_initial`);
   const files = buildStateFiles(stateDir);
+  files.redactionAudit = path.join(stateDir, 'redaction-audit.json');
   const normalizedEvidence = normalizePageEvidence(
     liveInitialSignature?.pageFacts ?? initialManifest.pageFacts ?? null,
     liveInitialSignature?.runtimeEvidence ?? null,
@@ -1432,7 +1445,9 @@ async function copyInitialState(initialManifest, layout, dedupKey, liveInitialSi
     source_manifest_path: initialManifest.files.manifest,
   };
 
-  await writeFile(files.manifest, JSON.stringify(manifest, null, 2), 'utf8');
+  const { json, auditJson } = prepareRedactedArtifactJsonWithAudit(manifest);
+  await writeFile(files.manifest, json, 'utf8');
+  await writeFile(files.redactionAudit, auditJson, 'utf8');
   return manifest;
 }
 

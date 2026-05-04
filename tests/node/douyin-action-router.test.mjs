@@ -6,6 +6,8 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 
 import {
   buildDouyinActionRequest,
+  douyinActionCliJson,
+  douyinActionCliMarkdown,
   DOUYIN_ACTION_HELP,
   parseDouyinActionArgs,
   runDouyinActionCli,
@@ -15,6 +17,7 @@ import {
   planDouyinAction,
   runDouyinAction,
 } from '../../src/sites/douyin/actions/router.mjs';
+import { reasonCodeSummary } from '../../src/sites/capability/reason-codes.mjs';
 
 test('classifyDouyinDownloadInput recognizes video ids, detail urls, and author urls', () => {
   assert.equal(classifyDouyinDownloadInput('7487317288315258152').inputKind, 'video-detail');
@@ -60,6 +63,91 @@ test('runDouyinActionCli help exposes unified session flags without running acti
   } finally {
     process.stdout.write = originalWrite;
   }
+});
+
+test('Douyin action CLI JSON output redacts sensitive diagnostics', () => {
+  const output = douyinActionCliJson({
+    ok: false,
+    authHealth: {
+      headers: {
+        authorization: 'Bearer synthetic-douyin-cli-json-auth',
+        cookie: 'SESSDATA=synthetic-douyin-cli-json-cookie',
+      },
+      csrfToken: 'synthetic-douyin-cli-json-csrf',
+    },
+    runtimeRisk: {
+      details: 'refresh_token=synthetic-douyin-cli-json-refresh',
+    },
+  });
+
+  assert.doesNotMatch(
+    output,
+    /synthetic-douyin-cli-json-|SESSDATA|refresh_token=|Bearer/iu,
+  );
+  const parsed = JSON.parse(output);
+  assert.equal(parsed.authHealth.headers.authorization, '[REDACTED]');
+  assert.equal(parsed.authHealth.headers.cookie, '[REDACTED]');
+  assert.equal(parsed.authHealth.csrfToken, '[REDACTED]');
+  assert.equal(parsed.runtimeRisk.details, '[REDACTED]');
+});
+
+test('Douyin action CLI Markdown output redacts sensitive diagnostics and fallback JSON', () => {
+  const markdown = douyinActionCliMarkdown([
+    '# Douyin Download Action',
+    'Authorization: Bearer synthetic-douyin-cli-markdown-auth',
+    'csrf=synthetic-douyin-cli-markdown-csrf',
+  ].join('\n'));
+  assert.doesNotMatch(
+    markdown,
+    /synthetic-douyin-cli-markdown-|Authorization: Bearer|csrf=/iu,
+  );
+  assert.match(markdown, /\[REDACTED\]/u);
+
+  const fallback = douyinActionCliMarkdown('', {
+    ok: false,
+    headers: {
+      authorization: 'Bearer synthetic-douyin-cli-fallback-auth',
+    },
+  });
+  assert.doesNotMatch(fallback, /synthetic-douyin-cli-fallback-|Bearer/iu);
+  assert.equal(JSON.parse(fallback).headers.authorization, '[REDACTED]');
+});
+
+test('Douyin action CLI output fails closed without raw cause exposure', () => {
+  const recovery = reasonCodeSummary('redaction-failed');
+  const payload = {
+    toJSON() {
+      throw new Error(
+        'Authorization: Bearer synthetic-douyin-cli-cause-token csrf=synthetic-douyin-cli-cause-csrf',
+      );
+    },
+  };
+
+  assert.throws(
+    () => douyinActionCliJson(payload),
+    (error) => {
+      assert.equal(error.name, 'DouyinActionCliOutputRedactionFailure');
+      assert.equal(error.reasonCode, 'redaction-failed');
+      assert.equal(error.retryable, recovery.retryable);
+      assert.equal(error.cooldownNeeded, recovery.cooldownNeeded);
+      assert.equal(error.isolationNeeded, recovery.isolationNeeded);
+      assert.equal(error.manualRecoveryNeeded, recovery.manualRecoveryNeeded);
+      assert.equal(error.degradable, recovery.degradable);
+      assert.equal(error.artifactWriteAllowed, recovery.artifactWriteAllowed);
+      assert.equal(error.catalogAction, recovery.catalogAction);
+      assert.equal(error.diagnosticWriteAllowed, false);
+      assert.equal(Object.hasOwn(error, 'cause'), false);
+      assert.deepEqual(error.causeSummary, {
+        name: 'Error',
+        code: null,
+      });
+      assert.doesNotMatch(
+        `${error.message}\n${JSON.stringify(error)}`,
+        /synthetic-douyin-cli-cause-|Authorization: Bearer|csrf=/iu,
+      );
+      return true;
+    },
+  );
 });
 
 test('buildDouyinActionRequest carries unified session manifest options into router request', async () => {

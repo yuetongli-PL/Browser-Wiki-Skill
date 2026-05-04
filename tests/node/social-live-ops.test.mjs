@@ -13,6 +13,15 @@ import {
   parseArgs as parseHealthArgs,
 } from '../../scripts/social-health-watch.mjs';
 import {
+  buildManifest as buildAuthRecoverManifest,
+  buildRecoveryPlan,
+  parseArgs as parseAuthRecoverArgs,
+} from '../../scripts/social-auth-recover.mjs';
+import {
+  prepareSocialManifestJsonWithAudit,
+} from '../../tools/social-redaction.mjs';
+import { REDACTION_PLACEHOLDER } from '../../src/sites/capability/security-guard.mjs';
+import {
   buildReport,
   parseArgs as parseReportArgs,
   writeReport,
@@ -35,8 +44,14 @@ test('social-command-templates emits unified X and Instagram commands', () => {
   assert.deepEqual(templates.sites.map((site) => site.site), ['x', 'instagram']);
   assert.match(templates.sites[0].productionCommands[0], /x-action\.mjs full-archive openai/u);
   assert.match(templates.sites[0].resumeCommand, /social-live-resume\.mjs --site x/u);
-  assert.match(templates.sites[1].kbWatchCommand, /social-kb-refresh\.mjs --site instagram --watch/u);
+  assert.match(templates.sites[1].kbWatchCommand, /social-kb-refresh\.mjs --execute --site instagram --watch/u);
   for (const site of templates.sites) {
+    assert.ok(site.dryRunCommands.every((command) => command.risk.includes('dry-run')));
+    assert.ok(site.executeCommands.every((command) => command.risk.includes('execute')));
+    assert.match(site.planJsonCommand, /social-live-verify\.mjs --plan-json/u);
+    assert.match(site.kbRefreshCommand, /social-kb-refresh\.mjs --plan-only/u);
+    assert.match(site.kbPlanJsonCommand, /social-kb-refresh\.mjs --plan-json/u);
+    assert.match(site.kbExecuteCommand, /social-kb-refresh\.mjs --execute/u);
     for (const command of site.productionCommands) {
       assert.match(command, /--session-health-plan/u);
     }
@@ -55,6 +70,58 @@ test('social-health-watch dry-run plan includes session health, keepalive, auth 
   assert.match(plan.sites[0].commands[1].commandLine, /site-keepalive\.mjs/u);
   assert.match(plan.sites[0].commands[2].commandLine, /site-doctor\.mjs/u);
   assert.match(plan.sites[0].commands[2].commandLine, /--session-manifest/u);
+});
+
+test('social auth recovery and health watch manifests redact path-bearing commands before persistence', () => {
+  const rawProfileRoot = path.join(os.tmpdir(), 'bwk social profile root');
+  const rawUserDataDir = path.join(rawProfileRoot, 'x.com');
+  const rawRunRoot = path.join(os.tmpdir(), 'bwk social runs');
+  const now = new Date('2026-04-26T00:00:00.000Z');
+
+  const healthPlan = buildHealthPlan(parseHealthArgs([
+    '--site', 'x',
+    '--run-root', rawRunRoot,
+    '--browser-profile-root', rawProfileRoot,
+    '--user-data-dir', rawUserDataDir,
+  ]), now);
+  const healthPrepared = prepareSocialManifestJsonWithAudit(healthPlan);
+  assert.equal(healthPrepared.json.includes(rawProfileRoot), false);
+  assert.equal(healthPrepared.json.includes(rawUserDataDir), false);
+  assert.equal(healthPrepared.json.includes(path.resolve('profiles', 'x.com.json')), false);
+  assert.equal(healthPrepared.auditJson.includes(rawProfileRoot), false);
+
+  const persistedHealth = JSON.parse(healthPrepared.json);
+  assert.equal(persistedHealth.runDir, REDACTION_PLACEHOLDER);
+  assert.equal(persistedHealth.sites[0].commands[1].args[1], 'https://x.com/home');
+  assert.equal(persistedHealth.sites[0].commands[0].commandLine, REDACTION_PLACEHOLDER);
+  assert.equal(persistedHealth.sites[0].commands[0].args.includes(REDACTION_PLACEHOLDER), true);
+
+  const recoverOptions = parseAuthRecoverArgs([
+    '--site', 'x',
+    '--manual',
+    '--verify',
+    '--run-root', rawRunRoot,
+    '--browser-profile-root', rawProfileRoot,
+    '--user-data-dir', rawUserDataDir,
+  ]);
+  const recoveryPlan = buildRecoveryPlan(recoverOptions, '20260426T000000000Z');
+  const recoveryManifest = buildAuthRecoverManifest(
+    recoveryPlan,
+    recoverOptions,
+    path.join(recoveryPlan.runDir, 'manifest.json'),
+  );
+  const recoveryPrepared = prepareSocialManifestJsonWithAudit(recoveryManifest);
+  assert.equal(recoveryPrepared.json.includes(rawProfileRoot), false);
+  assert.equal(recoveryPrepared.json.includes(rawUserDataDir), false);
+  assert.equal(recoveryPrepared.json.includes(path.resolve('profiles', 'x.com.json')), false);
+
+  const persistedRecovery = JSON.parse(recoveryPrepared.json);
+  assert.equal(persistedRecovery.repoRoot, REDACTION_PLACEHOLDER);
+  assert.equal(persistedRecovery.runDir, REDACTION_PLACEHOLDER);
+  assert.equal(persistedRecovery.sites[0].url, 'https://x.com/home');
+  assert.equal(persistedRecovery.sites[0].profilePath, REDACTION_PLACEHOLDER);
+  assert.equal(persistedRecovery.sites[0].commands.manualLogin.command, REDACTION_PLACEHOLDER);
+  assert.equal(persistedRecovery.sites[0].commands.manualLogin.commandArray.includes(REDACTION_PLACEHOLDER), true);
 });
 
 test('social-live-report aggregates latest X and Instagram manifests and writes JSON/Markdown', async (t) => {

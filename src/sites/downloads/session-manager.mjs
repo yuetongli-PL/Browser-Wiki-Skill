@@ -13,6 +13,7 @@ import {
   inferSiteKeyFromHost,
   normalizeSessionLease,
 } from './contracts.mjs';
+import { normalizeSessionView } from '../capability/session-view.mjs';
 
 function hasSessionMaterial(options = {}) {
   return Boolean(
@@ -69,6 +70,31 @@ function fallbackInputUrl(host, options = {}, profile = null) {
   return host ? `https://${host}/` : '';
 }
 
+function createDownloaderSessionView({
+  siteKey,
+  host,
+  purpose = 'download',
+  status = 'ready',
+  expiresAt,
+  riskSignals = [],
+} = {}) {
+  return normalizeSessionView({
+    siteKey,
+    profileRef: 'anonymous',
+    purpose,
+    scope: [siteKey, host, purpose].filter(Boolean),
+    permission: status === 'ready' ? ['read'] : [],
+    ttlSeconds: 300,
+    expiresAt,
+    networkContext: {
+      siteKey,
+      host,
+    },
+    status,
+    riskSignals,
+  });
+}
+
 function governanceStatusFromDecision({ governance = null, reusableSession = null, requirement = 'optional' } = {}) {
   const policyDecision = governance?.policyDecision ?? {};
   const riskCauseCode = normalizeText(policyDecision.riskCauseCode);
@@ -93,15 +119,25 @@ function governanceStatusFromDecision({ governance = null, reusableSession = nul
 function governanceReasonFromDecision({ governance = null, reusableSession = null } = {}) {
   const policyDecision = governance?.policyDecision ?? {};
   const profileHealth = reusableSession?.profileHealth ?? null;
+  const profileLifecycle = normalizeText(profileHealth?.profileLifecycle);
   return normalizeText(
     policyDecision.riskCauseCode
       ?? policyDecision.riskAction
       ?? (reusableSession?.reuseLoginState === false ? 'reuse-login-state-disabled' : null)
       ?? (!reusableSession?.userDataDir ? 'missing-user-data-dir' : null)
       ?? (profileHealth?.exists === false ? 'profile-missing' : null)
+      ?? (profileLifecycle === 'uninitialized' ? 'profile-uninitialized' : null)
       ?? (profileHealth?.healthy === false ? 'profile-health-risk' : null)
       ?? (reusableSession?.authAvailable === false ? 'reusable-profile-unavailable' : null),
   ) || undefined;
+}
+
+function latestProfileHealthSnapshotMtimeMs(profileHealth = null) {
+  const snapshots = Array.isArray(profileHealth?.snapshots) ? profileHealth.snapshots : [];
+  const mtimes = snapshots
+    .map((entry) => Number(entry?.mtimeMs))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  return mtimes.length > 0 ? Math.max(...mtimes) : null;
 }
 
 function profileHealthRiskRecovered({ governance = null, reusableSession = null, now = new Date() } = {}) {
@@ -110,7 +146,12 @@ function profileHealthRiskRecovered({ governance = null, reusableSession = null,
   if (riskCauseCode && riskCauseCode !== 'profile-health-risk') {
     return false;
   }
-  if (reusableSession?.profileHealth?.healthy !== false || reusableSession?.profileHealth?.exists === false) {
+  const profileHealth = reusableSession?.profileHealth ?? null;
+  if (profileHealth?.healthy !== false || profileHealth?.exists === false) {
+    return false;
+  }
+  const profileLifecycle = normalizeText(profileHealth?.profileLifecycle);
+  if (['missing', 'uninitialized'].includes(profileLifecycle)) {
     return false;
   }
   if (policyDecision.profileQuarantined === true || governance?.quarantine) {
@@ -131,6 +172,18 @@ function profileHealthRiskRecovered({ governance = null, reusableSession = null,
   const lastReuseDate = new Date(lastSessionReuseVerifiedAt);
   if (Number.isNaN(lastHealthyDate.getTime()) || Number.isNaN(lastReuseDate.getTime())) {
     return false;
+  }
+  if (profileLifecycle === 'crashed' || profileHealth?.requiresProfileRebuild === true) {
+    const profileSnapshotMtimeMs = latestProfileHealthSnapshotMtimeMs(profileHealth);
+    if (!Number.isFinite(profileSnapshotMtimeMs)) {
+      return false;
+    }
+    if (
+      lastHealthyDate.getTime() <= profileSnapshotMtimeMs
+      || lastReuseDate.getTime() <= profileSnapshotMtimeMs
+    ) {
+      return false;
+    }
   }
   if (summary.keepaliveDue === true) {
     return false;
@@ -179,7 +232,7 @@ export function buildSessionRepairPlan(health = {}) {
     if (['network-identity-drift'].includes(reason) || riskSignals.includes('run-keepalive-before-auth')) {
       return 'site-keepalive';
     }
-    if (['session-invalid', 'login-required', 'reusable-profile-unavailable', 'missing-user-data-dir'].includes(reason)) {
+    if (['session-invalid', 'login-required', 'reusable-profile-unavailable', 'missing-user-data-dir', 'profile-missing', 'profile-uninitialized'].includes(reason)) {
       return 'site-login';
     }
     if (['profile-health-risk'].includes(reason)) {
@@ -335,6 +388,16 @@ async function resolveGovernanceBackedSessionLease(siteKey, purpose, options = {
       ?? governance.authSessionSummary?.nextSuggestedKeepaliveAt
       ?? undefined,
     quarantineKey: options.quarantineKey ?? `${host}:download`,
+    sessionView: createDownloaderSessionView({
+      siteKey: resolvedSiteKey,
+      host,
+      purpose,
+      status,
+      expiresAt: reusableSession.authSessionStateSummary?.nextSuggestedKeepaliveAt
+        ?? governance.authSessionSummary?.nextSuggestedKeepaliveAt
+        ?? undefined,
+      riskSignals: governanceRiskSignals({ governance, reusableSession, recoveredProfileHealth }),
+    }),
   });
   lease.repairPlan = buildSessionRepairPlan(lease);
 
@@ -426,6 +489,13 @@ export async function acquireSessionLease(siteKey, purpose = 'download', options
     riskSignals: [],
     expiresAt: options.expiresAt,
     quarantineKey: options.quarantineKey ?? `${host}:download`,
+    sessionView: createDownloaderSessionView({
+      siteKey: resolvedSiteKey,
+      host,
+      purpose,
+      status: 'ready',
+      expiresAt: options.expiresAt,
+    }),
   });
 }
 

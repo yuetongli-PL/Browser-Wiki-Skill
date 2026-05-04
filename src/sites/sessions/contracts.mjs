@@ -9,9 +9,12 @@ import {
   stableId,
   timestampForRun,
 } from '../downloads/contracts.mjs';
+import { normalizeArtifactReferenceSet } from '../capability/artifact-schema.mjs';
+import { normalizeReasonCode, reasonCodeSummary } from '../capability/reason-codes.mjs';
 import { compactSlug, normalizeText, sanitizeHost } from '../../shared/normalize.mjs';
 
 export const SESSION_RUN_MANIFEST_SCHEMA_VERSION = 1;
+export const SESSION_REVOCATION_FAILURE_REASON_CODE = 'session-revocation-invalid';
 
 export const SESSION_PURPOSES = Object.freeze([
   'download',
@@ -56,6 +59,39 @@ function stripEmptyObject(value) {
   }));
 }
 
+export function sessionFailureReasonRecovery(reasonCode) {
+  const summary = reasonCodeSummary(normalizeReasonCode(reasonCode));
+  return {
+    code: summary.code,
+    family: summary.family,
+    retryable: summary.retryable,
+    cooldownNeeded: summary.cooldownNeeded,
+    isolationNeeded: summary.isolationNeeded,
+    manualRecoveryNeeded: summary.manualRecoveryNeeded,
+    degradable: summary.degradable,
+    artifactWriteAllowed: summary.artifactWriteAllowed,
+    catalogAction: summary.catalogAction,
+  };
+}
+
+export function createSessionFailureError(message, {
+  cause,
+  reasonCode,
+} = {}) {
+  const reasonRecovery = sessionFailureReasonRecovery(reasonCode);
+  const error = cause === undefined ? new Error(message) : new Error(message, { cause });
+  error.reasonCode = reasonRecovery.code;
+  error.reasonRecovery = reasonRecovery;
+  error.retryable = reasonRecovery.retryable;
+  error.cooldownNeeded = reasonRecovery.cooldownNeeded;
+  error.isolationNeeded = reasonRecovery.isolationNeeded;
+  error.manualRecoveryNeeded = reasonRecovery.manualRecoveryNeeded;
+  error.degradable = reasonRecovery.degradable;
+  error.artifactWriteAllowed = reasonRecovery.artifactWriteAllowed;
+  error.catalogAction = reasonRecovery.catalogAction;
+  return error;
+}
+
 function hasSecretLikeFields(value) {
   return value && typeof value === 'object' && !Array.isArray(value)
     && (Object.hasOwn(value, 'cookies') || Object.hasOwn(value, 'headers'));
@@ -68,7 +104,7 @@ function normalizeSessionRepairPlan(value = undefined) {
   return stripEmptyObject({
     action: normalizeText(value.action ?? value.suggestedAction),
     command: normalizeText(value.command),
-    reason: normalizeText(value.reason),
+    reason: normalizeReasonCode(value.reason),
     riskSignals: normalizeStringList(value.riskSignals),
     requiresApproval: value.requiresApproval === undefined ? true : value.requiresApproval === true,
     notBefore: normalizeText(value.notBefore),
@@ -138,7 +174,7 @@ export function normalizeSessionHealth(raw = {}, defaults = {}) {
   const host = sanitizeHost(normalizeText(raw.host ?? defaults.host));
   const siteKey = normalizeText(raw.siteKey ?? raw.site ?? defaults.siteKey ?? inferSiteKeyFromHost(host));
   const status = enumValue(raw.status ?? defaults.status, SESSION_LEASE_STATUSES, 'blocked');
-  const reason = normalizeText(raw.reason ?? raw.riskCauseCode ?? defaults.reason ?? defaults.riskCauseCode);
+  const reason = normalizeReasonCode(raw.reason ?? raw.riskCauseCode ?? defaults.reason ?? defaults.riskCauseCode);
   const repairPlan = normalizeSessionRepairPlan(raw.repairPlan ?? defaults.repairPlan);
   const authStatus = normalizeText(raw.authStatus ?? defaults.authStatus)
     || (status === 'ready' ? 'authenticated-or-anonymous-ok' : 'unknown');
@@ -151,7 +187,7 @@ export function normalizeSessionHealth(raw = {}, defaults = {}) {
     identityConfirmed: raw.identityConfirmed === undefined
       ? defaults.identityConfirmed
       : raw.identityConfirmed === true,
-    riskCauseCode: normalizeText(raw.riskCauseCode ?? reason),
+    riskCauseCode: normalizeReasonCode(raw.riskCauseCode ?? reason),
     riskAction: normalizeText(raw.riskAction ?? defaults.riskAction),
     riskSignals: normalizeStringList(raw.riskSignals ?? defaults.riskSignals),
     reason,
@@ -184,12 +220,23 @@ export function normalizeSessionRunManifest(raw = {}, defaults = {}) {
   const finishedAt = normalizeText(raw.finishedAt ?? defaults.finishedAt) || createdAt;
   const runId = normalizeText(raw.runId ?? defaults.runId)
     || createSessionRunId({ siteKey: plan.siteKey, purpose: plan.purpose, seed: createdAt });
-  const artifacts = stripEmptyObject({
+  const artifacts = normalizeArtifactReferenceSet(stripEmptyObject({
     manifest: normalizeText(raw.artifacts?.manifest ?? defaults.artifacts?.manifest),
+    redactionAudit: normalizeText(raw.artifacts?.redactionAudit ?? defaults.artifacts?.redactionAudit),
+    sessionViewMaterializationAudit: normalizeText(
+      raw.artifacts?.sessionViewMaterializationAudit ?? defaults.artifacts?.sessionViewMaterializationAudit,
+    ),
+    sessionViewMaterializationRedactionAudit: normalizeText(
+      raw.artifacts?.sessionViewMaterializationRedactionAudit
+        ?? defaults.artifacts?.sessionViewMaterializationRedactionAudit,
+    ),
+    lifecycleEvent: normalizeText(raw.artifacts?.lifecycleEvent ?? defaults.artifacts?.lifecycleEvent),
+    lifecycleEventRedactionAudit: normalizeText(raw.artifacts?.lifecycleEventRedactionAudit ?? defaults.artifacts?.lifecycleEventRedactionAudit),
     runDir: normalizeText(raw.artifacts?.runDir ?? defaults.artifacts?.runDir),
-  });
+  }));
   const status = enumValue(raw.status ?? defaults.status, SESSION_RUN_STATUSES, sessionRunStatusFromHealth(health));
-  const reason = normalizeText(raw.reason ?? defaults.reason ?? health.reason ?? health.riskCauseCode);
+  const reason = normalizeReasonCode(raw.reason ?? defaults.reason ?? health.reason ?? health.riskCauseCode);
+  const healthRecovery = raw.healthRecovery ?? defaults.healthRecovery;
 
   return {
     schemaVersion: SESSION_RUN_MANIFEST_SCHEMA_VERSION,
@@ -204,6 +251,7 @@ export function normalizeSessionRunManifest(raw = {}, defaults = {}) {
     plan,
     health,
     repairPlan,
+    healthRecovery,
     artifacts,
     createdAt,
     finishedAt,

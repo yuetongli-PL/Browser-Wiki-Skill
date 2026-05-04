@@ -7,15 +7,36 @@ import path from 'node:path';
 
 import {
   writeJsonFile,
-  writeJsonLines,
   writeTextFile,
 } from '../../infra/io.mjs';
 import {
   normalizeDownloadRunManifest,
   normalizeResolvedDownloadTask,
+  normalizeSessionLeaseConsumerHeaders,
   resolveDownloadRunStatus,
 } from './contracts.mjs';
-import { buildDownloadRunLayout } from './artifacts.mjs';
+import { assertGovernedSchemaCompatible } from '../capability/schema-governance.mjs';
+import {
+  composeLifecycleSubscribers,
+  createLifecycleArtifactWriterSubscriber,
+  dispatchLifecycleEvent,
+  normalizeLifecycleEvent,
+} from '../capability/lifecycle-events.mjs';
+import {
+  createCapabilityHookLifecycleEvidence,
+  matchCapabilityHooksForLifecycleEvent,
+} from '../capability/capability-hook.mjs';
+import {
+  assertNoForbiddenPatterns,
+  prepareRedactedArtifactJson,
+  prepareRedactedArtifactJsonWithAudit,
+  redactValue,
+} from '../capability/security-guard.mjs';
+import { normalizeStandardTaskList } from '../capability/standard-task-list.mjs';
+import {
+  buildDownloadRunLayout,
+  writeRedactedDownloadJsonArtifact,
+} from './artifacts.mjs';
 import { renderSessionTraceabilityLines } from './session-report.mjs';
 import {
   isSuccessfulQueueStatus,
@@ -98,8 +119,9 @@ function verifyPayload(resource, bytes, payload) {
 }
 
 async function fetchResource(resource, filePath, { fetchImpl, verify, sessionLease }) {
+  const leaseHeaders = normalizeSessionLeaseConsumerHeaders(sessionLease);
   const headers = {
-    ...(sessionLease?.headers ?? {}),
+    ...leaseHeaders,
     ...(resource.headers ?? {}),
   };
   if (resource.referer && !headers.referer && !headers.Referer) {
@@ -217,6 +239,114 @@ function buildQueue(resources, layout, recoveryState = null) {
   });
 }
 
+function standardTaskListFromResolvedDownloadTask(resolvedTask = {}, plan = {}) {
+  const taskList = normalizeStandardTaskList({
+    siteKey: resolvedTask.siteKey ?? plan.siteKey,
+    taskType: resolvedTask.taskType ?? plan.taskType,
+    policyRef: plan.id ? `download-plan:${plan.id}:policy` : undefined,
+    items: (Array.isArray(resolvedTask.resources) ? resolvedTask.resources : []).map((resource, index) => ({
+      id: resource.id ?? `resource-${index + 1}`,
+      kind: 'download',
+      endpoint: resource.url,
+      method: resource.method,
+      retry: {
+        retries: plan.policy?.retries ?? 0,
+        retryBackoffMs: plan.policy?.retryBackoffMs ?? 0,
+      },
+      cacheKey: resource.metadata?.cacheKey ?? resource.id,
+      dedupKey: resource.metadata?.dedupKey ?? resource.id ?? resource.url,
+    })),
+  });
+  assertGovernedSchemaCompatible('StandardTaskList', taskList);
+  return taskList;
+}
+
+function runtimeCatalogEntryFromDownloadInputs(resolvedTask = {}, plan = {}) {
+  return resolvedTask.metadata?.apiCatalogEntry
+    ?? resolvedTask.metadata?.catalogEntry
+    ?? resolvedTask.metadata?.catalogProvenance?.entry
+    ?? plan.metadata?.apiCatalogEntry
+    ?? plan.metadata?.catalogEntry
+    ?? plan.metadata?.catalogProvenance?.entry;
+}
+
+function assertActiveRuntimeApiCatalogEntry(catalogEntry = {}) {
+  assertGovernedSchemaCompatible('ApiCatalogEntry', catalogEntry);
+  const status = String(catalogEntry.status ?? '').trim();
+  const invalidationStatus = String(catalogEntry.invalidationStatus ?? '').trim();
+  if (status !== 'cataloged' || invalidationStatus !== 'active') {
+    throw new Error('Runtime downloader requires an active cataloged ApiCatalogEntry');
+  }
+  return true;
+}
+
+export function assertRuntimeDownloadCompatibility({
+  plan = {},
+  resolvedTask = {},
+  sessionLease = null,
+} = {}) {
+  assertGovernedSchemaCompatible('DownloadPolicy', plan.policy);
+  const standardTaskList = standardTaskListFromResolvedDownloadTask(resolvedTask, plan);
+  if (sessionLease?.sessionView) {
+    assertGovernedSchemaCompatible('SessionView', sessionLease.sessionView);
+  }
+  const catalogEntry = runtimeCatalogEntryFromDownloadInputs(resolvedTask, plan);
+  if (catalogEntry) {
+    assertActiveRuntimeApiCatalogEntry(catalogEntry);
+  }
+  return {
+    standardTaskList,
+    catalogEntryChecked: Boolean(catalogEntry),
+    sessionViewChecked: Boolean(sessionLease?.sessionView),
+  };
+}
+
+function artifactSafeResolvedDownloadTask(resolvedTask = {}) {
+  return {
+    ...resolvedTask,
+    resources: (Array.isArray(resolvedTask.resources) ? resolvedTask.resources : []).map((resource) => {
+      const {
+        headers: _headers,
+        body: _body,
+        ...safeResource
+      } = resource;
+      return safeResource;
+    }),
+  };
+}
+
+async function writeRedactedJsonArtifact(filePath, value) {
+  const { json } = prepareRedactedArtifactJson(value);
+  await writeTextFile(filePath, json);
+}
+
+async function writeRedactedJsonLinesArtifact(filePath, rows = []) {
+  const payload = rows
+    .map((row) => prepareRedactedArtifactJson(row, { space: 0 }).json)
+    .join('\n');
+  await writeTextFile(filePath, payload);
+}
+
+async function resolveDownloadsJsonlOutputPath(layout, recoveryProblems = []) {
+  const hasCurrentDownloadsReadFailure = recoveryProblems.some((problem) => (
+    problem?.reason === 'downloads-read-failed'
+    && typeof problem.path === 'string'
+    && path.resolve(problem.path) === path.resolve(layout.downloadsJsonlPath)
+  ));
+  if (!hasCurrentDownloadsReadFailure) {
+    return layout.downloadsJsonlPath;
+  }
+  try {
+    const currentArtifact = await stat(layout.downloadsJsonlPath);
+    if (currentArtifact.isDirectory()) {
+      return path.join(layout.runDir, 'downloads.recovery.jsonl');
+    }
+  } catch {
+    return layout.downloadsJsonlPath;
+  }
+  return layout.downloadsJsonlPath;
+}
+
 function cliQuote(value) {
   return `"${String(value).replace(/"/gu, '\\"')}"`;
 }
@@ -267,6 +397,12 @@ function formatRecoveryProblem(problem) {
   return detail ? `${target}: ${problem.reason} (${detail})` : `${target}: ${problem.reason}`;
 }
 
+function redactReportMarkdown(report) {
+  const redacted = redactValue({ report });
+  assertNoForbiddenPatterns(redacted.value.report);
+  return redacted.value.report;
+}
+
 function renderReport(manifest, resolvedTask, { plan = null, layout = null, recoveryProblems = [] } = {}) {
   const lines = [
     '# Download Run',
@@ -282,6 +418,17 @@ function renderReport(manifest, resolvedTask, { plan = null, layout = null, reco
   ];
   if (manifest.reason) {
     lines.push(`- Reason: ${manifest.reason}`);
+  }
+  if (manifest.reasonRecovery) {
+    lines.push(
+      `- Reason retryable: ${manifest.reasonRecovery.retryable}`,
+      `- Reason cooldown needed: ${manifest.reasonRecovery.cooldownNeeded}`,
+      `- Reason isolation needed: ${manifest.reasonRecovery.isolationNeeded}`,
+      `- Reason manual recovery needed: ${manifest.reasonRecovery.manualRecoveryNeeded}`,
+      `- Reason degradable: ${manifest.reasonRecovery.degradable}`,
+      `- Reason artifact write allowed: ${manifest.reasonRecovery.artifactWriteAllowed}`,
+      `- Reason catalog action: ${manifest.reasonRecovery.catalogAction}`,
+    );
   }
   lines.push(...renderSessionTraceabilityLines(manifest, { plan }));
   if (plan && layout) {
@@ -319,7 +466,122 @@ function renderReport(manifest, resolvedTask, { plan = null, layout = null, reco
       lines.push(`- ${failure.groupId ?? failure.resourceId}: ${failure.reason}`);
     }
   }
-  return `${lines.join('\n')}\n`;
+  return redactReportMarkdown(`${lines.join('\n')}\n`);
+}
+
+function downloadExecutorLifecycleContext(manifest) {
+  const traceId = typeof manifest?.runId === 'string' && manifest.runId.length > 0
+    ? manifest.runId
+    : undefined;
+  const correlationId = typeof manifest?.planId === 'string' && manifest.planId.length > 0
+    ? manifest.planId
+    : traceId;
+  return {
+    ...(traceId ? { traceId } : {}),
+    ...(correlationId ? { correlationId } : {}),
+  };
+}
+
+function capabilityHookMatchSummaryForLifecycleEvent(lifecycleEvent, {
+  capabilityHookRegistry,
+  capabilityHooks,
+} = {}) {
+  const hooks = capabilityHookRegistry ?? capabilityHooks;
+  if (!hooks) {
+    return undefined;
+  }
+  return matchCapabilityHooksForLifecycleEvent(hooks, lifecycleEvent);
+}
+
+function capabilityHookRuntimeEvidenceForLifecycleEvent(lifecycleEvent, {
+  capabilityHookRegistry,
+  capabilityHooks,
+} = {}) {
+  const hooks = capabilityHookRegistry ?? capabilityHooks ?? [];
+  const capabilityHookMatches = matchCapabilityHooksForLifecycleEvent(hooks, lifecycleEvent);
+  const capabilityHookLifecycleEvidence = createCapabilityHookLifecycleEvidence(hooks, lifecycleEvent);
+  return {
+    capabilityHookMatches,
+    capabilityHookLifecycleEvidence,
+  };
+}
+
+function beforeDownloadLifecycleEventPath(layout) {
+  return path.join(layout.runDir, 'before-download-lifecycle-event.json');
+}
+
+function beforeDownloadLifecycleEventRedactionAuditPath(layout) {
+  return path.join(layout.runDir, 'before-download-lifecycle-event-redaction-audit.json');
+}
+
+async function dispatchBeforeDownloadLifecycleEvidence({
+  layout,
+  plan,
+  resolvedTask,
+  sessionLease,
+  resources,
+  dryRun,
+  recoveryMode,
+  lifecycleEventSubscribers = [],
+  capabilityHookRegistry = undefined,
+  capabilityHooks = undefined,
+}) {
+  const manifest = {
+    runId: layout.runId,
+    planId: plan.id,
+  };
+  let lifecycleEvent = normalizeLifecycleEvent({
+    eventType: 'download.executor.before_download',
+    ...downloadExecutorLifecycleContext(manifest),
+    taskId: layout.runId,
+    siteKey: plan.siteKey,
+    taskType: resolvedTask.taskType ?? plan.taskType,
+    adapterVersion: plan.adapterVersion ?? resolvedTask.adapterVersion,
+    reasonCode: dryRun ? 'dry-run' : 'before-download',
+    createdAt: new Date().toISOString(),
+    details: {
+      status: 'planned',
+      reason: dryRun ? 'dry-run' : 'before-download',
+      counts: {
+        expected: resources.length,
+        attempted: 0,
+        downloaded: 0,
+        skipped: dryRun ? resources.length : 0,
+        failed: 0,
+      },
+      dryRun,
+      recoveryMode,
+      capabilityHookPhase: 'before_download',
+      profileRef: sessionLease?.sessionView?.profileRef,
+      riskSignals: sessionLease?.riskSignals,
+    },
+  });
+  const {
+    capabilityHookMatches,
+    capabilityHookLifecycleEvidence,
+  } = capabilityHookRuntimeEvidenceForLifecycleEvent(lifecycleEvent, {
+    capabilityHookRegistry,
+    capabilityHooks,
+  });
+  lifecycleEvent = normalizeLifecycleEvent({
+    ...lifecycleEvent,
+    details: {
+      ...lifecycleEvent.details,
+      capabilityHookMatches,
+      capabilityHookLifecycleEvidence,
+    },
+  });
+  lifecycleEvent = normalizeLifecycleEvent(redactValue(lifecycleEvent).value);
+  assertGovernedSchemaCompatible('LifecycleEvent', lifecycleEvent);
+  await dispatchLifecycleEvent(lifecycleEvent, {
+    subscribers: composeLifecycleSubscribers(
+      lifecycleEventSubscribers,
+      createLifecycleArtifactWriterSubscriber({
+        eventPath: beforeDownloadLifecycleEventPath(layout),
+        auditPath: beforeDownloadLifecycleEventRedactionAuditPath(layout),
+      }),
+    ),
+  });
 }
 
 function resultHasArtifact(result) {
@@ -362,6 +624,26 @@ function countsFromResults(resources, results, failedResources) {
     skipped: primaryResults.filter((result) => result?.ok && result.skipped === true).length,
     failed: failedResources.length,
   };
+}
+
+function failedResourceReasonCounts(failedResources = []) {
+  const counts = {};
+  for (const failure of failedResources) {
+    const reason = failure?.reason ?? 'download-failed';
+    counts[reason] = (counts[reason] ?? 0) + 1;
+  }
+  return counts;
+}
+
+function skippedRunReasonFromResults(results, status) {
+  if (status !== 'skipped') {
+    return undefined;
+  }
+  const reasons = new Set(results
+    .filter((result) => result?.derived !== true && result?.ok === true && result.skipped === true)
+    .map((result) => result.reason)
+    .filter(Boolean));
+  return reasons.size === 1 ? [...reasons][0] : undefined;
 }
 
 function queueStatusFromResult(result) {
@@ -673,16 +955,27 @@ async function writeRunArtifactsFromResults({
   reason,
   recoveryProblems = [],
   liveValidation = undefined,
+  lifecycleEventSubscribers = [],
+  capabilityHookRegistry = undefined,
+  capabilityHooks = undefined,
 }) {
+  const downloadsJsonlOutputPath = await resolveDownloadsJsonlOutputPath(layout, recoveryProblems);
   const files = filesFromResults(results);
   const failedResources = failedResourcesFromResults(results);
   const counts = countsFromResults(resources, results, failedResources);
+  const inferredStatus = resolveDownloadRunStatus(counts);
+  const resolvedStatus = status
+    ?? (counts.skipped > 0 && counts.downloaded === 0 && counts.attempted === 0 && counts.failed === 0
+      ? 'skipped'
+      : inferredStatus);
+  const resolvedReason = reason
+    ?? (failedResources.length ? 'download-failures' : skippedRunReasonFromResults(results, resolvedStatus));
   const manifest = normalizeDownloadRunManifest({
     runId: layout.runId,
     planId: plan.id,
     siteKey: plan.siteKey,
-    status: status ?? resolveDownloadRunStatus(counts),
-    reason: reason ?? (failedResources.length ? 'download-failures' : undefined),
+    status: resolvedStatus,
+    reason: resolvedReason,
     counts,
     files,
     failedResources,
@@ -690,8 +983,14 @@ async function writeRunArtifactsFromResults({
     artifacts: {
       manifest: layout.manifestPath,
       queue: layout.queuePath,
-      downloadsJsonl: layout.downloadsJsonlPath,
+      downloadsJsonl: downloadsJsonlOutputPath,
       reportMarkdown: layout.reportMarkdownPath,
+      redactionAudit: layout.redactionAuditPath,
+      lifecycleEvent: layout.lifecycleEventPath,
+      lifecycleEventRedactionAudit: layout.lifecycleEventRedactionAuditPath,
+      plan: layout.planPath,
+      planRedactionAudit: layout.planRedactionAuditPath,
+      standardTaskList: layout.standardTaskListPath,
     },
     liveValidation,
     session: sessionLease,
@@ -699,9 +998,54 @@ async function writeRunArtifactsFromResults({
     finishedAt: new Date().toISOString(),
   });
 
-  await writeJsonFile(layout.queuePath, queue);
-  await writeJsonLines(layout.downloadsJsonlPath, results);
-  await writeJsonFile(layout.manifestPath, manifest);
+  await writeJsonFile(layout.standardTaskListPath, standardTaskListFromResolvedDownloadTask(resolvedTask, plan));
+  await writeRedactedJsonArtifact(layout.queuePath, queue);
+  await writeRedactedJsonLinesArtifact(downloadsJsonlOutputPath, results);
+  let lifecycleEvent = normalizeLifecycleEvent({
+    eventType: 'download.executor.completed',
+    ...downloadExecutorLifecycleContext(manifest),
+    taskId: manifest.runId,
+    siteKey: manifest.siteKey,
+    taskType: resolvedTask.taskType ?? plan.taskType,
+    adapterVersion: plan.adapterVersion ?? resolvedTask.adapterVersion,
+    reasonCode: manifest.reason,
+    createdAt: manifest.finishedAt,
+    details: {
+      status: manifest.status,
+      reason: manifest.reason,
+      counts: manifest.counts,
+      reasonRecovery: manifest.reasonRecovery,
+      failedResourceReasonCounts: failedResourceReasonCounts(manifest.failedResources),
+      profileRef: manifest.session?.sessionView?.profileRef,
+      riskSignals: manifest.session?.riskSignals,
+    },
+  });
+  const capabilityHookMatches = capabilityHookMatchSummaryForLifecycleEvent(lifecycleEvent, {
+    capabilityHookRegistry,
+    capabilityHooks,
+  });
+  if (capabilityHookMatches) {
+    lifecycleEvent = normalizeLifecycleEvent({
+      ...lifecycleEvent,
+      details: {
+        ...lifecycleEvent.details,
+        capabilityHookMatches,
+      },
+    });
+  }
+  assertGovernedSchemaCompatible('LifecycleEvent', lifecycleEvent);
+  await dispatchLifecycleEvent(lifecycleEvent, {
+    subscribers: composeLifecycleSubscribers(
+      lifecycleEventSubscribers,
+      createLifecycleArtifactWriterSubscriber({
+        eventPath: layout.lifecycleEventPath,
+        auditPath: layout.lifecycleEventRedactionAuditPath,
+      }),
+    ),
+  });
+  const { json, auditJson } = prepareRedactedArtifactJsonWithAudit(manifest);
+  await writeTextFile(layout.manifestPath, json);
+  await writeTextFile(layout.redactionAuditPath, auditJson);
   await writeTextFile(layout.reportMarkdownPath, renderReport(manifest, resolvedTask, {
     plan,
     layout,
@@ -712,6 +1056,11 @@ async function writeRunArtifactsFromResults({
 
 export async function executeResolvedDownloadTask(resolvedTaskInput, plan, sessionLease = null, options = {}, deps = {}) {
   const resolvedTask = normalizeResolvedDownloadTask(resolvedTaskInput, plan);
+  const runtimeCompatibility = assertRuntimeDownloadCompatibility({
+    plan,
+    resolvedTask,
+    sessionLease,
+  });
   const layout = await buildDownloadRunLayout(plan, options);
   const dryRun = Boolean(options.dryRun ?? plan.policy?.dryRun ?? false);
   const skipExisting = Boolean(options.skipExisting ?? plan.policy?.skipExisting ?? true);
@@ -725,12 +1074,27 @@ export async function executeResolvedDownloadTask(resolvedTaskInput, plan, sessi
   const recoveryProblems = [...(recoveryState.problems ?? [])];
   const queue = buildQueue(resources, layout, recoveryState);
 
-  await writeJsonFile(layout.planPath, plan);
-  await writeJsonFile(layout.resolvedTaskPath, resolvedTask);
+  await writeRedactedDownloadJsonArtifact(layout.planPath, plan, {
+    auditPath: layout.planRedactionAuditPath,
+  });
+  await writeRedactedJsonArtifact(layout.resolvedTaskPath, artifactSafeResolvedDownloadTask(resolvedTask));
+  await writeJsonFile(layout.standardTaskListPath, runtimeCompatibility.standardTaskList);
+  await dispatchBeforeDownloadLifecycleEvidence({
+    layout,
+    plan,
+    resolvedTask,
+    sessionLease,
+    resources,
+    dryRun,
+    recoveryMode,
+    lifecycleEventSubscribers: deps.lifecycleEventSubscribers,
+    capabilityHookRegistry: deps.capabilityHookRegistry,
+    capabilityHooks: deps.capabilityHooks,
+  });
 
   if (dryRun) {
-    await writeJsonFile(layout.queuePath, queue);
-    await writeJsonLines(layout.downloadsJsonlPath, []);
+    await writeRedactedJsonArtifact(layout.queuePath, queue);
+    await writeRedactedJsonLinesArtifact(layout.downloadsJsonlPath, []);
     const manifest = normalizeDownloadRunManifest({
       runId: layout.runId,
       planId: plan.id,
@@ -753,13 +1117,60 @@ export async function executeResolvedDownloadTask(resolvedTaskInput, plan, sessi
         queue: layout.queuePath,
         downloadsJsonl: layout.downloadsJsonlPath,
         reportMarkdown: layout.reportMarkdownPath,
+        redactionAudit: layout.redactionAuditPath,
+        lifecycleEvent: layout.lifecycleEventPath,
+        lifecycleEventRedactionAudit: layout.lifecycleEventRedactionAuditPath,
+        planRedactionAudit: layout.planRedactionAuditPath,
+        standardTaskList: layout.standardTaskListPath,
       },
       liveValidation: options.liveValidation,
       session: sessionLease,
       createdAt: new Date().toISOString(),
       finishedAt: new Date().toISOString(),
     });
-    await writeJsonFile(layout.manifestPath, manifest);
+    let lifecycleEvent = normalizeLifecycleEvent({
+      eventType: 'download.executor.dry_run',
+      ...downloadExecutorLifecycleContext(manifest),
+      taskId: manifest.runId,
+      siteKey: manifest.siteKey,
+      taskType: resolvedTask.taskType ?? plan.taskType,
+      adapterVersion: plan.adapterVersion ?? resolvedTask.adapterVersion,
+      reasonCode: manifest.reason,
+      createdAt: manifest.finishedAt,
+      details: {
+        status: manifest.status,
+        reason: manifest.reason,
+        counts: manifest.counts,
+        profileRef: manifest.session?.sessionView?.profileRef,
+        riskSignals: manifest.session?.riskSignals,
+      },
+    });
+    const capabilityHookMatches = capabilityHookMatchSummaryForLifecycleEvent(lifecycleEvent, {
+      capabilityHookRegistry: deps.capabilityHookRegistry,
+      capabilityHooks: deps.capabilityHooks,
+    });
+    if (capabilityHookMatches) {
+      lifecycleEvent = normalizeLifecycleEvent({
+        ...lifecycleEvent,
+        details: {
+          ...lifecycleEvent.details,
+          capabilityHookMatches,
+        },
+      });
+    }
+    assertGovernedSchemaCompatible('LifecycleEvent', lifecycleEvent);
+    await dispatchLifecycleEvent(lifecycleEvent, {
+      subscribers: composeLifecycleSubscribers(
+        deps.lifecycleEventSubscribers,
+        createLifecycleArtifactWriterSubscriber({
+          eventPath: layout.lifecycleEventPath,
+          auditPath: layout.lifecycleEventRedactionAuditPath,
+        }),
+      ),
+    });
+    const { json, auditJson } = prepareRedactedArtifactJsonWithAudit(manifest);
+    await writeTextFile(layout.manifestPath, json);
+    await writeTextFile(layout.redactionAuditPath, auditJson);
     await writeTextFile(layout.reportMarkdownPath, renderReport(manifest, resolvedTask, {
       plan,
       layout,
@@ -804,6 +1215,9 @@ export async function executeResolvedDownloadTask(resolvedTaskInput, plan, sessi
       reason,
       recoveryProblems,
       liveValidation: options.liveValidation,
+      lifecycleEventSubscribers: deps.lifecycleEventSubscribers,
+      capabilityHookRegistry: deps.capabilityHookRegistry,
+      capabilityHooks: deps.capabilityHooks,
     });
   }
 
@@ -823,7 +1237,7 @@ export async function executeResolvedDownloadTask(resolvedTaskInput, plan, sessi
       );
       if (recovered.result) {
         queue[index] = applyResultToQueue(queue[index], recovered.result);
-        await writeJsonFile(layout.queuePath, queue);
+        await writeRedactedJsonArtifact(layout.queuePath, queue);
         return recovered.result;
       }
       if (recovered.problem) {
@@ -831,14 +1245,14 @@ export async function executeResolvedDownloadTask(resolvedTaskInput, plan, sessi
         if (retryFailedOnly && isSuccessfulQueueStatus(previousStatus)) {
           const failed = failedControlResult(resource, queue[index], recovered.problem.reason, recovered.problem.detail);
           queue[index] = applyResultToQueue(queue[index], failed);
-          await writeJsonFile(layout.queuePath, queue);
+          await writeRedactedJsonArtifact(layout.queuePath, queue);
           return failed;
         }
       }
       if (retryFailedOnly && previousStatus !== 'failed') {
         const skipped = skippedControlResult(resource, queue[index], 'retry-failed-not-failed');
         queue[index] = applyResultToQueue(queue[index], skipped);
-        await writeJsonFile(layout.queuePath, queue);
+        await writeRedactedJsonArtifact(layout.queuePath, queue);
         return skipped;
       }
     }
@@ -846,12 +1260,12 @@ export async function executeResolvedDownloadTask(resolvedTaskInput, plan, sessi
       const existing = await existingFileResult(resource, filePath);
       if (existing) {
         queue[index] = applyResultToQueue(queue[index], existing);
-        await writeJsonFile(layout.queuePath, queue);
+        await writeRedactedJsonArtifact(layout.queuePath, queue);
         return existing;
       }
     }
     queue[index] = { ...queue[index], status: 'running' };
-    await writeJsonFile(layout.queuePath, queue);
+    await writeRedactedJsonArtifact(layout.queuePath, queue);
     const result = await downloadWithRetry(resource, filePath, {
       fetchImpl,
       verify,
@@ -860,7 +1274,7 @@ export async function executeResolvedDownloadTask(resolvedTaskInput, plan, sessi
       sessionLease,
     });
     queue[index] = applyResultToQueue(queue[index], result);
-    await writeJsonFile(layout.queuePath, queue);
+    await writeRedactedJsonArtifact(layout.queuePath, queue);
     return result;
   });
   const derivedResults = await buildDerivedMuxResults(resources, queue, results, layout, options, deps);
@@ -875,5 +1289,8 @@ export async function executeResolvedDownloadTask(resolvedTaskInput, plan, sessi
     results: [...results, ...derivedResults],
     recoveryProblems,
     liveValidation: options.liveValidation,
+    lifecycleEventSubscribers: deps.lifecycleEventSubscribers,
+    capabilityHookRegistry: deps.capabilityHookRegistry,
+    capabilityHooks: deps.capabilityHooks,
   });
 }
