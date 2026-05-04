@@ -1,13 +1,21 @@
-import test from 'node:test';
+﻿import test from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 
 import { pathExists, readJsonFile } from '../../src/infra/io.mjs';
-import { scaffoldSite } from '../../scripts/site-scaffold.mjs';
-import { siteDoctor } from '../../scripts/site-doctor.mjs';
+import {
+  scaffoldSite,
+  writeSiteScaffoldReportArtifacts,
+} from '../../scripts/site-scaffold.mjs';
+import {
+  siteDoctor,
+  writeSiteDoctorReportArtifacts,
+} from '../../scripts/site-doctor.mjs';
+import { REDACTION_PLACEHOLDER } from '../../src/sites/capability/security-guard.mjs';
+import { reasonCodeSummary } from '../../src/sites/capability/reason-codes.mjs';
 
 function createNavigationProfile(host = 'example.com') {
   return {
@@ -171,7 +179,176 @@ test('site-scaffold writes a navigation profile and inferred report fields', asy
     assert.deepEqual(profile.navigation.allowedHosts, ['example.com', 'www.example.com']);
     assert.deepEqual(profile.pageTypes.contentDetailPrefixes, ['/works/detail/']);
     assert.deepEqual(profile.pageTypes.searchResultsPrefixes, ['/search']);
-    assert.match((await readFile(result.reports.markdown, 'utf8')), /Profile valid: yes/u);
+    assert.equal(result.reports.jsonRedactionAudit.endsWith('scaffold-report.redaction-audit.json'), true);
+    assert.equal(result.reports.markdownRedactionAudit.endsWith('scaffold-report.md.redaction-audit.json'), true);
+    const persistedReport = await readJsonFile(result.reports.json);
+    const persistedMarkdown = await readFile(result.reports.markdown, 'utf8');
+    const persistedAudit = await readJsonFile(result.reports.jsonRedactionAudit);
+    assert.equal(result.profilePath, profilePath);
+    assert.equal(persistedReport.profilePath, REDACTION_PLACEHOLDER);
+    assert.equal(persistedReport.profile.valid, true);
+    assert.match(persistedMarkdown, /Profile valid: yes/u);
+    assert.equal(persistedMarkdown.includes(profilePath), false);
+    assert.equal(persistedAudit.redactedPaths.includes('profilePath'), true);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+test('site-scaffold report writer fails closed before persistent report writes when redaction cannot complete', async () => {
+  const recovery = reasonCodeSummary('redaction-failed');
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-scaffold-redaction-fail-'));
+  const reportDir = path.join(workspace, 'report');
+  const circularReport = {
+    url: 'https://example.com/?access_token=synthetic-site-scaffold-token',
+    host: 'example.com',
+    archetype: 'navigation-catalog',
+    profilePath: 'C:/Users/example/profiles/example.com.json',
+    fetch: {
+      finalUrl: 'https://example.com/?csrf_token=synthetic-site-scaffold-csrf',
+    },
+    profile: {
+      valid: true,
+    },
+    warnings: ['Authorization: Bearer synthetic-site-scaffold-auth'],
+    nextActions: [],
+    reports: {},
+  };
+  circularReport.self = circularReport;
+
+  try {
+    await assert.rejects(
+      () => writeSiteScaffoldReportArtifacts(circularReport, {
+        jsonPath: path.join(reportDir, 'scaffold-report.json'),
+        jsonAuditPath: path.join(reportDir, 'scaffold-report.redaction-audit.json'),
+        markdownPath: path.join(reportDir, 'scaffold-report.md'),
+        markdownAuditPath: path.join(reportDir, 'scaffold-report.md.redaction-audit.json'),
+      }),
+      (error) => {
+        assert.equal(error.name, 'SiteScaffoldReportRedactionFailure');
+        assert.equal(error.reasonCode, 'redaction-failed');
+        assert.equal(error.retryable, recovery.retryable);
+        assert.equal(error.cooldownNeeded, recovery.cooldownNeeded);
+        assert.equal(error.isolationNeeded, recovery.isolationNeeded);
+        assert.equal(error.manualRecoveryNeeded, recovery.manualRecoveryNeeded);
+        assert.equal(error.degradable, recovery.degradable);
+        assert.equal(error.artifactWriteAllowed, recovery.artifactWriteAllowed);
+        assert.equal(error.catalogAction, recovery.catalogAction);
+        assert.equal(JSON.stringify(error).includes('synthetic-site-scaffold'), false);
+        return true;
+      },
+    );
+    await assert.rejects(
+      () => readdir(reportDir),
+      /ENOENT/u,
+    );
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('site-scaffold report writer preserves existing artifacts when redaction fails closed', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-scaffold-redaction-preserve-'));
+  const reportDir = path.join(workspace, 'report');
+  const paths = {
+    jsonPath: path.join(reportDir, 'scaffold-report.json'),
+    jsonAuditPath: path.join(reportDir, 'scaffold-report.redaction-audit.json'),
+    markdownPath: path.join(reportDir, 'scaffold-report.md'),
+    markdownAuditPath: path.join(reportDir, 'scaffold-report.md.redaction-audit.json'),
+  };
+  const sentinelFiles = [
+    [paths.jsonPath, '{"status":"before"}\n'],
+    [paths.jsonAuditPath, '{"audit":"before"}\n'],
+    [paths.markdownPath, '# before\n'],
+    [paths.markdownAuditPath, '{"markdownAudit":"before"}\n'],
+  ];
+  const circularReport = {
+    url: 'https://example.com/?access_token=synthetic-site-scaffold-token',
+    host: 'example.com',
+    profilePath: 'C:/Users/example/profiles/example.com.json',
+    profile: { valid: true },
+    warnings: ['Authorization: Bearer synthetic-site-scaffold-auth'],
+    nextActions: [],
+    reports: {},
+  };
+  circularReport.self = circularReport;
+
+  try {
+    await mkdir(reportDir, { recursive: true });
+    await Promise.all(sentinelFiles.map(([filePath, content]) => writeFile(filePath, content)));
+
+    await assert.rejects(
+      () => writeSiteScaffoldReportArtifacts(circularReport, paths),
+      (error) => {
+        assert.equal(error.name, 'SiteScaffoldReportRedactionFailure');
+        assert.equal(error.reasonCode, 'redaction-failed');
+        assert.equal(error.artifactWriteAllowed, false);
+        assert.equal(JSON.stringify(error).includes('synthetic-site-scaffold'), false);
+        return true;
+      },
+    );
+
+    for (const [filePath, content] of sentinelFiles) {
+      assert.equal(await readFile(filePath, 'utf8'), content);
+    }
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('site-doctor report writer fails closed before persistent report writes when redaction cannot complete', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-doctor-redaction-fail-'));
+  const reportDir = path.join(workspace, 'report');
+  const circularReport = {
+    site: {
+      url: 'https://example.com/?access_token=synthetic-site-doctor-token',
+      host: 'example.com',
+      archetype: 'navigation-catalog',
+      profilePath: 'C:/Users/example/profiles/example.com.json',
+    },
+    sample: {
+      source: 'synthetic',
+      query: 'Authorization: Bearer synthetic-site-doctor-auth',
+      title: 'synthetic title',
+      url: 'https://example.com/detail?csrf_token=synthetic-site-doctor-csrf',
+      authorName: 'synthetic author',
+    },
+    profile: {
+      status: 'pass',
+      valid: true,
+    },
+    missingFields: [],
+    nextActions: [],
+    warnings: ['Cookie: sid=synthetic-site-doctor-cookie'],
+  };
+  circularReport.self = circularReport;
+
+  try {
+    await assert.rejects(
+      () => writeSiteDoctorReportArtifacts(circularReport, {
+        reportDir,
+        jsonPath: path.join(reportDir, 'site-doctor-report.json'),
+        jsonAuditPath: path.join(reportDir, 'site-doctor-report.redaction-audit.json'),
+        markdownPath: path.join(reportDir, 'site-doctor-report.md'),
+        markdownAuditPath: path.join(reportDir, 'site-doctor-report.md.redaction-audit.json'),
+      }),
+      (error) => {
+        assert.equal(error.name, 'SiteDoctorReportRedactionFailure');
+        assert.equal(error.reasonCode, 'redaction-failed');
+        assert.equal(error.retryable, false);
+        assert.equal(error.cooldownNeeded, false);
+        assert.equal(error.isolationNeeded, false);
+        assert.equal(error.manualRecoveryNeeded, true);
+        assert.equal(error.degradable, false);
+        assert.equal(error.artifactWriteAllowed, false);
+        assert.equal(error.catalogAction, 'none');
+        assert.equal(JSON.stringify(error).includes('synthetic-site-doctor'), false);
+        return true;
+      },
+    );
+    await assert.rejects(
+      () => readdir(reportDir),
+      /ENOENT/u,
+    );
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -226,8 +403,18 @@ test('site-doctor validates a generic navigation host with stubbed runtime steps
       capture: async () => ({
         status: 'success',
         finalUrl: 'https://example.com/',
+        networkRequests: [
+          {
+            method: 'GET',
+            url: 'https://example.com/api/search?q=Aoi&csrf_token=synthetic-csrf',
+            resourceType: 'xhr',
+          },
+        ],
         files: {
           manifest: path.join(workspace, 'capture', 'manifest.json'),
+        },
+        pageFacts: {
+          loginStateDetected: true,
         },
         error: null,
       }),
@@ -280,6 +467,13 @@ test('site-doctor validates a generic navigation host with stubbed runtime steps
     assert.equal(report.detail.valid, true);
     assert.equal(report.author?.valid, true);
     assert.equal(report.adapterRecommendation, 'reuse-generic');
+    assert.equal(report.reports.siteOnboardingDiscovery?.nodes > 0, true);
+    assert.equal(report.reports.siteOnboardingDiscovery?.apis, 1);
+    assert.equal(await pathExists(report.reports.siteOnboardingDiscovery.NODE_INVENTORY), true);
+    assert.equal(await pathExists(report.reports.siteOnboardingDiscovery.API_INVENTORY), true);
+    assert.equal(await pathExists(report.reports.siteOnboardingDiscovery.UNKNOWN_NODE_REPORT), true);
+    assert.equal(await pathExists(report.reports.siteOnboardingDiscovery.SITE_CAPABILITY_REPORT), true);
+    assert.equal(await pathExists(report.reports.siteOnboardingDiscovery.DISCOVERY_AUDIT), true);
     assert.equal(await pathExists(report.reports.json), true);
     assert.equal(await pathExists(report.reports.markdown), true);
   } finally {
@@ -661,7 +855,7 @@ test('site-doctor uses douyin auth verification samples and reports the douyin s
         identityConfirmed: true,
         identitySource: 'selector:[data-e2e="nav-user-avatar"]',
         currentUrl: profile.authValidationSamples.likesUrl,
-        title: '喜欢',
+        title: '鍠滄',
       }),
       ensureCrawlerScript: async () => ({
         status: 'generated',
@@ -744,7 +938,7 @@ test('site-doctor uses douyin auth verification samples and reports the douyin s
                 identityConfirmed: true,
                 featuredContentUrls: [profile.validationSamples.videoDetailUrl],
               },
-              trigger: { kind: 'tab', label: '作品' },
+              trigger: { kind: 'tab', label: '浣滃搧' },
               files: {},
             },
           ];
@@ -880,7 +1074,7 @@ test('site-doctor uses douyin auth verification samples and reports the douyin s
     assert.equal(report.authSession?.identityConfirmed, true);
     assert.equal(report.authSession?.identitySource, 'selector:[data-e2e="nav-user-avatar"]');
     assert.equal(report.authSession?.currentUrl, profile.authValidationSamples.likesUrl);
-    assert.equal(report.authSession?.title, '喜欢');
+    assert.equal(report.authSession?.title, '鍠滄');
     assert.equal(report.authSession?.riskCauseCode, null);
     assert.equal(report.authSession?.riskAction, null);
     assert.equal(report.authSession?.profileQuarantined, false);
@@ -959,7 +1153,7 @@ test('site-doctor retries recoverable douyin scenario capture failures before re
         identityConfirmed: true,
         identitySource: 'selector:[data-e2e="nav-user-avatar"]',
         currentUrl: profile.authValidationSamples.likesUrl,
-        title: '喜欢',
+        title: '鍠滄',
       }),
       ensureCrawlerScript: async () => ({
         status: 'generated',
@@ -1368,7 +1562,7 @@ test('site-doctor uses xiaohongshu notification samples and reports the xiaohong
         identityConfirmed: true,
         identitySource: 'selector:.notification-page',
         currentUrl: profile.authValidationSamples.notificationUrl,
-        title: '通知',
+        title: '閫氱煡',
       }),
       ensureCrawlerScript: async () => ({
         status: 'generated',
@@ -1578,7 +1772,7 @@ test('site-doctor falls back Xiaohongshu tourist_search captures to canonical di
         identityConfirmed: true,
         identitySource: 'selector:.notification-page',
         currentUrl: profile.authValidationSamples.notificationUrl,
-        title: '通知',
+        title: '閫氱煡',
       }),
       ensureCrawlerScript: async () => ({
         status: 'generated',
@@ -1757,8 +1951,7 @@ test('site-doctor routes Xiaohongshu download preflight through the Xiaohongshu 
   const profilePath = path.resolve('profiles/www.xiaohongshu.com.json');
   const profile = await readJsonFile(profilePath);
   const runProcessCalls = [];
-  const passthroughSidecarPath = path.join(workspace, 'profiles', 'xiaohongshu.com', '.bws', 'xiaohongshu-download-auth.json');
-  const passthroughCookieFile = path.join(workspace, 'profiles', 'xiaohongshu.com', '.bws', 'xiaohongshu-download-cookies.txt');
+  const passthroughSidecarPath = path.join(workspace, 'profiles', 'xiaohongshu.com', '.bws', 'xiaohongshu-download-auth-summary.json');
 
   try {
     const report = await siteDoctor('https://www.xiaohongshu.com/explore', {
@@ -1798,7 +1991,7 @@ test('site-doctor routes Xiaohongshu download preflight through the Xiaohongshu 
         identityConfirmed: true,
         identitySource: 'selector:.notification-page',
         currentUrl: profile.authValidationSamples.notificationUrl,
-        title: '通知',
+        title: '閫氱煡',
       }),
       ensureCrawlerScript: async () => ({
         status: 'generated',
@@ -1891,7 +2084,7 @@ test('site-doctor routes Xiaohongshu download preflight through the Xiaohongshu 
       exportSiteDownloadPassthrough: async () => ({
         available: true,
         reasonCode: null,
-        passthroughMode: 'cookie-header',
+        passthroughMode: 'redacted-session-view',
         sessionProfileAvailable: true,
         cookieHeaderAvailable: true,
         cookieCount: 2,
@@ -1899,19 +2092,19 @@ test('site-doctor routes Xiaohongshu download preflight through the Xiaohongshu 
         cookieDomains: ['.xiaohongshu.com', 'www.xiaohongshu.com'],
         headerNames: ['Accept-Language', 'Cookie', 'Origin', 'Referer', 'User-Agent'],
         sidecarPath: passthroughSidecarPath,
-        cookieFile: passthroughCookieFile,
-        userDataDir: path.join(workspace, 'profiles', 'xiaohongshu.com'),
+        cookieFile: null,
+        sidecarRedactionAuditPath: `${passthroughSidecarPath.slice(0, -'.json'.length)}.redaction-audit.json`,
+        userDataDir: null,
+        userDataDirPresent: true,
         verificationUrl: profile.authValidationSamples.notificationUrl,
         currentUrl: profile.authValidationSamples.notificationUrl,
-        title: '通知',
+        title: '閫氱煡',
         loginStateDetected: true,
         identityConfirmed: true,
         identitySource: 'selector:.notification-page',
         env: {
           BWS_XIAOHONGSHU_DOWNLOAD_AUTH_SIDECAR: passthroughSidecarPath,
-          BWS_XIAOHONGSHU_DOWNLOAD_COOKIE_FILE: passthroughCookieFile,
-          BWS_XIAOHONGSHU_DOWNLOAD_USER_DATA_DIR: path.join(workspace, 'profiles', 'xiaohongshu.com'),
-          BWS_XIAOHONGSHU_DOWNLOAD_PASSTHROUGH_MODE: 'cookie-header',
+          BWS_XIAOHONGSHU_DOWNLOAD_PASSTHROUGH_MODE: 'redacted-session-view',
         },
       }),
       runProcess: async (command, args, options) => {
@@ -1950,7 +2143,7 @@ test('site-doctor routes Xiaohongshu download preflight through the Xiaohongshu 
             downloadSession: {
               status: 'sidecar-reused',
               cookieCount: 2,
-              userDataDir: path.join(workspace, 'profiles', 'xiaohongshu.com'),
+              userDataDirPresent: true,
               finalUrl: profile.authValidationSamples.notificationUrl,
               sidecarPath: passthroughSidecarPath,
             },
@@ -1976,10 +2169,12 @@ test('site-doctor routes Xiaohongshu download preflight through the Xiaohongshu 
     assert.equal(report.download?.details?.downloadSession?.status, 'sidecar-reused');
     assert.equal(report.download?.details?.downloadSession?.cookieCount, 2);
     assert.equal(report.download?.details?.authPassthrough?.available, true);
-    assert.equal(report.download?.details?.authPassthrough?.passthroughMode, 'cookie-header');
+    assert.equal(report.download?.details?.authPassthrough?.passthroughMode, 'redacted-session-view');
     assert.equal(report.download?.details?.authPassthrough?.cookieCount, 2);
     assert.equal(report.download?.details?.authPassthrough?.sidecarPath, passthroughSidecarPath);
-    assert.equal(report.download?.details?.authPassthrough?.cookieFile, passthroughCookieFile);
+    assert.equal(report.download?.details?.authPassthrough?.cookieFile, null);
+    assert.equal(report.download?.details?.authPassthrough?.userDataDir, null);
+    assert.equal(report.download?.details?.authPassthrough?.userDataDirPresent, true);
     assert.equal(runProcessCalls.length, 1);
     assert.equal(runProcessCalls[0].command, process.execPath);
     assert.match(String(runProcessCalls[0].args[0]).replace(/\\/gu, '/'), /\/src\/entrypoints\/sites\/xiaohongshu-action\.mjs$/u);
@@ -1988,12 +2183,12 @@ test('site-doctor routes Xiaohongshu download preflight through the Xiaohongshu 
     assert.equal(runProcessCalls[0].args[runProcessCalls[0].args.indexOf('--query') + 1], profile.validationSamples.videoSearchQuery);
     assert.equal(runProcessCalls[0].args[runProcessCalls[0].args.indexOf('--profile-path') + 1], profilePath);
     assert.equal(runProcessCalls[0].options.env.BWS_XIAOHONGSHU_DOWNLOAD_AUTH_SIDECAR, passthroughSidecarPath);
-    assert.equal(runProcessCalls[0].options.env.BWS_XIAOHONGSHU_DOWNLOAD_COOKIE_FILE, passthroughCookieFile);
-    assert.equal(runProcessCalls[0].options.env.BWS_XIAOHONGSHU_DOWNLOAD_PASSTHROUGH_MODE, 'cookie-header');
-    assert.equal(runProcessCalls[0].options.env.BWS_XIAOHONGSHU_DOWNLOAD_USER_DATA_DIR, path.join(workspace, 'profiles', 'xiaohongshu.com'));
+    assert.equal(Object.hasOwn(runProcessCalls[0].options.env, 'BWS_XIAOHONGSHU_DOWNLOAD_COOKIE_FILE'), false);
+    assert.equal(Object.hasOwn(runProcessCalls[0].options.env, 'BWS_XIAOHONGSHU_DOWNLOAD_USER_DATA_DIR'), false);
+    assert.equal(runProcessCalls[0].options.env.BWS_XIAOHONGSHU_DOWNLOAD_PASSTHROUGH_MODE, 'redacted-session-view');
     const markdown = await readFile(report.reports.markdown, 'utf8');
     assert.match(markdown, /## Download Auth Passthrough/u);
-    assert.match(markdown, /Mode: cookie-header/u);
+    assert.match(markdown, /Mode: redacted-session-view/u);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -2247,7 +2442,7 @@ test('site-doctor uses Xiaohongshu auth bootstrap to recover notification valida
             persistenceVerified: true,
             currentUrl: profile.authValidationSamples.notificationUrl,
             runtimeUrl: profile.authValidationSamples.notificationUrl,
-            title: '通知',
+            title: '閫氱煡',
             riskCauseCode: null,
             riskAction: null,
             networkIdentityFingerprint: {
@@ -2734,7 +2929,7 @@ test('site-doctor markdown reports reusable bilibili auth session details', asyn
         identityConfirmed: true,
         identitySource: 'selector:.header-entry-mini img',
         currentUrl: 'https://space.bilibili.com/1202350411/dynamic',
-        title: '君在西安个人动态-哔哩哔哩视频',
+        title: '鍚涘湪瑗垮畨涓汉鍔ㄦ€?鍝斿摡鍝斿摡瑙嗛',
       }),
       ensureCrawlerScript: async () => ({
         status: 'generated',
@@ -2765,7 +2960,7 @@ test('site-doctor markdown reports reusable bilibili auth session details', asyn
     assert.match(markdown, /Login state detected: yes/u);
     assert.match(markdown, /Identity confirmed: yes/u);
     assert.match(markdown, /Current URL: https:\/\/space\.bilibili\.com\/1202350411\/dynamic/u);
-    assert.match(markdown, /Network identity fingerprint: [0-9a-f]{16}/u);
+    assert.match(markdown, /Network identity fingerprint: \[REDACTED\]/u);
     assert.match(markdown, /Risk cause code: none/u);
     assert.match(markdown, /Risk action: none/u);
     assert.match(markdown, /Profile quarantined: no/u);
@@ -2851,6 +3046,138 @@ test('site-doctor probes reusable auth for X and skips authenticated X scenarios
     assert.match(report.warnings.join('\n'), /No reusable logged-in x session was detected/u);
     assert.match(report.nextActions.join('\n'), /site-login/u);
     assert.match(report.nextActions.join('\n'), /BWS_X_USER_DATA_DIR/u);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('site-doctor uses ready unified X session health when auth probe is inconclusive', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-site-doctor-x-session-health-auth-'));
+  const profilePath = path.resolve('profiles/x.com.json');
+  const profile = await readJsonFile(profilePath);
+  const sessionDir = path.join(workspace, 'session');
+  const sessionManifest = path.join(sessionDir, 'manifest.json');
+  const stateForXUrl = (url, index = 0) => {
+    const pathname = new URL(url).pathname.toLowerCase().replace(/\/+$/u, '') || '/';
+    let pageType = 'author-page';
+    if (pathname === '/home') {
+      pageType = 'home';
+    } else if (pathname === '/explore') {
+      pageType = 'category-page';
+    } else if (pathname === '/i/bookmarks' || pathname === '/notifications' || pathname.endsWith('/following')) {
+      pageType = 'author-list-page';
+    } else if (pathname.startsWith('/search')) {
+      pageType = 'search-results-page';
+    } else if (pathname.includes('/status/')) {
+      pageType = 'book-detail-page';
+    }
+    return {
+      state_id: `x-health-state-${index}`,
+      status: 'captured',
+      finalUrl: url,
+      pageType,
+      files: {},
+      pageFacts: {
+        featuredContentCount: ['book-detail-page', 'search-results-page', 'author-page'].includes(pageType) ? 1 : 0,
+        featuredAuthorCount: ['author-list-page', 'author-page'].includes(pageType) ? 1 : 0,
+        antiCrawlSignals: [],
+      },
+    };
+  };
+
+  try {
+    await mkdir(sessionDir, { recursive: true });
+    await writeFile(sessionManifest, `${JSON.stringify({
+      schemaVersion: 1,
+      runId: 'session-run-x-auth-ready',
+      siteKey: 'x',
+      host: 'x.com',
+      purpose: 'archive',
+      status: 'passed',
+      health: {
+        siteKey: 'x',
+        host: 'x.com',
+        status: 'ready',
+        mode: 'authenticated',
+        authStatus: 'authenticated-or-anonymous-ok',
+        riskSignals: [],
+        expiresAt: '2030-01-01T00:00:00.000Z',
+      },
+      artifacts: {
+        manifest: sessionManifest,
+        runDir: sessionDir,
+      },
+    }, null, 2)}\n`, 'utf8');
+
+    const report = await siteDoctor('https://x.com/home', {
+      profilePath,
+      sessionManifest,
+      outDir: path.join(workspace, 'doctor'),
+    }, {
+      resolveSite: async () => ({ adapter: { id: 'x' }, host: 'x.com' }),
+      resolveSiteAuthProfile: async () => ({
+        profile,
+        warnings: [],
+        filePath: profilePath,
+      }),
+      resolveSiteBrowserSessionOptions: async () => ({
+        reuseLoginState: true,
+        userDataDir: path.join(workspace, 'profiles', 'x.com'),
+        cleanupUserDataDirOnShutdown: false,
+        authConfig: {
+          loginUrl: 'https://x.com/i/flow/login',
+          postLoginUrl: 'https://x.com/home',
+          verificationUrl: 'https://x.com/home',
+        },
+      }),
+      runAuthenticatedKeepalivePreflight: async () => ({
+        attempted: true,
+        ran: false,
+        reason: 'not-due',
+        thresholdMinutes: null,
+        sessionHealthSummary: null,
+        sessionHealthSummaryAfter: null,
+        keepaliveReport: null,
+      }),
+      openBrowserSession: async () => ({
+        async navigateAndWait() {},
+        async close() {},
+      }),
+      inspectLoginState: async () => ({
+        loggedIn: false,
+        loginStateDetected: true,
+        identityConfirmed: false,
+        identitySource: 'heuristic:no-login-form-or-logged-out-indicator',
+        currentUrl: 'https://x.com/home',
+        title: 'X',
+      }),
+      ensureCrawlerScript: async () => ({
+        status: 'generated',
+        scriptPath: path.join(workspace, 'crawler.py'),
+        metaPath: path.join(workspace, 'crawler.meta.json'),
+      }),
+      capture: async (url) => ({
+        status: 'success',
+        finalUrl: url,
+        files: {
+          manifest: path.join(workspace, 'capture', 'manifest.json'),
+        },
+        error: null,
+      }),
+      expandStates: async (inputUrl) => ({
+        outDir: path.join(workspace, 'expand'),
+        summary: { capturedStates: 1 },
+        warnings: [],
+        states: [stateForXUrl(inputUrl, 1)],
+      }),
+    });
+
+    assert.equal(report.sessionReuseWorked, true);
+    assert.equal(report.authSession?.sessionHealthFallback, true);
+    assert.equal(report.scenarios.find((entry) => entry.id === 'home-auth')?.status, 'pass');
+    assert.equal(report.scenarios.find((entry) => entry.id === 'search-latest')?.status, 'pass');
+    assert.equal(report.scenarios.find((entry) => entry.id === 'bookmarks')?.status, 'pass');
+    assert.match(report.warnings.join('\n'), /Accepted ready unified x session health/u);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -3399,7 +3726,7 @@ test('X and Instagram social docs include operational natural language command m
     instagramNlIntents,
     instagramFlows,
   ] = await Promise.all([
-    readFile(path.resolve('docs/SOCIAL_LIVE_VERIFICATION.md'), 'utf8'),
+    readFile(path.resolve('CONTRIBUTING.md'), 'utf8'),
     readFile(path.resolve('skills/x/SKILL.md'), 'utf8'),
     readFile(path.resolve('skills/x/references/nl-intents.md'), 'utf8'),
     readFile(path.resolve('skills/x/references/flows.md'), 'utf8'),
@@ -3430,5 +3757,5 @@ test('X and Instagram social docs include operational natural language command m
   assert.match(instagramSkill, /node scripts\/social-live-verify\.mjs --live --execute --site instagram --ig-account <handle>/u);
   assert.match(instagramSkill, /node scripts\/social-kb-refresh\.mjs --execute --site instagram --ig-account <handle>/u);
   assert.match(socialLiveVerification, /Natural Language Trigger Guide/u);
-  assert.match(socialLiveVerification, /KB 刷新/u);
+  assert.match(socialLiveVerification, /scenario KB refresh/u);
 });

@@ -1,4 +1,4 @@
-﻿# Browser-Wiki-Skill
+# Browser-Wiki-Skill
 
 <div align="center">
 
@@ -7,7 +7,7 @@
 <p>
   <img alt="Node.js" src="https://img.shields.io/badge/Runtime-Node.js_+_Python-0f172a?style=for-the-badge&logo=nodedotjs&logoColor=white">
   <img alt="Pipeline" src="https://img.shields.io/badge/Pipeline-Capture_→_KB_→_Skill-2563eb?style=for-the-badge">
-  <img alt="Supported Sites" src="https://img.shields.io/badge/Supported_Sites-6-16a34a?style=for-the-badge">
+  <img alt="Supported Sites" src="https://img.shields.io/badge/Supported_Sites-20-16a34a?style=for-the-badge">
   <img alt="Status" src="https://img.shields.io/badge/Mode-Local_First-f59e0b?style=for-the-badge">
 </p>
 
@@ -39,7 +39,7 @@ flowchart LR
     D --> E["src/entrypoints/pipeline/analyze-states.mjs<br/>页面与动作分析"]
     E --> F["src/entrypoints/pipeline/abstract-interactions.mjs<br/>交互抽象"]
     F --> G["src/entrypoints/pipeline/nl-entry.mjs<br/>自然语言入口"]
-    G --> H["src/entrypoints/pipeline/generate-docs.mjs<br/>文档治理"]
+    G --> H["src/entrypoints/pipeline/generate-docs.mjs<br/>治理产物生成"]
     H --> I["src/entrypoints/pipeline/compile-wiki.mjs<br/>知识库编译"]
     I --> J["src/entrypoints/pipeline/generate-skill.mjs<br/>Skill 生成"]
 
@@ -69,16 +69,42 @@ flowchart LR
 
 ## Supported Sites
 
-Current supported sites snapshot: `www.22biqu.com`, `www.bilibili.com`, `www.douyin.com`, `www.xiaohongshu.com`, `jable.tv`, `moodyz.com`.
+Current supported sites snapshot: 20 registered site families across public reading, social, video, and catalog workflows.
 
 | Site | Skill | Archetype | Typical Intents | Status |
 | --- | --- | --- | --- | --- |
 | `www.22biqu.com` | `22biqu` | chapter-content | 下载整本、打开章节、搜索内容 | 已接入 |
+| `www.qidian.com` | `qidian` | chapter-content | 搜索书籍、打开书籍、打开章节、风险/权限面识别 | 已接入 |
 | `www.bilibili.com` | `bilibili` | catalog-detail | 打开视频、打开作者、搜索视频 | 已接入 |
 | `www.douyin.com` | `douyin` | catalog-detail | 打开视频、打开用户主页、关注更新查询 | 已接入 |
 | `www.xiaohongshu.com` | `xiaohongshu-explore` | catalog-detail | 搜索笔记、打开笔记、打开用户主页、下载图文笔记 | 已接入 |
+| `x.com` | `x` | social | 只读浏览、搜索、profile/post 读取、媒体队列规划 | 已接入 |
+| `www.instagram.com` | `instagram` | social | 只读 profile/media/archive 工作流 | 已接入 |
 | `jable.tv` | `jable` | catalog-detail | 打开视频、打开演员页、榜单查询 | 已接入 |
 | `moodyz.com` | `moodyz-works` | catalog-detail | 搜索作品、打开作品、打开演员页 | 已接入 |
+| `rookie-av.jp` | `rookie-av` | catalog-detail | 列表、详情、搜索、分页、元数据抽取 | 已接入 |
+| `madonna-av.com` | `madonna-av` | catalog-detail | 列表、详情、搜索、分页、元数据抽取 | 已接入 |
+| `dahlia-av.jp` | `dahlia-av` | catalog-detail | 列表、详情、搜索、分页、元数据抽取 | 已接入 |
+| `www.sod.co.jp` | `sod` | catalog-detail | 列表、详情、搜索、分页、元数据抽取 | 已接入 |
+| `s1s1s1.com` | `s1` | catalog-detail | 列表、详情、搜索、分页、元数据抽取 | 已接入 |
+| `attackers.net` | `attackers` | catalog-detail | 列表、详情、搜索、分页、元数据抽取 | 已接入 |
+| `www.t-powers.co.jp` | `t-powers` | profile/catalog | 公开列表、profile/detail 元数据抽取 | 已接入 |
+| `www.8man.jp` | `8man` | profile/catalog | 公开列表、profile/detail 元数据抽取 | 已接入 |
+| `www.dogma.co.jp` | `dogma` | catalog-detail | 列表、详情、搜索、分页、元数据抽取 | 已接入 |
+| `www.km-produce.com` | `km-produce` | catalog-detail | 列表、详情、搜索、分页、元数据抽取 | 已接入 |
+| `www.maxing.jp` | `maxing` | catalog-detail | 列表、详情、搜索、分页、元数据抽取 | 已接入 |
+
+长期 AV 发布目录聚合入口：
+
+```powershell
+node .\src\entrypoints\sites\jp-av-release-catalog.mjs --start 2026-01-01 --end 2026-05-04
+```
+
+该入口只读取官方公开页面，覆盖同构 `/works/date` 站点以及 DAHLIA `/work/`、T-Powers `/release/`、KM Produce `/works?archive=...`、MAXING EUC-JP 公开 shop/top 列表。8MAN、SOD、DOGMA 在作品发行表中会作为明确 skipped/blocked coverage 记录，不会静默漏站或绕过入口边界。
+
+Downloader support is intentionally capability-specific. Many catalog sites are
+read-only metadata integrations and explicitly mark downloader workflows as
+`not_supported`, `deferred`, or `blocked_by_policy`.
 
 ## Capability Snapshot
 
@@ -96,7 +122,7 @@ mindmap
     Knowledge Base
       Raw sources
       Structured index
-      Governance docs
+      Governance artifacts
     Skill Output
       SKILL.md
       flows
@@ -135,15 +161,52 @@ node .\src\entrypoints\sites\site-keepalive.mjs https://www.douyin.com/ --profil
 
 抖音默认按“可见浏览器 + 本地持久 profile 复用 + 必要时 WinCred 自动补登录”运行；不要求专属出口 IP，但要求尽量固定在同一条当前网络上。`site-login` 用于首次建立或恢复登录态，`site-keepalive` 用于低频保活与健康确认，在同一份本地 profile 上优先复用登录态，必要时再触发凭证恢复。
 
+## Site Capability Layer
+
+Site Capability Layer keeps site-specific interpretation out of Kernel and downloader code. Kernel/orchestrator owns lifecycle, common safety, schema, and reason semantics. Capability Services own reusable discovery, inventory, API, health, redaction, policy, and coverage mechanisms. SiteAdapter owns URL classification, node/API interpretation, pagination, login/risk signal mapping, and semantic field normalization. Downloader consumes only governed tasks, policies, minimal session views, and resolved resources.
+
+New-site onboarding is full onboarding by default: registry/profile/capability records, SiteAdapter mapping, repo-local skill, discovery artifacts, coverage gate, SiteAdapter contract tests, matrix update, and review acceptance. The required onboarding artifacts are `NODE_INVENTORY`, `API_INVENTORY`, `UNKNOWN_NODE_REPORT`, `SITE_CAPABILITY_REPORT`, and `DISCOVERY_AUDIT`.
+## Public Repository Safety
+
+Before publishing to GitHub, keep these boundaries in force:
+
+- Do not commit raw credentials, cookies, CSRF values, authorization headers,
+  SESSDATA, tokens, session ids, browser profile directories, or equivalent
+  session material.
+- Do not commit `.playwright-mcp/`, `runs/`, `book-content/`, browser captures,
+  rendered page logs, downloaded media, or local runtime artifacts.
+- Do not implement CAPTCHA bypass, MFA bypass, platform-risk bypass,
+  access-control bypass, credential extraction, or silent privilege expansion.
+- `profiles/*.json` are site capability configuration files in this repository;
+  they are not browser profile directories and must stay free of session
+  material.
+
+Recommended pre-publish checks:
+
+```powershell
+node .\tools\prepublish-secret-scan.mjs
+git diff --check
+node --test .\tests\node\site-capability-matrix.test.mjs
+node --test .\tests\node\site-adapter-contract.test.mjs .\tests\node\site-onboarding-discovery.test.mjs
+node --test .\tests\node\site-health-recovery.test.mjs .\tests\node\site-health-execution-gate.test.mjs
+node --test .\tests\node\downloads-runner.test.mjs .\tests\node\planner-policy-handoff.test.mjs
+```
+
+See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the full submission checklist,
+documentation retention policy, and operational safety gates.
+
 ## Breaking Change Migration
 
-Root file retirement is now complete. If you still have callers or notes using root CLI, root Python, or root metadata paths, migrate them to the canonical `src/entrypoints/**`, `src/sites/**/python/*.py`, and `config/**` locations documented in [`docs/ROOT_FILE_RETIREMENT_MIGRATION.md`](./docs/ROOT_FILE_RETIREMENT_MIGRATION.md).
+Root file retirement is now complete. If you still have callers or notes using
+root CLI, root Python, or root metadata paths, migrate them to the canonical
+`src/entrypoints/**`, `src/sites/**/python/*.py`, and `config/**` locations.
+Do not recreate retired root shims; update the caller instead.
 
 ## Download Runner Migration
 
-Download operations are moving behind the unified runner documented in [`docs/DOWNLOAD_RUNNER.md`](./docs/DOWNLOAD_RUNNER.md). The runner is dry-run by default, writes stable `plan.json`, `resolved-task.json`, `manifest.json`, `queue.json`, `downloads.jsonl`, and `report.md` artifacts, and supports `--execute`, `--resume`, and `--retry-failed`.
+Download operations move behind the unified runner. The runner is dry-run by default, writes stable `plan.json`, `resolved-task.json`, `manifest.json`, `queue.json`, `downloads.jsonl`, and `report.md` artifacts, and supports `--execute`, `--resume`, and `--retry-failed`. Detailed release, native/legacy, live-validation, and session gates now live in `CONTRIBUTING.md`.
 
-Current branch caveat: this work is on a stacked branch and has not been pushed as the published `main` behavior. Treat the docs as branch-local migration guidance until the stack lands.
+The runner and Site Capability Layer are under active development. Treat the Site Capability Layer matrix and focused regression batch definition in `CONTRIBUTING.md` as the current progress ledger.
 
 ## Network Governance (No Dedicated IP)
 
@@ -228,7 +291,7 @@ python -m unittest discover -s .\tests\python -p 'test_*.py'
 | --- | --- |
 | [`src/`](./src) | Primary code tree for entrypoints, pipeline orchestration, site modules, skill generation internals, infra, and shared helpers |
 | [`tools/`](./tools) | Maintenance-only scripts such as migrations, benchmarks, and bootstrap helpers |
-| [`runs/`](./runs) | Transient runtime outputs for pipeline runs, site diagnostics, queries, benchmarks, and scratch artifacts |
+| `runs/` | Transient runtime outputs for pipeline runs, site diagnostics, queries, benchmarks, and scratch artifacts; runtime-created and usually absent from a clean checkout |
 | [`profiles/`](./profiles) | 站点级规则源，每个 host 一个 profile |
 | [`crawler-scripts/`](./crawler-scripts) | 按 host 缓存 crawler 脚本与元数据 |
 | [`knowledge-base/`](./knowledge-base) | 编译后的知识库与 `raw/` 事实归档 |
@@ -311,7 +374,7 @@ Shared infrastructure now lives in `src/infra/`, while site-specific code is gro
 2. 生成或复用 crawler：[`src/entrypoints/pipeline/generate-crawler-script.mjs`](./src/entrypoints/pipeline/generate-crawler-script.mjs)
 3. 跑通采集与知识库编译：[`src/entrypoints/pipeline/run-pipeline.mjs`](./src/entrypoints/pipeline/run-pipeline.mjs)
 4. 生成仓库内 Skill：[`src/entrypoints/pipeline/generate-skill.mjs`](./src/entrypoints/pipeline/generate-skill.mjs)
-5. 用 [`docs/NEW_SITE_CHECKLIST.md`](./docs/NEW_SITE_CHECKLIST.md) 回归检查
+5. 用 `CONTRIBUTING.md` 的 new-site onboarding gate、Site Capability Layer matrix 和 focused regression batch 回归检查
 
 ## Repo Notes
 
