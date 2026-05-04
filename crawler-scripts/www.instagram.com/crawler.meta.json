@@ -1,12 +1,12 @@
 {
   "host": "www.instagram.com",
   "baseUrl": "https://www.instagram.com/",
-  "generatedAt": "2026-04-26T06:17:42.697Z",
+  "generatedAt": "2026-05-03T09:50:50.086Z",
   "scriptLanguage": "python",
   "interpreterRequired": "pypy3",
   "templateVersion": 3,
   "profilePath": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\profiles\\www.instagram.com.json",
-  "profileHash": "548b81738d4bf27a077a296f2b96d7f5a325543fabe87e8dcf7651db7a73af32",
+  "profileHash": "3a9b0b0b2f00edd5ea7f69e3aeb3648a5719bc114f3e2d50b907dbf5647af9bb",
   "profileVersion": 1,
   "capabilities": [
     "search-content",

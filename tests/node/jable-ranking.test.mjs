@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
+import { queryJableRanking } from '../../src/entrypoints/sites/jable-ranking.mjs';
 import {
   buildJableTaxonomyIndex,
   normalizeJableRankingLabel,
@@ -8,6 +12,10 @@ import {
   resolveJableRankingTarget,
   resolveJableSortMode,
 } from '../../src/sites/jable/queries/ranking.mjs';
+
+async function assertMissing(filePath) {
+  await assert.rejects(access(filePath), /ENOENT/u);
+}
 
 test('normalizeJableRankingLabel folds simplified and traditional labels', () => {
   assert.equal(normalizeJableRankingLabel('黑丝分类'), '黑丝');
@@ -78,3 +86,112 @@ test('parseJableVideoCardsFromHtml extracts title, url, views and favourites', (
   assert.equal(rows[1].videoUrl, 'https://jable.tv/videos/jur-652/');
 });
 
+test('queryJableRanking can plan without registry or capability metadata writes', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'jable-ranking-no-metadata-'));
+  try {
+    const kbDir = path.join(workspace, 'kb', 'jable.tv');
+    const statesDir = path.join(kbDir, 'raw', 'analysis');
+    const configDir = path.join(workspace, 'config');
+    await mkdir(path.join(kbDir, 'index'), { recursive: true });
+    await mkdir(statesDir, { recursive: true });
+    await mkdir(configDir, { recursive: true });
+
+    await writeFile(path.join(kbDir, 'index', 'sources.json'), JSON.stringify({
+      activeSources: [{
+        step: 'step-3-analysis',
+        runId: 'fixture-analysis',
+        rawDir: 'raw/analysis',
+      }],
+    }), 'utf8');
+    await writeFile(path.join(statesDir, 'states.json'), JSON.stringify({
+      baseUrl: 'https://jable.tv/',
+      states: [{
+        pageFacts: {
+          categoryTaxonomy: [{
+            groupLabel: 'Costume',
+            tags: [{
+              label: 'Cosplay',
+              href: 'https://jable.tv/tags/Cosplay/',
+            }],
+          }],
+        },
+      }],
+    }), 'utf8');
+
+    const registryPath = path.join(configDir, 'site-registry.json');
+    const originalRegistryText = JSON.stringify({
+      version: 1,
+      generatedAt: null,
+      sites: {
+        'jable.tv': {
+          host: 'jable.tv',
+          canonicalBaseUrl: 'https://jable.tv/',
+          knowledgeBaseDir: kbDir,
+        },
+      },
+    }, null, 2);
+    await writeFile(registryPath, `${originalRegistryText}\n`, 'utf8');
+
+    const result = await queryJableRanking('https://jable.tv/', {
+      workspaceRoot: workspace,
+      targetLabel: 'cosplay',
+      limit: 1,
+      writeSiteMetadata: false,
+      fetchHtml: async () => `
+        <div class="video-img-box mb-e-20">
+          <div class="detail">
+            <h6 class="title"><a href="https://jable.tv/videos/fixture-001/">Fixture 001</a></h6>
+            <p class="sub-title">
+              <svg><use xlink:href="#icon-eye"></use></svg>1 234
+              <svg><use xlink:href="#icon-heart-inline"></use></svg>56
+            </p>
+          </div>
+        </div>
+      `,
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.siteMetadata.written, false);
+    assert.equal(result.results.length, 1);
+    assert.equal(result.results[0].title, 'Fixture 001');
+    assert.equal(await readFile(registryPath, 'utf8'), `${originalRegistryText}\n`);
+    await assertMissing(path.join(configDir, 'site-capabilities.json'));
+    await assertMissing(path.join(workspace, 'runs', 'site-metadata', 'site-registry.runtime.json'));
+    await assertMissing(path.join(workspace, 'runs', 'site-metadata', 'site-capabilities.runtime.json'));
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('queryJableRanking can live-read a direct tag URL without a local taxonomy KB', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'jable-ranking-direct-url-'));
+  try {
+    const result = await queryJableRanking('https://jable.tv/tags/Cosplay/', {
+      workspaceRoot: workspace,
+      limit: 1,
+      writeSiteMetadata: false,
+      fetchHtml: async () => `
+        <div class="video-img-box mb-e-20">
+          <div class="detail">
+            <h6 class="title"><a href="https://jable.tv/videos/fixture-002/">Fixture 002</a></h6>
+            <p class="sub-title">
+              <svg><use xlink:href="#icon-eye"></use></svg>2 345
+              <svg><use xlink:href="#icon-heart-inline"></use></svg>67
+            </p>
+          </div>
+        </div>
+      `,
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.siteMetadata.written, false);
+    assert.equal(result.resolvedTarget.source, 'direct-url');
+    assert.equal(result.resolvedTarget.targetUrl, 'https://jable.tv/tags/Cosplay/');
+    assert.equal(result.results.length, 1);
+    assert.equal(result.results[0].title, 'Fixture 002');
+    await assertMissing(path.join(workspace, 'config', 'site-registry.json'));
+    await assertMissing(path.join(workspace, 'config', 'site-capabilities.json'));
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});

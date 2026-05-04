@@ -1,0 +1,30 @@
+{
+  "host": "www.bz888888888.com",
+  "baseUrl": "https://www.bz888888888.com/",
+  "generatedAt": "2026-05-04T06:21:28.765Z",
+  "scriptLanguage": "python",
+  "interpreterRequired": "pypy3",
+  "templateVersion": 3,
+  "profilePath": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\profiles\\www.bz888888888.com.json",
+  "profileHash": "ce4e17180f24b06b56d95403b42623de686850e6aa20584a694d9fe88aef4981",
+  "profileVersion": 1,
+  "capabilities": [
+    "search-content",
+    "navigate-to-content",
+    "navigate-to-author",
+    "navigate-to-chapter",
+    "download-content"
+  ],
+  "dependencies": [
+    "httpx",
+    "selectolax",
+    "anyio"
+  ],
+  "urlFamily": [
+    "https://www.bz888888888.com/"
+  ],
+  "historicalContext": {
+    "sourceRunDir": null,
+    "books": []
+  }
+}

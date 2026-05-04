@@ -1,0 +1,146 @@
+{
+  "host": "dahlia-av.jp",
+  "archetype": "navigation-catalog",
+  "schemaVersion": 1,
+  "primaryArchetype": "catalog-detail",
+  "version": 1,
+  "pageTypes": {
+    "homeExact": [
+      "/"
+    ],
+    "homePrefixes": [],
+    "searchResultsPrefixes": [
+      "/search",
+      "/search/list"
+    ],
+    "contentDetailPrefixes": [
+      "/works/detail/",
+      "/works/"
+    ],
+    "authorPrefixes": [
+      "/actress/"
+    ],
+    "authorListExact": [
+      "/actress/"
+    ],
+    "authorListPrefixes": [
+      "/actress/"
+    ],
+    "authorDetailPrefixes": [
+      "/actress/"
+    ],
+    "chapterPrefixes": [],
+    "historyPrefixes": [],
+    "authPrefixes": [
+      "/login",
+      "/member",
+      "/mypage"
+    ],
+    "categoryPrefixes": [
+      "/work/",
+      "/works/list",
+      "/news/"
+    ]
+  },
+  "search": {
+    "formSelectors": [
+      "form[action*=\"/search\"]",
+      "form[role=\"search\"]"
+    ],
+    "inputSelectors": [
+      "input[name=\"s\"]",
+      "input[name=\"keyword\"]",
+      "input[name=\"q\"]",
+      "input[type=\"search\"]"
+    ],
+    "submitSelectors": [
+      "button[type=\"submit\"]",
+      "input[type=\"submit\"]"
+    ],
+    "queryParamNames": [
+      "s",
+      "keyword",
+      "q"
+    ],
+    "resultTitleSelectors": [
+      "title",
+      "h1",
+      "h2"
+    ],
+    "resultBookSelectors": [
+      "a[href*=\"/works/\"]"
+    ],
+    "defaultQueries": [],
+    "knownQueries": []
+  },
+  "sampling": {
+    "searchResultContentLimit": 5,
+    "authorContentLimit": 10,
+    "categoryContentLimit": 10,
+    "fallbackContentLimitWithSearch": 8
+  },
+  "navigation": {
+    "allowedHosts": [
+      "dahlia-av.jp",
+      "www.dahlia-av.jp"
+    ],
+    "contentPathPrefixes": [
+      "/works/detail/",
+      "/works/"
+    ],
+    "authorPathPrefixes": [
+      "/actress/"
+    ],
+    "authorListPathPrefixes": [
+      "/actress/"
+    ],
+    "authorDetailPathPrefixes": [
+      "/actress/"
+    ],
+    "categoryPathPrefixes": [
+      "/work/",
+      "/works/list",
+      "/news/"
+    ],
+    "utilityPathPrefixes": [
+      "/",
+      "/search",
+      "/search/list"
+    ],
+    "authPathPrefixes": [
+      "/login",
+      "/member",
+      "/mypage"
+    ],
+    "categoryLabelKeywords": [
+      "work",
+      "works",
+      "actress",
+      "news",
+      "search"
+    ]
+  },
+  "contentDetail": {
+    "titleSelectors": [
+      "h1",
+      "h2",
+      "title"
+    ],
+    "authorNameSelectors": [
+      "a[href*=\"/actress/\"]"
+    ],
+    "authorLinkSelectors": [
+      "a[href*=\"/actress/\"]"
+    ]
+  },
+  "author": {
+    "titleSelectors": [
+      "h1",
+      "h2",
+      "title"
+    ],
+    "workLinkSelectors": [
+      "a[href*=\"/works/\"]"
+    ]
+  }
+}

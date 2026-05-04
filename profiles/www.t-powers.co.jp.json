@@ -1,0 +1,168 @@
+{
+  "host": "www.t-powers.co.jp",
+  "archetype": "navigation-catalog",
+  "schemaVersion": 1,
+  "primaryArchetype": "catalog-detail",
+  "version": 1,
+  "pageTypes": {
+    "homeExact": [
+      "/"
+    ],
+    "homePrefixes": [],
+    "searchResultsPrefixes": [
+      "/search"
+    ],
+    "contentDetailPrefixes": [
+      "/works/detail/"
+    ],
+    "authorPrefixes": [
+      "/talent/",
+      "/model/",
+      "/actress/"
+    ],
+    "authorListExact": [
+      "/talent/",
+      "/model/",
+      "/actress/"
+    ],
+    "authorListPrefixes": [
+      "/talent/",
+      "/model/",
+      "/actress/"
+    ],
+    "authorDetailPrefixes": [
+      "/talent/",
+      "/model/",
+      "/actress/"
+    ],
+    "chapterPrefixes": [],
+    "historyPrefixes": [],
+    "authPrefixes": [
+      "/agecheck",
+      "/adultcheck",
+      "/login",
+      "/member",
+      "/mypage"
+    ],
+    "categoryPrefixes": [
+      "/works/list",
+      "/schedule/",
+      "/news/"
+    ]
+  },
+  "search": {
+    "formSelectors": [
+      "form[action*=\"/search\"]",
+      "form[role=\"search\"]"
+    ],
+    "inputSelectors": [
+      "input[name=\"keyword\"]",
+      "input[name=\"q\"]",
+      "input[type=\"search\"]"
+    ],
+    "submitSelectors": [
+      "button[type=\"submit\"]",
+      "input[type=\"submit\"]"
+    ],
+    "queryParamNames": [
+      "keyword",
+      "q"
+    ],
+    "resultTitleSelectors": [
+      "title",
+      "h1",
+      "h2"
+    ],
+    "resultBookSelectors": [
+      "a[href*=\"/works/detail/\"]",
+      "a[href*=\"/talent/\"]",
+      "a[href*=\"/model/\"]",
+      "a[href*=\"/actress/\"]"
+    ],
+    "defaultQueries": [],
+    "knownQueries": []
+  },
+  "sampling": {
+    "searchResultContentLimit": 5,
+    "authorContentLimit": 10,
+    "categoryContentLimit": 10,
+    "fallbackContentLimitWithSearch": 8
+  },
+  "navigation": {
+    "allowedHosts": [
+      "www.t-powers.co.jp",
+      "t-powers.co.jp"
+    ],
+    "contentPathPrefixes": [
+      "/works/detail/"
+    ],
+    "authorPathPrefixes": [
+      "/talent/",
+      "/model/",
+      "/actress/"
+    ],
+    "authorListPathPrefixes": [
+      "/talent/",
+      "/model/",
+      "/actress/"
+    ],
+    "authorDetailPathPrefixes": [
+      "/talent/",
+      "/model/",
+      "/actress/"
+    ],
+    "categoryPathPrefixes": [
+      "/works/list",
+      "/schedule/",
+      "/news/"
+    ],
+    "utilityPathPrefixes": [
+      "/",
+      "/search"
+    ],
+    "authPathPrefixes": [
+      "/agecheck",
+      "/adultcheck",
+      "/login",
+      "/member",
+      "/mypage"
+    ],
+    "categoryLabelKeywords": [
+      "talent",
+      "model",
+      "actress",
+      "works",
+      "schedule",
+      "news",
+      "search"
+    ]
+  },
+  "contentDetail": {
+    "titleSelectors": [
+      "h1",
+      "h2",
+      "title"
+    ],
+    "authorNameSelectors": [
+      "a[href*=\"/talent/\"]",
+      "a[href*=\"/model/\"]",
+      "a[href*=\"/actress/\"]"
+    ],
+    "authorLinkSelectors": [
+      "a[href*=\"/talent/\"]",
+      "a[href*=\"/model/\"]",
+      "a[href*=\"/actress/\"]"
+    ]
+  },
+  "author": {
+    "titleSelectors": [
+      "h1",
+      "h2",
+      "title"
+    ],
+    "workLinkSelectors": [
+      "a[href*=\"/works/detail/\"]",
+      "a[href*=\"/schedule/\"]"
+    ]
+  }
+}

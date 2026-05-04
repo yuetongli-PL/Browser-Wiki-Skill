@@ -1,0 +1,155 @@
+{
+  "host": "www.sod.co.jp",
+  "archetype": "navigation-catalog",
+  "schemaVersion": 1,
+  "primaryArchetype": "catalog-detail",
+  "version": 1,
+  "pageTypes": {
+    "homeExact": [
+      "/"
+    ],
+    "homePrefixes": [],
+    "searchResultsPrefixes": [
+      "/search",
+      "/search/list"
+    ],
+    "contentDetailPrefixes": [
+      "/works/detail/",
+      "/feature/",
+      "/label/"
+    ],
+    "authorPrefixes": [
+      "/actress/"
+    ],
+    "authorListExact": [],
+    "authorListPrefixes": [
+      "/actress/"
+    ],
+    "authorDetailPrefixes": [
+      "/actress/"
+    ],
+    "chapterPrefixes": [],
+    "historyPrefixes": [],
+    "authPrefixes": [
+      "/agecheck",
+      "/login",
+      "/member",
+      "/mypage"
+    ],
+    "categoryPrefixes": [
+      "/works/list",
+      "/feature/",
+      "/label/",
+      "/event/"
+    ]
+  },
+  "search": {
+    "formSelectors": [
+      "form[action*=\"/search\"]",
+      "form[role=\"search\"]"
+    ],
+    "inputSelectors": [
+      "input[name=\"s\"]",
+      "input[name=\"keyword\"]",
+      "input[name=\"q\"]",
+      "input[type=\"search\"]"
+    ],
+    "submitSelectors": [
+      "button[type=\"submit\"]",
+      "input[type=\"submit\"]"
+    ],
+    "queryParamNames": [
+      "s",
+      "keyword",
+      "q"
+    ],
+    "resultTitleSelectors": [
+      "title",
+      "h1",
+      "h2"
+    ],
+    "resultBookSelectors": [
+      "a[href*=\"/feature/\"]",
+      "a[href*=\"/label/\"]",
+      "a[href*=\"/actress/\"]"
+    ],
+    "defaultQueries": [],
+    "knownQueries": []
+  },
+  "sampling": {
+    "searchResultContentLimit": 5,
+    "authorContentLimit": 10,
+    "categoryContentLimit": 10,
+    "fallbackContentLimitWithSearch": 8
+  },
+  "navigation": {
+    "allowedHosts": [
+      "www.sod.co.jp",
+      "sod.co.jp"
+    ],
+    "contentPathPrefixes": [
+      "/works/detail/",
+      "/feature/",
+      "/label/"
+    ],
+    "authorPathPrefixes": [
+      "/actress/"
+    ],
+    "authorListPathPrefixes": [
+      "/actress/"
+    ],
+    "authorDetailPathPrefixes": [
+      "/actress/"
+    ],
+    "categoryPathPrefixes": [
+      "/works/list",
+      "/feature/",
+      "/label/",
+      "/event/"
+    ],
+    "utilityPathPrefixes": [
+      "/",
+      "/sitemap/",
+      "/search",
+      "/search/list"
+    ],
+    "authPathPrefixes": [
+      "/agecheck",
+      "/login",
+      "/member",
+      "/mypage"
+    ],
+    "categoryLabelKeywords": [
+      "feature",
+      "label",
+      "event",
+      "actress",
+      "search"
+    ]
+  },
+  "contentDetail": {
+    "titleSelectors": [
+      "h1",
+      "h2",
+      "title"
+    ],
+    "authorNameSelectors": [
+      "a[href*=\"/actress/\"]"
+    ],
+    "authorLinkSelectors": [
+      "a[href*=\"/actress/\"]"
+    ]
+  },
+  "author": {
+    "titleSelectors": [
+      "h1",
+      "h2",
+      "title"
+    ],
+    "workLinkSelectors": [
+      "a[href*=\"/works/detail/\"]",
+      "a[href*=\"/feature/\"]",
+      "a[href*=\"/label/\"]"
+    ]
+  }
+}

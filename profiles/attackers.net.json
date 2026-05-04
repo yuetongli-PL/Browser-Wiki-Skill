@@ -1,0 +1,147 @@
+{
+  "host": "attackers.net",
+  "archetype": "navigation-catalog",
+  "schemaVersion": 1,
+  "primaryArchetype": "catalog-detail",
+  "version": 1,
+  "pageTypes": {
+    "homeExact": [
+      "/"
+    ],
+    "homePrefixes": [],
+    "searchResultsPrefixes": [
+      "/search",
+      "/search/list"
+    ],
+    "contentDetailPrefixes": [
+      "/works/detail/"
+    ],
+    "authorPrefixes": [
+      "/actress/"
+    ],
+    "authorListExact": [
+      "/actress/"
+    ],
+    "authorListPrefixes": [
+      "/actress/"
+    ],
+    "authorDetailPrefixes": [
+      "/actress/"
+    ],
+    "chapterPrefixes": [],
+    "historyPrefixes": [],
+    "authPrefixes": [
+      "/agecheck",
+      "/adultcheck",
+      "/login",
+      "/member",
+      "/mypage"
+    ],
+    "categoryPrefixes": [
+      "/genre/",
+      "/series/",
+      "/works/list"
+    ]
+  },
+  "search": {
+    "formSelectors": [
+      "form[action*=\"/search\"]",
+      "form[role=\"search\"]"
+    ],
+    "inputSelectors": [
+      "input[name=\"keyword\"]",
+      "input[name=\"q\"]",
+      "input[type=\"search\"]"
+    ],
+    "submitSelectors": [
+      "button[type=\"submit\"]",
+      "input[type=\"submit\"]"
+    ],
+    "queryParamNames": [
+      "keyword",
+      "q"
+    ],
+    "resultTitleSelectors": [
+      "title",
+      "h1",
+      "h2"
+    ],
+    "resultBookSelectors": [
+      "a[href*=\"/works/detail/\"]"
+    ],
+    "defaultQueries": [],
+    "knownQueries": []
+  },
+  "sampling": {
+    "searchResultContentLimit": 5,
+    "authorContentLimit": 10,
+    "categoryContentLimit": 10,
+    "fallbackContentLimitWithSearch": 8
+  },
+  "navigation": {
+    "allowedHosts": [
+      "attackers.net",
+      "www.attackers.net"
+    ],
+    "contentPathPrefixes": [
+      "/works/detail/"
+    ],
+    "authorPathPrefixes": [
+      "/actress/"
+    ],
+    "authorListPathPrefixes": [
+      "/actress/"
+    ],
+    "authorDetailPathPrefixes": [
+      "/actress/"
+    ],
+    "categoryPathPrefixes": [
+      "/genre/",
+      "/series/",
+      "/works/list"
+    ],
+    "utilityPathPrefixes": [
+      "/",
+      "/search",
+      "/search/list",
+      "/sitemap"
+    ],
+    "authPathPrefixes": [
+      "/agecheck",
+      "/adultcheck",
+      "/login",
+      "/member",
+      "/mypage"
+    ],
+    "categoryLabelKeywords": [
+      "release",
+      "genre",
+      "series",
+      "actress",
+      "search"
+    ]
+  },
+  "contentDetail": {
+    "titleSelectors": [
+      "h1",
+      "h2",
+      "title"
+    ],
+    "authorNameSelectors": [
+      "a[href*=\"/actress/\"]"
+    ],
+    "authorLinkSelectors": [
+      "a[href*=\"/actress/\"]"
+    ]
+  },
+  "author": {
+    "titleSelectors": [
+      "h1",
+      "h2",
+      "title"
+    ],
+    "workLinkSelectors": [
+      "a[href*=\"/works/detail/\"]"
+    ]
+  }
+}

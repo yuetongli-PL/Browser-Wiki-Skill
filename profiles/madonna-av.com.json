@@ -1,0 +1,143 @@
+{
+  "host": "madonna-av.com",
+  "archetype": "navigation-catalog",
+  "schemaVersion": 1,
+  "primaryArchetype": "catalog-detail",
+  "version": 1,
+  "pageTypes": {
+    "homeExact": [
+      "/",
+      "/top"
+    ],
+    "homePrefixes": [],
+    "searchResultsPrefixes": [
+      "/search",
+      "/search/list"
+    ],
+    "contentDetailPrefixes": [
+      "/works/detail/"
+    ],
+    "authorPrefixes": [
+      "/actress"
+    ],
+    "authorListExact": [
+      "/actress"
+    ],
+    "authorListPrefixes": [
+      "/actress/"
+    ],
+    "authorDetailPrefixes": [
+      "/actress/detail/"
+    ],
+    "chapterPrefixes": [],
+    "historyPrefixes": [],
+    "authPrefixes": [
+      "/login",
+      "/member",
+      "/mypage"
+    ],
+    "categoryPrefixes": [
+      "/works/list/",
+      "/special/"
+    ]
+  },
+  "search": {
+    "formSelectors": [
+      "form[action*=\"/search\"]",
+      "form[role=\"search\"]"
+    ],
+    "inputSelectors": [
+      "input[name=\"keyword\"]",
+      "input[name=\"q\"]",
+      "input[type=\"search\"]"
+    ],
+    "submitSelectors": [
+      "button[type=\"submit\"]",
+      "input[type=\"submit\"]"
+    ],
+    "queryParamNames": [
+      "keyword",
+      "q"
+    ],
+    "resultTitleSelectors": [
+      "title",
+      "h1",
+      "h2"
+    ],
+    "resultBookSelectors": [
+      "a[href*=\"/works/detail/\"]"
+    ],
+    "defaultQueries": [],
+    "knownQueries": []
+  },
+  "sampling": {
+    "searchResultContentLimit": 5,
+    "authorContentLimit": 10,
+    "categoryContentLimit": 10,
+    "fallbackContentLimitWithSearch": 8
+  },
+  "navigation": {
+    "allowedHosts": [
+      "madonna-av.com",
+      "www.madonna-av.com"
+    ],
+    "contentPathPrefixes": [
+      "/works/detail/"
+    ],
+    "authorPathPrefixes": [
+      "/actress"
+    ],
+    "authorListPathPrefixes": [
+      "/actress"
+    ],
+    "authorDetailPathPrefixes": [
+      "/actress/detail/"
+    ],
+    "categoryPathPrefixes": [
+      "/works/list/",
+      "/special/"
+    ],
+    "utilityPathPrefixes": [
+      "/top",
+      "/search",
+      "/search/list",
+      "/sitemap",
+      "/link"
+    ],
+    "authPathPrefixes": [
+      "/login",
+      "/member",
+      "/mypage"
+    ],
+    "categoryLabelKeywords": [
+      "release",
+      "reserve",
+      "special",
+      "actress",
+      "search"
+    ]
+  },
+  "contentDetail": {
+    "titleSelectors": [
+      "h1",
+      "h2",
+      "title"
+    ],
+    "authorNameSelectors": [
+      "a[href*=\"/actress/detail/\"]"
+    ],
+    "authorLinkSelectors": [
+      "a[href*=\"/actress/detail/\"]"
+    ]
+  },
+  "author": {
+    "titleSelectors": [
+      "h1",
+      "h2",
+      "title"
+    ],
+    "workLinkSelectors": [
+      "a[href*=\"/works/detail/\"]"
+    ]
+  }
+}

@@ -13,6 +13,13 @@ description: Instruction-only Skill for https://www.xiaohongshu.com/explore. Use
 - Supported tasks: 搜索笔记、打开笔记、下载图文笔记、打开用户主页、浏览发现页、打开登录 / 注册页、打开通知 / 功能页、查询关注用户列表.
 - Verified navigation model: `/explore` -> `/search_result?keyword=...` -> `/explore/<noteId>` -> `/user/profile/<userId>`.
 - Follow-query entrypoint: `node src/entrypoints/sites/xiaohongshu-query-follow.mjs https://www.xiaohongshu.com/notification --intent list-followed-users --format markdown --reuse-login-state --no-headless`.
+- Native downloader evidence: the unified downloader can consume sanitized Xiaohongshu fresh evidence for image and video notes through `resolveXiaohongshuFreshEvidence`; it must emit only page facts/resource seeds and must not persist raw cookies, headers, tokens, session ids, or profile paths.
+
+## Current Site Capability status
+
+- The unified downloader can consume sanitized Xiaohongshu fresh evidence for image and video notes through `resolveXiaohongshuFreshEvidence`.
+- Fresh evidence must emit only page facts/resource seeds and must not persist raw cookies, headers, tokens, session ids, or profile paths.
+- Fresh-evidence dry-run resource seeds are verified; execute-mode download should still be run plan-first and artifact-scanned before claiming completion.
 
 ## Sample coverage
 
@@ -32,6 +39,7 @@ description: Instruction-only Skill for https://www.xiaohongshu.com/explore. Use
 - Discover-page navigation should resolve to `/explore`; note detail pages stay on `/explore/<noteId>`.
 - Login or register pages may be opened for manual inspection or bootstrap, but credential input and submission are always manual and never automatic.
 - Notification-style utility pages and follow queries are authenticated read-only surfaces when reusable login state exists.
+- Fresh evidence for downloads may use a reusable authenticated browser profile, but the downloader only receives sanitized resource seeds, safe header names/values, referer/source URL, and page facts.
 - `list-followed-users` prefers the official frontend runtime module and falls back to existing self-profile heuristics only when the official path is unavailable.
 - Routing table: public discover/search/note/user pages -> `builtin-browser`; notification/follow-query pages -> `local-profile-browser`; login/register pages -> manual auth bootstrap only.
 

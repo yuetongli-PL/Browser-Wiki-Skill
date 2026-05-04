@@ -14,6 +14,11 @@ description: Instruction-only Skill for https://www.22biqu.com/. Use when Codex 
 - Download entrypoint: `pypy3 src/sites/chapter-content/download/python/book.py`.
 - Unified runner migration: use `node src/entrypoints/sites/download.mjs --site 22biqu --input "<book-title-or-url>" --json` for a dry-run manifest. Add `--execute` only after the plan is reviewed. Normal title/book-url downloads currently fall back to the legacy Python book downloader; native runner execution applies only when concrete chapter/resource entries are already resolved.
 
+## Current Site Capability status
+
+- Public directory/chapter flows have bounded native resource-seed coverage for concrete chapter lists, and approved execute validation has downloaded public chapter files through the unified runner without session material.
+- Downloader artifacts must remain public-resource only; no cookies, auth headers, or profile state are needed for 22biqu public chapter downloads.
+
 ## Reading order
 
 1. Start with [references/index.md](references/index.md).

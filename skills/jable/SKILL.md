@@ -20,6 +20,12 @@ description: Instruction-only Skill for https://jable.tv/. Use when Codex needs 
 - 搜索样本: IPX-238, IPX-795, JUR-652
 - 分类组: 地點(13)、交合(11)、角色(16)、劇情(16)、身材(13)、玩法(19)、衣著(17)
 
+## Current Site Capability status
+
+- Jable remains public read-only navigation/ranking; no native downloader or authenticated session flow is claimed.
+- Use no-write planning or read-only validation for live checks.
+- Ranking and catalog answers must preserve page-provided titles, links, tags/keywords, and ordering evidence; do not invent subjective classifications.
+
 ## Reading order
 
 1. Start with [references/index.md](references/index.md).

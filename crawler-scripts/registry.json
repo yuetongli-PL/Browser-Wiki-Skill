@@ -1,12 +1,12 @@
 {
-  "generatedAt": "2026-04-26T11:12:46.355Z",
+  "generatedAt": "2026-05-04T06:56:58.877Z",
   "hosts": {
     "www.22biqu.com": {
       "host": "www.22biqu.com",
       "scriptPath": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\crawler-scripts\\www.22biqu.com\\crawler.py",
       "metaPath": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\crawler-scripts\\www.22biqu.com\\crawler.meta.json",
-      "profileHash": "f49cf0d1e1353086244207f14c478f57a32d2eb304442b222cefa35014c36f7f",
-      "lastUsedAt": "2026-04-14T10:55:42Z",
+      "profileHash": "3ef314ddf77e144a2891fa2785c5db3dcdf68fbc422d24bbeb90ff2b9b4464db",
+      "lastUsedAt": "2026-05-03T17:46:26Z",
       "status": "reused",
       "capabilities": [
         "download-content",
@@ -81,9 +81,9 @@
       "host": "x.com",
       "scriptPath": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\crawler-scripts\\x.com\\crawler.py",
       "metaPath": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\crawler-scripts\\x.com\\crawler.meta.json",
-      "profileHash": "a8f7de6614983622a12b81c602634aa2fab2e346f0252527850af5f623bcf860",
-      "lastUsedAt": "2026-04-26T11:12:46.354Z",
-      "status": "generated",
+      "profileHash": "fcf8ac2a019b00a1d66ef7c552e244fd0e3cb3731d905ab42fa961020ff4b06a",
+      "lastUsedAt": "2026-05-04T05:40:16.063Z",
+      "status": "reused",
       "scriptLanguage": "python",
       "interpreterRequired": "pypy3",
       "templateVersion": 3,
@@ -104,8 +104,8 @@
       "host": "www.instagram.com",
       "scriptPath": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\crawler-scripts\\www.instagram.com\\crawler.py",
       "metaPath": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\crawler-scripts\\www.instagram.com\\crawler.meta.json",
-      "profileHash": "548b81738d4bf27a077a296f2b96d7f5a325543fabe87e8dcf7651db7a73af32",
-      "lastUsedAt": "2026-04-26T10:22:10.465Z",
+      "profileHash": "3a9b0b0b2f00edd5ea7f69e3aeb3648a5719bc114f3e2d50b907dbf5647af9bb",
+      "lastUsedAt": "2026-05-03T09:56:49.396Z",
       "status": "reused",
       "scriptLanguage": "python",
       "interpreterRequired": "pypy3",
@@ -121,6 +121,24 @@
         "query-social-relations",
         "search-content",
         "switch-in-page-state"
+      ]
+    },
+    "www.bz888888888.com": {
+      "host": "www.bz888888888.com",
+      "scriptPath": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\crawler-scripts\\www.bz888888888.com\\crawler.py",
+      "metaPath": "C:\\Users\\lyt-p\\Desktop\\Browser-Wiki-Skill\\crawler-scripts\\www.bz888888888.com\\crawler.meta.json",
+      "profileHash": "ce4e17180f24b06b56d95403b42623de686850e6aa20584a694d9fe88aef4981",
+      "lastUsedAt": "2026-05-04T06:56:58.875Z",
+      "status": "reused",
+      "scriptLanguage": "python",
+      "interpreterRequired": "pypy3",
+      "templateVersion": 3,
+      "capabilities": [
+        "download-content",
+        "navigate-to-author",
+        "navigate-to-chapter",
+        "navigate-to-content",
+        "search-content"
       ]
     }
   }

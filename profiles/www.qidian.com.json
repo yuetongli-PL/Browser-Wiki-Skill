@@ -1,0 +1,107 @@
+{
+  "host": "www.qidian.com",
+  "archetype": "chapter-content",
+  "schemaVersion": 1,
+  "primaryArchetype": "chapter-content",
+  "version": 1,
+  "search": {
+    "formSelectors": [
+      "form[action*=\"soushu\"]",
+      "form[action*=\"search\"]",
+      "form[role=\"search\"]"
+    ],
+    "inputSelectors": [
+      "input[name=\"kw\"]",
+      "input[name=\"keyword\"]",
+      "input[name=\"q\"]",
+      "input[type=\"search\"]",
+      ".search-wrap input"
+    ],
+    "submitSelectors": [
+      "button[type=\"submit\"]",
+      "input[type=\"submit\"]",
+      ".search-btn",
+      ".search-submit"
+    ],
+    "resultTitleSelectors": [
+      "title",
+      "h1",
+      ".book-mid-info h2",
+      ".book-info h1"
+    ],
+    "resultBookSelectors": [
+      "a[href*=\"/book/\"]",
+      ".book-mid-info h2 a[href]",
+      ".book-img-box a[href]"
+    ],
+    "queryParamNames": [
+      "kw",
+      "keyword",
+      "q"
+    ],
+    "defaultQueries": [],
+    "knownQueries": []
+  },
+  "bookDetail": {
+    "authorMetaNames": [
+      "og:novel:author"
+    ],
+    "authorLinkMetaNames": [
+      "og:novel:author_link"
+    ],
+    "latestChapterNameMetaNames": [
+      "og:novel:latest_chapter_name",
+      "og:novel:lastest_chapter_name"
+    ],
+    "latestChapterMetaNames": [
+      "og:novel:latest_chapter_url",
+      "og:novel:lastest_chapter_url"
+    ],
+    "updateTimeMetaNames": [
+      "og:novel:update_time"
+    ],
+    "chapterLinkSelectors": [
+      "a[href*=\"/chapter/\"]",
+      ".volume-wrap a[href*=\"/chapter/\"]",
+      ".catalog-content-wrap a[href*=\"/chapter/\"]",
+      ".chapter-list a[href*=\"/chapter/\"]"
+    ],
+    "directoryLinkSelectors": [
+      "a[href*=\"/chapter/\"]",
+      ".volume-wrap a[href]",
+      ".catalog-content-wrap a[href]",
+      ".chapter-list a[href]"
+    ],
+    "directoryPageUrlTemplate": "{detail_url}?page={page}",
+    "directoryPageStart": 1,
+    "directoryPageMax": 8,
+    "directoryMinimumExpected": 20
+  },
+  "chapter": {
+    "contentSelectors": [
+      "#chapterContent",
+      ".read-content",
+      ".chapter-content",
+      ".main-text-wrap .text-wrap",
+      "article"
+    ],
+    "titleSelectors": [
+      "h1",
+      ".chapter-title",
+      ".j_chapterName",
+      "title"
+    ],
+    "prevSelector": "a[rel=\"prev\"], .prev-chapter a[href], a[href*=\"/chapter/\"]",
+    "nextSelector": "a[rel=\"next\"], .next-chapter a[href], a[href*=\"/chapter/\"]",
+    "cleanupPatterns": [
+      "Previous chapter",
+      "Next chapter",
+      "Back to directory",
+      "Add to bookshelf",
+      "Vote",
+      "Reward",
+      "Qidian",
+      "www.qidian.com"
+    ]
+  }
+}

@@ -112,12 +112,15 @@ test('generateSkill produces stable moodyz skill documents from a self-contained
     assert.match(skillMd, /^---\nname: moodyz-works\n/su);
     assert.match(skillMd, /\n# moodyz Skill\n/su);
     assert.match(skillMd, /Instruction-only Skill for https:\/\/moodyz\.com\/works\/date/u);
+    assert.match(skillMd, /moodyz-month-catalog\.mjs --month YYYY-MM/u);
+    assert.match(skillMd, /Probe every day in the requested month with `\/works\/list\/date\/YYYY-MM-DD`/u);
     assert.match(skillMd, /MIAA-001/u);
     assert.match(skillMd, /Alice/u);
 
     assert.match(indexMd, /^# moodyz Index\n/su);
     assert.match(indexMd, /## Reference navigation/u);
     assert.match(indexMd, /## Download notes/u);
+    assert.match(indexMd, /Month-level release catalogs are resolved by daily `\/works\/list\/date\/YYYY-MM-DD` probes/u);
     assert.match(indexMd, /There is no verified chapter-reading or full-download flow in the current observed moodyz model\./u);
     assert.match(indexMd, /MIAA-001/u);
 

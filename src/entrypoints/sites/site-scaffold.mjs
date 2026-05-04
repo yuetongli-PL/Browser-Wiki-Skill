@@ -9,9 +9,24 @@ import { pathExists, readJsonFile, writeJsonFile, writeTextFile } from '../../in
 import { sanitizeHost, uniqueSortedStrings } from '../../shared/normalize.mjs';
 import { PROFILE_ARCHETYPES, resolveProfilePrimaryArchetype } from '../../sites/core/archetypes.mjs';
 import { validateProfileObject } from '../../sites/core/profile-validation.mjs';
+import {
+  REDACTION_PLACEHOLDER,
+  SECURITY_GUARD_SCHEMA_VERSION,
+  assertNoForbiddenPatterns,
+  prepareRedactedArtifactJson,
+  prepareRedactedArtifactJsonWithAudit,
+  redactValue,
+} from '../../sites/capability/security-guard.mjs';
+import { reasonCodeSummary } from '../../sites/capability/reason-codes.mjs';
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(MODULE_DIR, '..', '..', '..');
+
+const SITE_SCAFFOLD_REPORT_PROFILE_KEYS = Object.freeze(new Set([
+  'profilePath',
+  'browserProfileRoot',
+  'userDataDir',
+]));
 const DEFAULT_OPTIONS = {
   archetype: null,
   outDir: path.join(REPO_ROOT, 'runs', 'sites', 'site-scaffold'),
@@ -409,6 +424,118 @@ function renderMarkdownReport(result) {
   ].join('\n');
 }
 
+function isPlainObject(value) {
+  return value !== null
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+function auditPath(pathParts) {
+  return pathParts.join('.');
+}
+
+function redactSiteScaffoldProfileRefs(value, pathParts = [], audit = {
+  schemaVersion: SECURITY_GUARD_SCHEMA_VERSION,
+  redactedPaths: [],
+  findings: [],
+}) {
+  if (Array.isArray(value)) {
+    return {
+      value: value.map((item, index) => redactSiteScaffoldProfileRefs(item, [...pathParts, String(index)], audit).value),
+      audit,
+    };
+  }
+  if (!isPlainObject(value)) {
+    return { value, audit };
+  }
+  const output = {};
+  for (const [key, child] of Object.entries(value)) {
+    const childPath = [...pathParts, key];
+    if (SITE_SCAFFOLD_REPORT_PROFILE_KEYS.has(key)) {
+      output[key] = REDACTION_PLACEHOLDER;
+      audit.redactedPaths.push(auditPath(childPath));
+      continue;
+    }
+    output[key] = redactSiteScaffoldProfileRefs(child, childPath, audit).value;
+  }
+  return { value: output, audit };
+}
+
+function mergeRedactionAudits(...audits) {
+  const redactedPaths = [];
+  const findings = [];
+  for (const audit of audits) {
+    if (!audit || typeof audit !== 'object') {
+      continue;
+    }
+    redactedPaths.push(...(Array.isArray(audit.redactedPaths) ? audit.redactedPaths : []));
+    findings.push(...(Array.isArray(audit.findings) ? audit.findings : []));
+  }
+  return {
+    schemaVersion: SECURITY_GUARD_SCHEMA_VERSION,
+    redactedPaths: [...new Set(redactedPaths)],
+    findings,
+  };
+}
+
+function createSiteScaffoldReportRedactionFailure(error) {
+  const recovery = reasonCodeSummary('redaction-failed');
+  const causeSummary = redactValue({
+    name: error instanceof Error ? error.name : undefined,
+    code: error && typeof error === 'object' ? error.code : undefined,
+  }).value;
+  const failure = new Error('Redaction failed for site-scaffold report; persistent report write blocked');
+  failure.name = 'SiteScaffoldReportRedactionFailure';
+  failure.code = 'redaction-failed';
+  failure.reasonCode = 'redaction-failed';
+  failure.retryable = recovery.retryable;
+  failure.cooldownNeeded = recovery.cooldownNeeded;
+  failure.isolationNeeded = recovery.isolationNeeded;
+  failure.manualRecoveryNeeded = recovery.manualRecoveryNeeded;
+  failure.degradable = recovery.degradable;
+  failure.artifactWriteAllowed = recovery.artifactWriteAllowed;
+  failure.catalogAction = recovery.catalogAction;
+  failure.causeSummary = causeSummary;
+  return failure;
+}
+
+export function prepareSiteScaffoldReportArtifacts(result) {
+  try {
+    const profileRedacted = redactSiteScaffoldProfileRefs(result);
+    const preparedJson = prepareRedactedArtifactJsonWithAudit(profileRedacted.value);
+    const markdown = renderMarkdownReport(preparedJson.value);
+    const redactedMarkdown = redactValue(String(markdown ?? ''));
+    const markdownText = String(redactedMarkdown.value ?? '');
+    assertNoForbiddenPatterns(markdownText);
+    const jsonAudit = mergeRedactionAudits(profileRedacted.audit, preparedJson.auditValue);
+    const markdownAudit = mergeRedactionAudits(profileRedacted.audit, redactedMarkdown.audit);
+    return {
+      json: preparedJson.json,
+      jsonAudit: prepareRedactedArtifactJson(jsonAudit).json,
+      markdown: markdownText,
+      markdownAudit: prepareRedactedArtifactJson(markdownAudit).json,
+      value: preparedJson.value,
+    };
+  } catch (error) {
+    throw createSiteScaffoldReportRedactionFailure(error);
+  }
+}
+
+export async function writeSiteScaffoldReportArtifacts(result, {
+  jsonPath,
+  jsonAuditPath,
+  markdownPath,
+  markdownAuditPath,
+}) {
+  const prepared = prepareSiteScaffoldReportArtifacts(result);
+  await writeTextFile(jsonPath, prepared.json);
+  await writeTextFile(jsonAuditPath, prepared.jsonAudit);
+  await writeTextFile(markdownPath, prepared.markdown);
+  await writeTextFile(markdownAuditPath, prepared.markdownAudit);
+  return prepared.value;
+}
+
 async function fetchHomepageHtml(inputUrl, settings, deps) {
   const fetchImpl = deps.fetchImpl ?? globalThis.fetch;
   if (typeof fetchImpl !== 'function') {
@@ -467,7 +594,9 @@ export async function scaffoldSite(inputUrl, options = {}, deps = {}) {
 
   const reportDir = path.join(settings.outDir, `${formatTimestampForDir()}_${sanitizeHost(settings.host)}`);
   const reportJsonPath = path.join(reportDir, 'scaffold-report.json');
+  const reportJsonAuditPath = path.join(reportDir, 'scaffold-report.redaction-audit.json');
   const reportMarkdownPath = path.join(reportDir, 'scaffold-report.md');
+  const reportMarkdownAuditPath = path.join(reportDir, 'scaffold-report.md.redaction-audit.json');
   const nextActions = [
     inference.search.formSelectors.length ? null : 'Confirm the search form selectors before running site-doctor.',
     inference.navigation.contentPathPrefixes.length ? null : 'Review content/detail path prefixes; scaffold fell back to template defaults.',
@@ -493,13 +622,19 @@ export async function scaffoldSite(inputUrl, options = {}, deps = {}) {
     nextActions,
     reports: {
       json: reportJsonPath,
+      jsonRedactionAudit: reportJsonAuditPath,
       markdown: reportMarkdownPath,
+      markdownRedactionAudit: reportMarkdownAuditPath,
     },
   };
 
   await writeJsonFile(settings.profilePath, profile);
-  await writeJsonFile(reportJsonPath, result);
-  await writeTextFile(reportMarkdownPath, renderMarkdownReport(result));
+  await writeSiteScaffoldReportArtifacts(result, {
+    jsonPath: reportJsonPath,
+    jsonAuditPath: reportJsonAuditPath,
+    markdownPath: reportMarkdownPath,
+    markdownAuditPath: reportMarkdownAuditPath,
+  });
 
   return result;
 }

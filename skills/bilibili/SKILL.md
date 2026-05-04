@@ -29,7 +29,9 @@ description: Instruction-only Skill for https://www.bilibili.com/. Use when Code
 - Authenticated bilibili pages MUST use the canonical opener: `node .\src\entrypoints\sites\bilibili-action.mjs open <bilibili-authenticated-url>`.
 - Download requests MUST use the canonical downloader router: `node .\src\entrypoints\sites\bilibili-action.mjs download <url-or-bv>...`.
 - Unified runner migration: for plan-first operations use `node .\src\entrypoints\sites\download.mjs --site bilibili --input <url-or-bv> --json`; add `--execute` only after reviewing the dry-run. Current branch behavior wraps the run artifacts and falls back to the bilibili action router when no native resources are resolved.
+- Native downloader status: public BV/DASH resources can resolve natively; UP-space/list flows may stop at `bilibili-api-evidence-unavailable` with sanitized native miss phase diagnostics rather than falling back silently.
 - Login bootstrap MUST run through the canonical helper path: `node .\src\entrypoints\sites\bilibili-action.mjs login https://www.bilibili.com/`.
+- If authenticated surfaces report `profile-health-risk`, follow `CONTRIBUTING.md` manual health recovery boundaries; do not delete/rebuild profiles or bypass challenges automatically.
 - The built-in browser NEVER carries bilibili login state.
 - If an authenticated bilibili page needs a reusable local session, the router MUST trigger the local login helper before continuing.
 - Routing table:
@@ -37,6 +39,11 @@ description: Instruction-only Skill for https://www.bilibili.com/. Use when Code
   - Authenticated read-only pages -> `local-profile-browser`
   - Login bootstrap -> `site-login`
   - Downloads -> `src/sites/bilibili/download/python/bilibili.py` via the action router
+
+## Current Site Capability status
+
+- Public BV/DASH resources can resolve and execute natively through the unified runner.
+- UP-space/list flows may stop at `bilibili-api-evidence-unavailable` with sanitized native miss phase diagnostics rather than falling back silently.
 
 ## Command entrypoints
 

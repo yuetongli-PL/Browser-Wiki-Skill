@@ -14,6 +14,14 @@ description: Instruction-only Skill for https://www.douyin.com/?recommend=1. Use
 - Public navigation model: home, search, video detail, user homepage, and approved category pages remain public read-only surfaces.
 - Follow-query entrypoint: `node src/entrypoints/sites/douyin-query-follow.mjs https://www.douyin.com/?recommend=1 --intent list-followed-updates --window 今天`.
 
+## Current Site Capability status
+
+- Native dry-run command: `node .\src\entrypoints\sites\download.mjs --site douyin --input <video-url> --task-type video --session-required --resolve-network --json`.
+- Current-target ordinary-video native resource seeds and `--resume --execute` from persisted `resolved-task.json` have passed live validation.
+- Direct one-shot `--execute --resolve-network` can still be flaky because fresh re-resolution/profile reopen persistence is not fully proven.
+- Downloader consumers may receive resource seeds, safe referer/user-agent style headers, source metadata, phase diagnostics, and structural counts, but never raw cookies, tokens, authorization headers, `msToken`, `a_bogus`, session ids, browser profile paths, or raw page state.
+- If direct native execution fails after a successful dry-run, prefer the run manifest's `--resume` command so the downloader consumes persisted native resource seeds instead of re-resolving and falling back to legacy.
+
 ## Sample coverage
 
 - 视频样本: A计划 香港水师力除猖獗海盗, A计划续集 成龙不畏强权整治恶人, E噔的奇葩大挑战 奇思妙想的顶级挑战, https://www.douyin.com/video/7487317288315258152, 全10期 奇妙通告日 N厨狂喜 限时开启, 全12期 天赐的声音第六季 舞台纯享版 用旋律镌刻故事, 全16集 西游记续 师徒四人历艰难取真经, 全1期 2025抖音新春特别会 邀请每一个特别会的你
