@@ -106,6 +106,59 @@ class Bz888DownloadTests(unittest.TestCase):
             chapters = json.loads(chapters_path.read_text(encoding="utf-8"))
             self.assertEqual([item["chapterIndex"] for item in chapters], [1, 2])
 
+    def test_html_dir_import_accepts_arbitrary_saved_file_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            html_dir = root / "saved-pages"
+            out_dir = root / "out"
+            html_dir.mkdir()
+            (html_dir / "catalog saved from browser.html").write_text(
+                """
+                <html><head><title>Demo Book latest chapters</title></head>
+                <body>
+                  <a href="/52/52885/10124.html">Demo Book (02)</a>
+                  <a href="/52/52885/10123.html">Read from beginning</a>
+                </body></html>
+                """,
+                encoding="utf-8",
+            )
+            (html_dir / "saved first chapter page.html").write_text(
+                """
+                <html><head><title>Demo Book (01)-123</title></head><body>
+                  <h1>Demo Book (01)</h1>
+                  <div id="content">Chapter one<br>first body line</div>
+                </body></html>
+                """,
+                encoding="utf-8",
+            )
+            (html_dir / "saved second chapter page.html").write_text(
+                """
+                <html><head><title>Demo Book (02)-123</title></head><body>
+                  <h1>Demo Book (02)</h1>
+                  <div id="content">Chapter two<br>second body line</div>
+                </body></html>
+                """,
+                encoding="utf-8",
+            )
+
+            exit_code = bz888.main([
+                "--book-url",
+                "https://www.bz888888888.com/52/52885/",
+                "--html-dir",
+                str(html_dir),
+                "--out-dir",
+                str(out_dir),
+            ])
+
+            self.assertEqual(exit_code, 0)
+            manifest = json.loads(next(out_dir.glob("*/manifest.json")).read_text(encoding="utf-8"))
+            txt = Path(manifest["downloadFile"]).read_text(encoding="utf-8")
+            chapters = json.loads(Path(manifest["chaptersFile"]).read_text(encoding="utf-8"))
+            self.assertEqual(manifest["chapterCount"], 2)
+            self.assertIn("first body line", txt)
+            self.assertIn("second body line", txt)
+            self.assertEqual([item["chapterIndex"] for item in chapters], [1, 2])
+
 
 if __name__ == "__main__":
     unittest.main()

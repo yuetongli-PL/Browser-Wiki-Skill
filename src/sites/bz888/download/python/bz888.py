@@ -36,6 +36,14 @@ class ChapterLink:
     href: str
 
 
+@dataclass(frozen=True)
+class FixtureDocument:
+    path: Path
+    html_text: str
+    title: str
+    url_hint: str
+
+
 def normalize_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
@@ -48,6 +56,10 @@ def safe_filename(value: Any, fallback: str = "bz888-book") -> str:
 
 def sha256_text(value: Any) -> str:
     return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+
+
+def normalize_match_text(value: Any) -> str:
+    return re.sub(r"\s+", "", normalize_text(value)).lower()
 
 
 def is_bz888_url(value: str) -> bool:
@@ -119,6 +131,10 @@ def decode_html(content: bytes, content_type: str = "") -> str:
     return content.decode("utf-8", errors="replace")
 
 
+def read_local_html(path: Path) -> str:
+    return decode_html(path.read_bytes())
+
+
 async def fetch_public_html(client: httpx.AsyncClient, url: str) -> tuple[str, str]:
     final_url = ensure_bz888_url(url)
     response = await client.get(final_url)
@@ -129,7 +145,7 @@ async def fetch_public_html(client: httpx.AsyncClient, url: str) -> tuple[str, s
     return html_text, str(response.url)
 
 
-def read_fixture_html(fixture_dir: Path, url: str) -> tuple[str, str]:
+def fixture_name_candidates(fixture_dir: Path, url: str) -> list[Path]:
     parsed = urlparse(ensure_bz888_url(url))
     path = parsed.path.strip("/") or "index"
     if path.endswith("/"):
@@ -140,9 +156,38 @@ def read_fixture_html(fixture_dir: Path, url: str) -> tuple[str, str]:
         fixture_dir / f"{fixture_name}.html",
         fixture_dir / f"{sha256_text(url)[:16]}.html",
     ])
+    return candidates
+
+
+def iter_fixture_documents(fixture_dir: Path) -> list[FixtureDocument]:
+    documents: list[FixtureDocument] = []
+    for path in sorted(fixture_dir.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in {".html", ".htm"}:
+            continue
+        html_text = read_local_html(path)
+        document = HTMLParser(html_text)
+        title = ""
+        title_node = document.css_first("title")
+        if title_node:
+            title = normalize_text(title_node.text(separator=" ", strip=True))
+        documents.append(FixtureDocument(
+            path=path,
+            html_text=html_text,
+            title=title,
+            url_hint=path.as_uri(),
+        ))
+    return documents
+
+
+def read_fixture_html(fixture_dir: Path, url: str) -> tuple[str, str]:
+    candidates = fixture_name_candidates(fixture_dir, url)
     for candidate in candidates:
         if candidate.exists():
-            return candidate.read_text(encoding="utf-8-sig"), url
+            return read_local_html(candidate), url
+    normalized_url = ensure_bz888_url(url)
+    for document in iter_fixture_documents(fixture_dir):
+        if normalized_url in document.html_text:
+            return document.html_text, normalized_url
     raise FileNotFoundError(f"fixture-not-found: {url}")
 
 
@@ -190,6 +235,29 @@ def chapter_sort_key(chapter: ChapterLink) -> tuple[int, str]:
     return (int(match.group(1)) if match else 0, chapter.title)
 
 
+def collect_directory_from_fixtures(fixture_dir: Path, book_url: str) -> tuple[str, list[ChapterLink]]:
+    detail_url = ensure_bz888_url(book_url).rstrip("/") + "/"
+    book_path_prefix = urlparse(detail_url).path.rstrip("/")
+    collected: list[ChapterLink] = []
+    seen: set[str] = set()
+    best_title = book_path_prefix.rsplit("/", 1)[-1]
+    best_count = 0
+    for document in iter_fixture_documents(fixture_dir):
+        links = parse_directory_links(document.html_text, detail_url, book_path_prefix)
+        if len(links) > best_count:
+            best_count = len(links)
+            best_title = parse_book_title(HTMLParser(document.html_text), fallback=best_title)
+        for link in links:
+            if link.href in seen:
+                continue
+            seen.add(link.href)
+            collected.append(link)
+    collected.sort(key=chapter_sort_key)
+    if not collected:
+        raise RuntimeError(f"chapter-index-empty: {detail_url}")
+    return best_title, collected
+
+
 async def collect_directory(
     client: httpx.AsyncClient | None,
     book_url: str,
@@ -202,6 +270,8 @@ async def collect_directory(
     book_path_prefix = parsed.path.rstrip("/")
     if not re.match(r"^/\d+/\d+$", book_path_prefix):
         raise ValueError(f"unsupported-bz888-book-url: {book_url}")
+    if fixture_dir:
+        return collect_directory_from_fixtures(fixture_dir, detail_url)
 
     first_html, first_final_url = await load_html(client, detail_url, fixture_dir)
     title = parse_book_title(HTMLParser(first_html), fallback=book_path_prefix.rsplit("/", 1)[-1])
@@ -267,6 +337,88 @@ def extract_chapter_body(html_text: str, page_url: str) -> tuple[str, list[str]]
     raise RuntimeError(f"chapter-content-empty: {page_url}")
 
 
+def extract_chapter_number(value: Any) -> int | None:
+    text = normalize_text(value)
+    match = re.search(r"[（(]\s*0*(\d+)\s*[）)]", text)
+    if not match:
+        match = re.search(r"(?:第|chapter\s*)0*(\d+)", text, re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def chapter_fixture_entries(fixture_dir: Path) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for document in iter_fixture_documents(fixture_dir):
+        try:
+            title, paragraphs = extract_chapter_body(document.html_text, document.url_hint)
+        except RuntimeError:
+            continue
+        entries.append({
+            "path": document.path,
+            "htmlText": document.html_text,
+            "title": title,
+            "titleKey": normalize_match_text(title),
+            "number": extract_chapter_number(title),
+            "paragraphs": paragraphs,
+        })
+    return entries
+
+
+def fetch_chapters_from_fixture_dir(
+    chapters: list[ChapterLink],
+    fixture_dir: Path,
+) -> list[dict[str, Any]]:
+    entries = chapter_fixture_entries(fixture_dir)
+    used_paths: set[Path] = set()
+    results: list[dict[str, Any]] = []
+    for index, chapter in enumerate(chapters, start=1):
+        selected: dict[str, Any] | None = None
+        try:
+            html_text, final_url = read_fixture_html(fixture_dir, chapter.href)
+            page_title, paragraphs = extract_chapter_body(html_text, final_url)
+            selected = {
+                "path": Path(final_url) if final_url.startswith("file:") else Path(),
+                "title": page_title,
+                "paragraphs": paragraphs,
+                "finalUrl": chapter.href,
+            }
+        except (FileNotFoundError, RuntimeError, ValueError):
+            selected = None
+        chapter_title_key = normalize_match_text(chapter.title)
+        if selected is None and chapter_title_key:
+            for entry in entries:
+                if entry["path"] in used_paths:
+                    continue
+                if chapter_title_key and (chapter_title_key in entry["titleKey"] or entry["titleKey"] in chapter_title_key):
+                    selected = {**entry, "finalUrl": entry["urlHint"] if "urlHint" in entry else str(entry["path"])}
+                    break
+        if selected is None:
+            for entry in entries:
+                if entry["path"] in used_paths:
+                    continue
+                if entry["number"] == index:
+                    selected = {**entry, "finalUrl": str(entry["path"])}
+                    break
+        if selected is None:
+            raise RuntimeError(f"chapter-fixture-not-found: index={index} url={chapter.href} title={chapter.title}")
+        selected_path = selected.get("path")
+        if isinstance(selected_path, Path):
+            used_paths.add(selected_path)
+        paragraphs = list(selected["paragraphs"])
+        results.append({
+            "title": chapter.title if chapter.title and chapter.title not in {"从头开始阅读"} else selected["title"],
+            "href": chapter.href,
+            "finalUrl": selected.get("finalUrl") or chapter.href,
+            "paragraphs": paragraphs,
+            "bodyTextLength": sum(len(item) for item in paragraphs),
+        })
+    return results
+
+
 async def fetch_chapter(
     client: httpx.AsyncClient | None,
     chapter: ChapterLink,
@@ -321,13 +473,16 @@ async def download_book(args: argparse.Namespace) -> dict[str, Any]:
                 "lastChapter": chapters[-1].href,
             }
 
-        semaphore = asyncio.Semaphore(max(1, args.concurrency))
+        if fixture_dir:
+            chapter_results = fetch_chapters_from_fixture_dir(chapters, fixture_dir)
+        else:
+            semaphore = asyncio.Semaphore(max(1, args.concurrency))
 
-        async def guarded_fetch(chapter: ChapterLink) -> dict[str, Any]:
-            async with semaphore:
-                return await fetch_chapter(active_client, chapter, fixture_dir=fixture_dir)
+            async def guarded_fetch(chapter: ChapterLink) -> dict[str, Any]:
+                async with semaphore:
+                    return await fetch_chapter(active_client, chapter, fixture_dir=fixture_dir)
 
-        chapter_results = await asyncio.gather(*(guarded_fetch(chapter) for chapter in chapters))
+            chapter_results = await asyncio.gather(*(guarded_fetch(chapter) for chapter in chapters))
 
     run_id = f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}_bz888_{sha256_text(book_url)[:10]}"
     run_dir = out_root / run_id
@@ -393,7 +548,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--book-url")
     parser.add_argument("--book-title")
     parser.add_argument("--out-dir", default="book-content")
-    parser.add_argument("--fixture-dir")
+    parser.add_argument("--fixture-dir", "--html-dir", dest="fixture_dir")
     parser.add_argument("--metadata-only", action="store_true")
     parser.add_argument("--max-pages", type=int, default=8)
     parser.add_argument("--concurrency", type=int, default=8)
