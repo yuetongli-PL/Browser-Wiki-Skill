@@ -59,6 +59,8 @@ test('generateSkill produces bilibili skill documents with stronger execution co
     assert.match(skillMd, /Verified scenario families:/u);
     assert.match(skillMd, /home -> search results -> video detail -> UP profile/u);
     assert.match(skillMd, /category\/channel entrypoints -> content detail/u);
+    assert.match(skillMd, /## Site Capability Graph status/u);
+    assert.match(skillMd, /The Site Capability Layer remains the execution and orchestration entrypoint/u);
     assert.match(skillMd, /## Execution policy/u);
     assert.match(skillMd, /Public bilibili pages MUST use the built-in browser\./u);
     assert.match(skillMd, /Authenticated bilibili pages MUST use the local opener/u);

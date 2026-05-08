@@ -30,6 +30,15 @@ export function renderReadingOrder(outputs, currentFilePath, markdownLink) {
   ];
 }
 
+export function renderSiteCapabilityGraphStatusLines() {
+  return [
+    '- Repo Graph status: Site Capability Graph final validation passed for the current repo scope on 2026-05-08 with sections 1-20 verified, `partial=0`, `gaps=[]`, and Agent B `Accepted`.',
+    '- Execution boundary: the Graph is declarative, versioned capability knowledge only. The Site Capability Layer remains the execution and orchestration entrypoint.',
+    '- Skill usage: use Graph-derived knowledge to choose verified capability families, routes, endpoint evidence, risk policies, reason codes, and recovery boundaries; do not treat Graph descriptors as permission to execute blocked actions.',
+    '- Prohibited from Graph evidence alone: SiteAdapter/downloader invocation, SessionView/DownloadPolicy/StandardTaskList materialization, runtime artifact writes, repo writes, external dispatch/telemetry, profile materialization, or sensitive-material persistence.',
+  ];
+}
+
 export function renderSkillTemplate({
   skillName,
   description,
@@ -37,6 +46,7 @@ export function renderSkillTemplate({
   scopeLines,
   sampleCoverageLines = [],
   executionPolicyLines = [],
+  siteCapabilityGraphStatusLines = renderSiteCapabilityGraphStatusLines(),
   readingOrderLines,
   safetyBoundaryLines,
   doNotDoLines,
@@ -52,6 +62,7 @@ export function renderSkillTemplate({
   ];
   pushSection(lines, '## Scope', scopeLines);
   pushSection(lines, '## Sample coverage', sampleCoverageLines);
+  pushSection(lines, '## Site Capability Graph status', siteCapabilityGraphStatusLines);
   pushSection(lines, '## Execution policy', executionPolicyLines);
   pushSection(lines, '## Reading order', readingOrderLines);
   pushSection(lines, '## Safety boundary', safetyBoundaryLines);

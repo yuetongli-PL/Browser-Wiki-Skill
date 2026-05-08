@@ -550,7 +550,7 @@
       ]
     },
     "www.douyin.com": {
-      "baseUrl": "https://www.douyin.com/?recommend=1",
+      "baseUrl": "https://www.douyin.com/",
       "primaryArchetype": "catalog-detail",
       "pageTypes": [
         "author-list-page",
@@ -563,18 +563,22 @@
       ],
       "capabilityFamilies": [
         "download-content",
+        "navigate-to-author",
+        "navigate-to-category",
         "navigate-to-content",
         "navigate-to-utility-page",
+        "search-content",
         "switch-in-page-state"
       ],
       "supportedIntents": [
-        "download-video",
+        "download-book",
+        "open-author",
         "open-category",
         "open-utility-page",
-        "open-video"
+        "open-video",
+        "search-video"
       ],
       "safeActionKinds": [
-        "download-media",
         "navigate"
       ],
       "approvalActionKinds": [
@@ -1446,6 +1450,47 @@
         "downloader_not_allowed",
         "schema_validation_failed"
       ]
+    },
+    "example.com": {
+      "baseUrl": "https://example.com/",
+      "primaryArchetype": "catalog-detail",
+      "pageTypes": [],
+      "capabilityFamilies": [
+        "navigate-to-author",
+        "navigate-to-content",
+        "search-content"
+      ],
+      "supportedIntents": [],
+      "safeActionKinds": [
+        "navigate"
+      ],
+      "approvalActionKinds": [],
+      "host": "example.com",
+      "siteKey": "generic-navigation",
+      "adapterId": "generic-navigation"
+    },
+    "weread.qq.com": {
+      "baseUrl": "https://weread.qq.com/",
+      "siteKey": "generic-navigation",
+      "adapterId": "generic-navigation",
+      "primaryArchetype": "catalog-detail",
+      "pageTypes": [],
+      "capabilityFamilies": [
+        "navigate-to-author",
+        "navigate-to-content",
+        "navigate-to-utility-page",
+        "search-content"
+      ],
+      "supportedIntents": [
+        "open-book",
+        "open-category",
+        "open-utility-page"
+      ],
+      "safeActionKinds": [
+        "navigate"
+      ],
+      "approvalActionKinds": [],
+      "host": "weread.qq.com"
     }
   }
 }

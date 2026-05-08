@@ -16,6 +16,7 @@ import {
   renderKnownSiteRecoveryReference,
   renderKnownSiteSkillMd,
 } from './site-render-inputs.mjs';
+import { renderSiteCapabilityGraphStatusLines } from './render/site-renderers/shared.mjs';
 import {
   resolveCapabilityFamilies,
   resolvePrimaryArchetype,
@@ -55,6 +56,10 @@ export function renderSkillMd(context, outputs) {
     `- Supported intents: ${supportedIntents.join(', ') || 'none'}`,
     `- Safe actions: \`${safeActions.join('`, `')}\``,
     `- Actionable targets: ${actionableLabels.join(', ') || 'none'}`,
+    '',
+    '## Site Capability Graph status',
+    '',
+    ...renderSiteCapabilityGraphStatusLines(),
     '',
     '## Reading order',
     '',

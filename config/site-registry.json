@@ -5,6 +5,9 @@
     "www.22biqu.com": {
       "canonicalBaseUrl": "https://www.22biqu.com/",
       "host": "www.22biqu.com",
+      "siteKey": "22biqu",
+      "adapterId": "chapter-content",
+      "repoSkillDir": "skills/22biqu",
       "downloadEntrypoint": "src/sites/chapter-content/download/python/book.py",
       "downloadPlanner": "src/sites/downloads/modules.mjs",
       "downloadResolver": "src/sites/downloads/modules.mjs",
@@ -362,7 +365,7 @@
       "repoSkillDir": "skills/bilibili"
     },
     "www.douyin.com": {
-      "canonicalBaseUrl": "https://www.douyin.com/?recommend=1",
+      "canonicalBaseUrl": "https://www.douyin.com/",
       "siteArchetype": "catalog-detail",
       "host": "www.douyin.com",
       "siteKey": "douyin",
@@ -379,7 +382,10 @@
       "capabilityFamilies": [
         "download-content"
       ],
-      "repoSkillDir": "skills/douyin"
+      "repoSkillDir": "skills/douyin",
+      "scriptLanguage": "python",
+      "interpreterRequired": "pypy3",
+      "templateVersion": 3
     },
     "www.xiaohongshu.com": {
       "canonicalBaseUrl": "https://www.xiaohongshu.com/explore",
@@ -1049,6 +1055,25 @@
         "schema_validation_failed"
       ],
       "repoSkillDir": "skills/maxing"
+    },
+    "example.com": {
+      "canonicalBaseUrl": "https://example.com/",
+      "siteArchetype": "catalog-detail",
+      "scriptLanguage": "python",
+      "interpreterRequired": "pypy3",
+      "templateVersion": 3,
+      "host": "example.com",
+      "capabilityFamilies": [],
+      "siteKey": "generic-navigation",
+      "adapterId": "generic-navigation"
+    },
+    "weread.qq.com": {
+      "canonicalBaseUrl": "https://weread.qq.com/",
+      "siteKey": "generic-navigation",
+      "adapterId": "generic-navigation",
+      "siteArchetype": "catalog-detail",
+      "host": "weread.qq.com",
+      "capabilityFamilies": []
     }
   }
 }
