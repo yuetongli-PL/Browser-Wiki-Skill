@@ -1953,10 +1953,13 @@ function collectTriggerGapInputs(input = {}) {
     ['unexpandable-path', input.summary?.unexpandablePaths],
     ['trigger-attempt-result', input.triggerAttemptResults],
     ['trigger-attempt-result', input.summary?.triggerAttemptResults],
+    ['trigger-attempt-result', input.governedRetryAttempts],
+    ['trigger-attempt-result', input.summary?.governedRetryAttempts],
     ['candidate-trigger', input.manifest?.candidateTriggers],
     ['skipped-trigger', input.manifest?.skippedTriggers],
     ['failed-trigger', input.manifest?.failedTriggers],
     ['trigger-attempt-result', input.manifest?.triggerAttemptResults],
+    ['trigger-attempt-result', input.manifest?.governedRetryAttempts],
   ];
   return rawGroups.flatMap(([scope, triggers]) =>
     toArray(triggers)
@@ -3446,6 +3449,16 @@ function staticAdapterCapabilityFixtureEvidenceEntries(adapter = null) {
           verificationState: fixture.verificationState ?? fixture.verification ?? 'unverified',
           evidenceKind: kind,
           evidenceRef,
+          evidenceDetail: fixture.apiCatalogRef
+            ? {
+              descriptorKind: 'verified-api-catalog-capability-evidence',
+              targetId: capability,
+              sourceApiId: fixture.apiCatalogRef,
+              executableEvidence: true,
+              descriptorOnly: true,
+              redactionRequired: true,
+            }
+            : undefined,
           descriptorOnly: true,
           redactionRequired: true,
         };

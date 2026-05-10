@@ -139,6 +139,16 @@ const LIFECYCLE_SITE_HEALTH_ACTION_DETAIL_FIELDS = Object.freeze([
   'descriptorOnly',
   'executableDispatchEnabled',
 ]);
+const LIFECYCLE_EXECUTION_LAYER_CONSUMER_DETAIL_FIELDS = Object.freeze([
+  'executionId',
+  'executionStatus',
+  'coverageDeltaType',
+  'coverageAfter',
+  'artifactRefCount',
+  'directDownloaderInvocationAllowed',
+  'directSiteAdapterInvocationAllowed',
+  'sessionViewMaterializationAllowed',
+]);
 
 export const LIFECYCLE_EVENT_OBSERVABILITY_PROFILES = Object.freeze({
   'api.catalog.collection.written': Object.freeze({
@@ -195,6 +205,13 @@ export const LIFECYCLE_EVENT_OBSERVABILITY_PROFILES = Object.freeze({
   'download.executor.dry_run': LIFECYCLE_DOWNLOAD_EXECUTOR_OBSERVABILITY_PROFILE,
   'download.legacy.completed': LIFECYCLE_DOWNLOAD_EXECUTOR_OBSERVABILITY_PROFILE,
   'download.legacy.recovery_preflight': LIFECYCLE_DOWNLOAD_EXECUTOR_OBSERVABILITY_PROFILE,
+  'execution.layer.consumer.receipt': Object.freeze({
+    requiredFields: Object.freeze([
+      ...LIFECYCLE_OBSERVABILITY_CORE_FIELDS,
+      'adapterVersion',
+    ]),
+    requiredDetailFields: LIFECYCLE_EXECUTION_LAYER_CONSUMER_DETAIL_FIELDS,
+  }),
   'social.action.risk_blocked': Object.freeze({
     requiredFields: LIFECYCLE_SOCIAL_RISK_PRODUCER_FIELDS,
     requiredDetailFields: LIFECYCLE_SOCIAL_RISK_BLOCKED_DETAIL_FIELDS,
@@ -302,6 +319,12 @@ const LIFECYCLE_EVENT_PRODUCER_DESCRIPTORS = Object.freeze([
     eventType: 'download.run.terminal',
     producerId: 'download-runner.terminal',
     sourceModule: 'src/sites/downloads/runner.mjs',
+    profileStatus: 'profiled',
+  },
+  {
+    eventType: 'execution.layer.consumer.receipt',
+    producerId: 'execution.layer-runtime-consumer.receipt',
+    sourceModule: 'src/sites/capability/execution/layer-runtime-consumer.mjs',
     profileStatus: 'profiled',
   },
   {

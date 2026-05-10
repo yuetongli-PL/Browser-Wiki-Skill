@@ -43,6 +43,14 @@ block unrelated Planner/Layer handoff readiness instead of silently planning the
 first available capability. Focused compiler capability-gap validation passed
 23/23 after this update.
 
+Remaining deep-path closeout: 2026-05-10 added focused code and tests for real
+producer intake evidence, verified API catalog promotion behind
+SiteAdapter/policy/schema/test gates, exact-quorum executable capability
+evidence chains, and a Layer-owned runtime consumer for Layer receipts. Focused
+deep-path validation passed 4/4, lifecycle inventory validation passed 15/15,
+site-onboarding discovery passed 49/49, API catalog tests passed 86/86, and
+execution handoff/policy tests passed 8/8.
+
 ## 1. Core Positioning
 
 - Section name: Core Positioning
@@ -100,16 +108,20 @@ first available capability. Focused compiler capability-gap validation passed
 - Existing code evidence: `graph-builder.mjs` emits a Graph descriptor and
   validation report; `planner-integration.test.mjs` drives existing Planner
   dry-run through `createDryRunCapabilityPlan()` using validated compiler-built
-  Graph; `execution/layer-handoff.mjs` targets `site-capability-layer`.
+  Graph; `execution/layer-handoff.mjs` targets `site-capability-layer`;
+  `execution/layer-runtime-consumer.mjs` consumes Layer receipts through a
+  descriptor-only, Layer-owned path without downloader, SiteAdapter, or session
+  materialization.
 - Existing test evidence: `graph-builder.test.mjs`,
   `planner-integration.test.mjs`, and `final-validation.test.mjs`.
 - Verification command: `node --test tests\node\site-capability-compiler-executor\graph-builder.test.mjs tests\node\site-capability-compiler-executor\planner-integration.test.mjs tests\node\site-capability-compiler-executor\final-validation.test.mjs`.
-- Verification result: Graph/Planner/Layer relationship validation passed 8/8.
+- Verification result: Graph/Planner/Layer relationship validation passed 8/8;
+  deep-path Layer-owned runtime consumer validation passed 4/4.
 - Current gaps: None known for descriptor-only integration.
-- Next smallest task: Add Layer runtime consumer only in a separate governed
-  batch.
+- Next smallest task: Add future upper consumers only through the existing
+  Layer-owned handoff/receipt descriptor path.
 - Risk notes: Planner must never consume unvalidated compiler drafts.
-- Last updated: 2026-05-09
+- Last updated: 2026-05-10
 - Responsible subagent: GraphEmissionPlannerIntegrationAgent
 - TestVerificationQualityGateAgent conclusion: Accepted.
 
@@ -124,16 +136,17 @@ first available capability. Focused compiler capability-gap validation passed
   validator, coverage report, inventory, static compiler, graph builder,
   redaction guard, reason codes, observability, and index modules.
   `src/sites/capability/execution/` contains schema, validator, Layer handoff,
-  artifact guard, and index modules.
+  artifact guard, Layer runtime consumer, coverage delta queue, policy gate,
+  and index modules.
 - Existing test evidence: `final-validation.test.mjs` verifies the final module
   surfaces exist and avoid runtime imports.
 - Verification command: `node --test tests\node\site-capability-compiler-executor\final-validation.test.mjs`.
 - Verification result: Final surface validation passed 3/3.
 - Current gaps: None known for current scope.
-- Next smallest task: Keep live execution code outside this descriptor layer
-  until Layer-owned runtime gates exist.
+- Next smallest task: Keep future live execution extensions behind the
+  established Layer-owned runtime gates.
 - Risk notes: Do not add placeholder-only modules without tests.
-- Last updated: 2026-05-09
+- Last updated: 2026-05-10
 - Responsible subagent: CompilerContractSchemaAgent
 - TestVerificationQualityGateAgent conclusion: Accepted.
 
@@ -243,14 +256,22 @@ first available capability. Focused compiler capability-gap validation passed
 - Current status: `verified`
 - Existing code evidence: `compiler/inventory.mjs` emits declared RouteNode
   descriptors from synthetic static capability config; `graph-builder.mjs`
-  converts them to Graph RouteNodes.
+  converts them to Graph RouteNodes; `api-catalog-promotion.mjs` provides an
+  explicit observed-producer-to-verified-catalog path gated by accepted
+  SiteAdapter decision, multi-aspect schema/auth/pagination/risk verification,
+  and policy allow.
 - Existing test evidence: `graph-builder.test.mjs` verifies route nodes and
-  route edges validate through `validateSiteCapabilityGraph()`.
-- Verification command: `node --test tests\node\site-capability-compiler-executor\graph-builder.test.mjs`.
-- Verification result: Graph route capture validation passed 3/3.
-- Current gaps: None known for static route family descriptors.
-- Next smallest task: Add observed API candidate summaries without catalog
-  promotion.
+  route edges validate through `validateSiteCapabilityGraph()`;
+  `site-capability-remaining-deep-paths.test.mjs` verifies observed API
+  promotion cannot occur without adapter/policy/schema/test evidence and no
+  partial artifact writes occur when policy blocks promotion.
+- Verification command: `node --test tests\node\site-capability-compiler-executor\graph-builder.test.mjs`; `node --test tests\node\site-capability-remaining-deep-paths.test.mjs`.
+- Verification result: Graph route capture validation passed 3/3 and
+  deep-path API promotion validation passed 4/4.
+- Current gaps: None known for static route family descriptors or gated API
+  catalog promotion.
+- Next smallest task: Add site-specific verified API evidence fixtures as sites
+  mature.
 - Risk notes: Observed API candidates must remain separate from verified
   catalog endpoints.
 - Last updated: 2026-05-09
@@ -337,16 +358,22 @@ first available capability. Focused compiler capability-gap validation passed
 - Existing code evidence: `planner-integration.test.mjs` composes
   `buildSiteCapabilityGraphFromCompileManifest()` with existing Planner
   `createDryRunCapabilityPlan()`; `site-capability-compile.mjs` runs the same
-  validated-Graph-only dry-run path from a repo-local CLI.
+  validated-Graph-only dry-run path from a repo-local CLI;
+  `execution/layer-runtime-consumer.mjs` consumes Layer receipts and creates
+  `ExecutionFeedback`, `CoverageDelta`, a redacted queue write descriptor, and
+  lifecycle event without invoking downloader, SiteAdapter, or SessionView.
 - Existing test evidence: `planner-integration.test.mjs` proves Planner
   generates a ready dry-run plan from a passed validation report and rejects
   missing or failed validation reports; `compile-entrypoint.test.mjs` verifies
   the CLI dry-run summary.
 - Verification command: `node --test tests\node\site-capability-compiler-executor\planner-integration.test.mjs`.
-- Verification result: Planner integration and CLI dry-run validation passed in the 42/42 focused suite.
+- Verification result: Planner integration and CLI dry-run validation passed in
+  the 42/42 focused suite; 2026-05-10 deep-path validation passed
+  `site-capability-remaining-deep-paths.test.mjs` 4/4, including the
+  Layer-owned runtime consumer.
 - Current gaps: None known for dry-run Planner consumption.
-- Next smallest task: Add Layer handoff descriptor consumption in a separate
-  runtime-governed batch.
+- Next smallest task: Add future upper consumers only through the existing
+  Layer-owned handoff/receipt descriptor path.
 - Risk notes: Planner does not discover sites or execute tasks.
 - Last updated: 2026-05-09
 - Responsible subagent: GraphEmissionPlannerIntegrationAgent
@@ -360,17 +387,22 @@ first available capability. Focused compiler capability-gap validation passed
 - Current status: `verified`
 - Existing code evidence: `src/sites/capability/execution/schema.mjs`,
   `validator.mjs`, `layer-handoff.mjs`, `policy-gate.mjs`,
-  `coverage-delta-queue.mjs`, `artifact-guard.mjs`, and `index.mjs`
+  `coverage-delta-queue.mjs`, `artifact-guard.mjs`,
+  `layer-runtime-consumer.mjs`, and `index.mjs`
   define descriptor-only `ExecutionManifest`, `ExecutionPolicyDecision`, Layer
-  handoff, feedback, coverage delta, and redacted queue contracts.
+  handoff, feedback, coverage delta, redacted queue contracts, and Layer-owned
+  runtime receipt consumption.
 - Existing test evidence: `execution-handoff.test.mjs` accepts descriptor-only
   handoff/feedback/delta and rejects downloader, SessionView, and sensitive
   payloads; `execution-policy.test.mjs` verifies policy preflight and
   CoverageDelta queue behavior.
-- Verification command: `node --test tests\node\site-capability-compiler-executor\execution-handoff.test.mjs`.
-- Verification result: Execution handoff, policy, and coverage queue validation passed in the 42/42 focused suite.
-- Current gaps: None known for descriptor-only execution contracts.
-- Next smallest task: Wire a Layer-owned consumer only after runtime gates.
+- Verification command: `node --test tests\node\site-capability-compiler-executor\execution-handoff.test.mjs tests\node\site-capability-compiler-executor\execution-policy.test.mjs tests\node\site-capability-remaining-deep-paths.test.mjs`.
+- Verification result: Execution handoff/policy validation passed 8/8 and
+  deep-path runtime consumer validation passed 4/4.
+- Current gaps: None known for Layer-owned descriptor and receipt-consumer
+  contracts.
+- Next smallest task: Connect future runtime consumers only after adding
+  matching Layer-owned receipt fixtures.
 - Risk notes: No direct downloader or SiteAdapter invocation.
 - Last updated: 2026-05-09
 - Responsible subagent: ExecutionPolicySecurityAgent
@@ -386,17 +418,25 @@ first available capability. Focused compiler capability-gap validation passed
   `prepareCompilerDerivedArtifact()`; `execution/artifact-guard.mjs` implements
   `prepareExecutionArtifactJsonWithAudit()`; `site-capability-compile.mjs`
   writes optional compiler artifacts only after redaction; `coverage-delta-queue.mjs`
-  prepares coverage queue artifacts through the execution artifact guard.
+  prepares coverage queue artifacts through the execution artifact guard;
+  `api-catalog-promotion.mjs` writes verified API catalog artifacts only after
+  observed-request redaction, accepted SiteAdapter decision, multi-aspect
+  schema/auth/pagination/risk verification, and policy allow;
+  `layer-runtime-consumer.mjs` prepares coverage delta queue writes from Layer
+  receipts only.
   `compiler/validator.mjs` and `execution/validator.mjs` now fail closed on
   unsafe source/evidence/artifact refs before derived artifact writes.
 - Existing test evidence: `artifact-guard.test.mjs`, `compile-entrypoint.test.mjs`,
   `execution-policy.test.mjs`, and `execution-handoff.test.mjs` verify
   redaction-required artifacts, reject unredacted sensitive material, and reject
-  raw URL/path/account/IP/query/executable-looking evidence refs.
+  raw URL/path/account/IP/query/executable-looking evidence refs;
+  `site-capability-remaining-deep-paths.test.mjs` verifies verified API catalog
+  artifact writes and policy-blocked no-partial-write behavior.
 - Verification command: `node --test tests\node\site-capability-compiler-executor\artifact-guard.test.mjs tests\node\site-capability-compiler-executor\execution-handoff.test.mjs`.
 - Verification result: 2026-05-10 focused artifact/ref guard validation passed
   21/21; full compiler-executor suite passed 53/53 with unsafe compiler
-  source/evidence refs and execution artifact/evidence refs rejected.
+  source/evidence refs and execution artifact/evidence refs rejected; deep-path
+  API promotion and Layer receipt artifact validation passed 4/4.
 - Current gaps: None known for descriptor artifact guards.
 - Next smallest task: Add real writer tests only when a writer is introduced.
 - Risk notes: No derived artifact write path without guard.
@@ -413,18 +453,21 @@ first available capability. Focused compiler capability-gap validation passed
 - Existing code evidence: `compiler/validator.mjs`, `compiler/redaction-guard.mjs`,
   `config-loader.mjs`, `site-capability-compile.mjs`, `execution/validator.mjs`,
   `execution/policy-gate.mjs`, `execution/coverage-delta-queue.mjs`, and
-  `execution/artifact-guard.mjs` use existing SecurityGuard scanners and
+  `execution/artifact-guard.mjs`, `api-catalog-promotion.mjs`, and
+  `capability-evidence-chain.mjs` use existing SecurityGuard scanners and
   redaction helpers. Compiler and execution validators now also enforce an
   allowlist for source/evidence/artifact refs so raw URLs, local paths, query
   fragments, account-like refs, IP refs, and executable-looking refs cannot be
   persisted through compiler/executor artifacts.
 - Existing test evidence: `schema-validator.test.mjs`, `artifact-guard.test.mjs`,
   `execution-handoff.test.mjs`, `execution-policy.test.mjs`, and
-  `observability.test.mjs`.
+  `observability.test.mjs`; `site-capability-remaining-deep-paths.test.mjs`
+  adds producer/API/capability/execution redaction regressions.
 - Verification command: `node --test tests\node\site-capability-compiler-executor\schema-validator.test.mjs tests\node\site-capability-compiler-executor\artifact-guard.test.mjs tests\node\site-capability-compiler-executor\execution-handoff.test.mjs tests\node\site-capability-compiler-executor\observability.test.mjs`; `node tools\prepublish-secret-scan.mjs`.
 - Verification result: 2026-05-10 unsafe ref allowlist validation passed in
   the 21/21 focused suite; full compiler-executor suite passed 53/53 and
-  prepublish secret scan passed across 656 candidate files.
+  prepublish secret scan passed across 660 candidate files, and deep-path
+  security validation passed 4/4.
 - Current gaps: None known.
 - Next smallest task: Keep synthetic/redacted fixtures only.
 - Risk notes: Errors must not echo sensitive values.
@@ -465,17 +508,21 @@ first available capability. Focused compiler capability-gap validation passed
   `createCompilerLifecycleEvent()` and validates required fields, validation
   result, and redaction event metadata; `site-doctor.mjs` can attach an opt-in
   descriptor-only compile dry-run check; `download-release-audit-core.mjs`
-  attaches per-site compile coverage summaries to release audit rows.
+  attaches per-site compile coverage summaries to release audit rows;
+  `lifecycle-events.mjs` inventories and profiles
+  `execution.layer.consumer.receipt` from `execution/layer-runtime-consumer.mjs`.
 - Existing test evidence: `observability.test.mjs` accepts a compiler lifecycle
   event and rejects sensitive values; `site-onboarding.test.mjs` verifies the
   Doctor dry-run check and `download-release-audit.test.mjs` verifies compile
-  coverage release-audit rows.
-- Verification command: `node --test tests\node\site-capability-compiler-executor\observability.test.mjs`.
-- Verification result: Observability validation passed 2/2; focused
-  upper-consumer validation passed 67/67.
+  coverage release-audit rows; `lifecycle-events.test.mjs` verifies producer
+  inventory/profile alignment for the Layer runtime consumer event.
+- Verification command: `node --test tests\node\site-capability-compiler-executor\observability.test.mjs tests\node\lifecycle-events.test.mjs`.
+- Verification result: Observability validation passed 2/2, lifecycle producer
+  inventory/profile validation passed 15/15, and focused upper-consumer
+  validation passed 67/67.
 - Current gaps: None known for descriptor events.
-- Next smallest task: Add runtime lifecycle dispatch only through Layer-owned
-  paths.
+- Next smallest task: Keep runtime lifecycle dispatch on the Layer-owned
+  receipt path.
 - Risk notes: No fake external telemetry.
 - Last updated: 2026-05-09
 - Responsible subagent: TestVerificationQualityGateAgent
@@ -503,12 +550,14 @@ first available capability. Focused compiler capability-gap validation passed
   flag parsing. Capability-intake regression tests cover requested capability
   schema validation, unsafe capability rejection, static targeted coverage,
   CLI `--capability`, descriptor-only `--ask-capabilities`, and blocked
-  handoff behavior for missing requested capabilities.
-- Verification command: `node --test tests\node\site-capability-compiler-executor\*.test.mjs`.
+  handoff behavior for missing requested capabilities. Deep-path regression
+  coverage now lives in `tests/node/site-capability-remaining-deep-paths.test.mjs`.
+- Verification command: `node --test tests\node\site-capability-compiler-executor\*.test.mjs`; `node --test tests\node\site-capability-remaining-deep-paths.test.mjs`.
 - Verification result: Focused compiler-executor suite passed 53/53; focused
   upper-consumer validation passed 67/67. 2026-05-10 capability-gap focused
   validation passed 23/23 for schema, static compiler, and compile entrypoint
-  coverage.
+  coverage; deep-path producer/API/capability/Layer runtime validation passed
+  4/4.
 - Current gaps: None known for current goal.
 - Next smallest task: Add regression tests with every future behavior change.
 - Risk notes: Do not report unrun tests as passed.
@@ -532,15 +581,19 @@ first available capability. Focused compiler capability-gap validation passed
   compile entrypoint provide the pre-compile ask/prioritize/best-effort
   coverage contract for new site onboarding, including missing requested
   capability gaps that block unrelated Planner/Layer handoff readiness.
+  `api-catalog-promotion.mjs`, `capability-evidence-chain.mjs`,
+  `site-onboarding-discovery.mjs`, and `execution/layer-runtime-consumer.mjs`
+  close the remaining producer, API promotion, executable-capability evidence,
+  and Layer-owned receipt-consumer paths.
 - Existing test evidence: `matrix.test.mjs` verifies sections 1-20 are
   `verified` with evidence; `final-validation.test.mjs` verifies final docs,
   contracts, schema listings, and runtime import boundaries.
 - Verification command: `node --test tests\node\site-capability-compiler-executor\matrix.test.mjs tests\node\site-capability-compiler-executor\final-validation.test.mjs`; `node --test tests\node\site-capability-compiler-executor\*.test.mjs`; `git diff --check`; `node tools\prepublish-secret-scan.mjs`.
-- Verification result: Matrix/final validation passed 5/5; focused compiler-executor suite passed 53/53; focused Doctor/Skill/audit upper-consumer validation passed 67/67; Python unittest passed 58/58; path-specific diff check passed; prepublish secret scan passed, scanning 656 candidate files; 2026-05-10 missing requested capability focused validation passed 23/23; broad `node --test tests\node\*.test.mjs` was attempted and timed out after 600 seconds before producing a final pass/fail result.
+- Verification result: Matrix/final validation passed 5/5; focused compiler-executor suite passed 53/53; focused Doctor/Skill/audit upper-consumer validation passed 67/67; Python unittest passed 58/58; path-specific diff check passed; prepublish secret scan passed, scanning 660 candidate files; 2026-05-10 missing requested capability focused validation passed 23/23; 2026-05-10 deep-path validation passed 4/4, lifecycle inventory passed 15/15, site-onboarding discovery passed 49/49, API catalog tests passed 86/86, and execution handoff/policy tests passed 8/8; broad `node --test tests\node\*.test.mjs` was attempted and timed out after 600 seconds before producing a final pass/fail result.
 - Current gaps: None known for the current descriptor-only compiler/executor
   goal.
-- Next smallest task: Integrate future live execution only through a
-  Layer-owned runtime goal.
+- Next smallest task: Extend future live producers and upper runtime consumers
+  only through the established guarded evidence paths.
 - Risk notes: Do not expand beyond descriptor-only contracts without new gates.
 - Last updated: 2026-05-10
 - Responsible subagent: TestVerificationQualityGateAgent

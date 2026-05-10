@@ -22,6 +22,7 @@ const EXECUTION_SCHEMA_NAMES = Object.freeze([
   'ExecutionFeedback',
   'CoverageDelta',
   'CoverageDeltaArtifactQueue',
+  'LayerOwnedRuntimeConsumerResult',
   'ExecutionArtifactGuardResult',
 ]);
 

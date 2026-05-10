@@ -397,9 +397,10 @@ test('LifecycleEvent producer inventory is versioned, safe, and aligned with run
   const summary = summarizeLifecycleEventProducerInventory({ inventory });
   assert.deepEqual(summary, {
     schemaVersion: LIFECYCLE_EVENT_PRODUCER_INVENTORY_SCHEMA_VERSION,
-    eventTypeCount: 20,
+    eventTypeCount: 21,
     producerModuleCounts: {
       'src/sites/capability/api-candidates.mjs': 6,
+      'src/sites/capability/execution/layer-runtime-consumer.mjs': 1,
       'src/sites/capability/site-health-execution-gate.mjs': 3,
       'src/sites/capability/site-capability-graph.mjs': 1,
       'src/pipeline/stages/capture.mjs': 2,
@@ -423,6 +424,7 @@ test('LifecycleEvent producer inventory is versioned, safe, and aligned with run
       'download.legacy.completed',
       'download.legacy.recovery_preflight',
       'download.run.terminal',
+      'execution.layer.consumer.receipt',
       'site.health.recovery.evaluated',
       'site.health.recovery.action.planned',
       'site.health.recovery.safe_stop',
