@@ -143,16 +143,27 @@ def persistent_browser_root_candidates() -> tuple[Path, Path]:
     )
 
 
-def resolve_default_persistent_browser_root() -> Path:
-    preferred, legacy = persistent_browser_root_candidates()
-    if legacy.exists() and not preferred.exists():
-        return legacy
+def resolve_default_persistent_browser_root(candidates: tuple[Path, Path] | None = None) -> Path:
+    preferred, _legacy = candidates or persistent_browser_root_candidates()
     return preferred
 
 
-def resolve_persistent_user_data_dir(input_value: str, root_dir: str | Path | None = None) -> Path:
-    root = Path(root_dir) if root_dir else resolve_default_persistent_browser_root()
-    return root.resolve() / derive_persistent_profile_key(input_value)
+def resolve_persistent_user_data_dir(
+    input_value: str,
+    root_dir: str | Path | None = None,
+    candidates: tuple[Path, Path] | None = None,
+) -> Path:
+    profile_key = derive_persistent_profile_key(input_value)
+    if root_dir is not None:
+        return Path(root_dir).resolve() / profile_key
+
+    preferred, legacy = candidates or persistent_browser_root_candidates()
+    preferred_profile_dir = preferred.resolve() / profile_key
+    legacy_profile_dir = legacy.resolve() / profile_key
+    if legacy_profile_dir.exists() and not preferred_profile_dir.exists():
+        return legacy_profile_dir
+
+    return preferred_profile_dir
 
 
 def inspect_persistent_profile_health(user_data_dir: str | Path) -> dict[str, Any]:

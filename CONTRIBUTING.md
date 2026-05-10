@@ -87,6 +87,11 @@ The user-facing product brand is SiteForge. The physical workspace directory,
 legacy GitHub URL examples, historical evidence fixtures, and old runtime
 profile roots may still contain `Browser-Wiki-Skill` until external repository,
 path, and operator-managed profile migration is explicitly requested.
+The recommended post-migration checkout path is
+`C:\Users\lyt-p\Desktop\SiteForge`; the legacy
+`C:\Users\lyt-p\Desktop\Browser-Wiki-Skill` path is retained only as an active
+checkout / historical reference until sessions are closed and the directory is
+renamed externally.
 
 New default persistent browser profile roots prefer SiteForge-branded paths.
 Runtime code retains Browser-Wiki-Skill fallback candidates only to preserve
@@ -96,6 +101,20 @@ remain compatibility identifiers until an operator explicitly approves a
 credential-target migration. Do not rewrite `runs/`, `profiles/`, downloaded
 media, generated crawler metadata, or test fixtures whose purpose is to prove
 legacy-path redaction or compatibility.
+
+Current allowed legacy-hit reasons:
+
+- `legacy path`: the old checkout path can appear only as an active-session or
+  historical path note.
+- `GitHub redirect note`: the old repository URL can appear only as a redirect
+  or migration reference.
+- `historical fixture`: crawler metadata, generated examples, and tests may
+  preserve old absolute paths when the path itself is the fixture evidence.
+- `compatibility fallback`: browser profile roots, explicit legacy task names,
+  and `BrowserWikiSkill:*` credential targets remain readable for existing
+  local installations.
+- `intentionally deferred`: real browser profile migration and remote
+  repository rename are operator-managed external actions.
 
 ## Site Capability Compiler / Executor Status
 
@@ -594,7 +613,7 @@ This compact matrix is the durable Site Capability Layer progress ledger. Short-
 - Existing code evidence: Sections 1-19 record code-backed evidence across Kernel, SiteAdapter, Capability Services, downloader boundary, schema governance, health recovery, discovery, and artifacts. Current Site Capability Graph final validation evidence lives in `src/sites/capability/site-capability-graph-final-validation.mjs`, with planner/Layer relationship evidence in `planner-policy-handoff.mjs` and lifecycle producer inventory evidence in `lifecycle-events.mjs`.
 - Existing test evidence: The current focused validation set covers matrix/regression, download, API, security, lifecycle, health, onboarding, architecture gates, BZ888 OCR challenge boundary, redacted registry profile fallback, Cloudflare challenge reason recovery, Site Capability Graph matrix closure, final validation, planner/policy handoff, redaction persistence, lifecycle producer inventory, and observability boundaries.
 - Verification command: `node --test tests\node\site-capability-matrix.test.mjs tests\node\download-site-modules.test.mjs tests\node\site-registry.test.mjs tests\node\profile-validation.test.mjs tests\node\generate-skill.test.mjs tests\node\site-onboarding-discovery.test.mjs`; `python -m unittest .\tests\python\test_download_book.py`; `node --test tests\node\site-capability-graph-matrix.test.mjs tests\node\site-capability-graph-final-validation.test.mjs tests\node\planner-policy-handoff.test.mjs tests\node\lifecycle-events.test.mjs tests\node\site-capability-graph-observability.test.mjs`
-- Verification result: 2026-05-04 final validation evidence: matrix focused gate passed; regression focused gate passed; download focused gate passed; API focused gate passed; security focused gate passed; BZ888 onboarding/downloader/OCR/profile-fallback/Cloudflare-reason focused gates passed; live BZ888 execute produced governed challenge-stop manifest `20260504T062914706Z-bz888-generic-resource`; separate human-visible browser validation confirmed the target BZ888 catalog/chapter pages were readable after manual challenge completion without exposing raw cookies to the repo or downloader; live X auth recovery passed at 2026-05-04T13:48:09+08:00. 2026-05-08 Site Capability Graph final validation passed with `verified=20`, `partial=0`, `gaps=[]`, matrix 108/108 after Section 20 legacy descriptor pipeline and source-alias fail-closed regression compression, final-validation 8/8, planner-policy handoff 40/40, lifecycle-events 15/15, observability 53/53, and Agent B `Accepted`. 2026-05-08 release-scope broad validation passed with explicit Node test-file list 1971/1971, Python unittest discovery 58/58, prepublish secret scan 589 candidate files, and `git diff --check`. 2026-05-10 site-specific deep-path validation passed with `site-capability-remaining-deep-paths.test.mjs` 5/5, compiler/executor suite 53/53, matrix/final compiler-executor gate 11/11, architecture-import gate 44/44, `git diff --check`, and `prepublish-secret-scan`.
+- Verification result: 2026-05-04 final validation evidence: matrix focused gate passed; regression focused gate passed; download focused gate passed; API focused gate passed; security focused gate passed; BZ888 onboarding/downloader/OCR/profile-fallback/Cloudflare-reason focused gates passed; live BZ888 execute produced governed challenge-stop manifest `20260504T062914706Z-bz888-generic-resource`; separate human-visible browser validation confirmed the target BZ888 catalog/chapter pages were readable after manual challenge completion without exposing raw cookies to the repo or downloader; live X auth recovery passed at 2026-05-04T13:48:09+08:00. 2026-05-08 Site Capability Graph final validation passed with `verified=20`, `partial=0`, `gaps=[]`, matrix 108/108 after Section 20 legacy descriptor pipeline and source-alias fail-closed regression compression, final-validation 8/8, planner-policy handoff 40/40, lifecycle-events 15/15, observability 53/53, and Agent B `Accepted`. 2026-05-08 release-scope broad validation passed with explicit Node test-file list 1971/1971, Python unittest discovery 58/58, prepublish secret scan 589 candidate files, and `git diff --check`. 2026-05-10 site-specific deep-path validation passed with `site-capability-remaining-deep-paths.test.mjs` 5/5, compiler/executor suite 53/53, matrix/final compiler-executor gate 11/11, architecture-import gate 44/44, `git diff --check`, and `prepublish-secret-scan`. 2026-05-10 external SiteForge rename closure passed Skill/repo-local skill 12/12, progress CLI 16/16, matrix 6/6, architecture-import 44/44, full site-auth 32/32, and Bilibili/Douyin Python downloader profile fallback tests 35/35, including SiteForge preferred profile root plus per-site Browser-Wiki-Skill legacy fallback selection; the legacy repository URL, active checkout path, generated crawler metadata, historical fixtures, explicit legacy task names, and credential/profile compatibility identifiers remain intentionally classified rather than bulk rewritten.
 - Current gaps: Future release-time broad wildcard validation should be rerun after additional changes; BZ888 direct downloader access remains blocked by Cloudflare challenge and must stay a recorded boundary rather than a bypass target; X public primary author-chain expansion remains a non-auth navigation gap. Site Capability Graph has no open partial section after the final validation gate.
 - Next smallest task: Before staging, rerun the compact prepublish checklist in `CONTRIBUTING.md` and keep Graph delivery/no-op history as regression-only context.
 - Risk notes: The 14 non-Douyin remaining items are consolidated here; Xiaohongshu fresh evidence, Bilibili UP-space diagnostics, native-miss-diagnostics-v1, profile-health-risk manual boundaries, and repo-local skills remain recorded without raw cookies, authorization headers, or CAPTCHA bypass. Graph completion is invalid if future changes reintroduce partial-state blockers, runtime execution, repo/docs/runtime writes, external telemetry, SiteAdapter/downloader invocation, SessionView materialization, or sensitive-material persistence.

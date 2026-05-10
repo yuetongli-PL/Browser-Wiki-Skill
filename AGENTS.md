@@ -2,11 +2,11 @@
 
 ## Project
 
-Project path:
+Recommended project path after external directory migration:
 
-`C:\Users\lyt-p\Desktop\Browser-Wiki-Skill`
+`C:\Users\lyt-p\Desktop\SiteForge`
 
-This repository implements SiteForge. The current workspace path still uses the legacy `Browser-Wiki-Skill` directory name. The current long-term goal is the multi-site Site Capability Layer. `README.md`, `CONTRIBUTING.md`, and this `AGENTS.md` file are the working references.
+This repository implements SiteForge. Active checkouts may still run from the legacy `C:\Users\lyt-p\Desktop\Browser-Wiki-Skill` path until the operator closes live sessions and renames the directory externally. The current long-term goal is the multi-site Site Capability Layer. `README.md`, `CONTRIBUTING.md`, and this `AGENTS.md` file are the working references.
 
 ## Working Rules
 

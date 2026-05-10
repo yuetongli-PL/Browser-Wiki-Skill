@@ -275,11 +275,11 @@ This repository currently has no `package.json`, so there is no `npm install` or
 Clone the repository:
 
 ```bash
-git clone https://github.com/yuetongli-PL/Browser-Wiki-Skill.git
-cd Browser-Wiki-Skill
+git clone https://github.com/yuetongli-PL/SiteForge.git
+cd SiteForge
 ```
 
-The repository URL and local directory may keep the legacy `Browser-Wiki-Skill` name until external repo and path migration is handled; the user-facing product brand is SiteForge.
+The recommended local checkout path is `C:\Users\lyt-p\Desktop\SiteForge`. The legacy GitHub URL `https://github.com/yuetongli-PL/Browser-Wiki-Skill.git` and legacy local path `C:\Users\lyt-p\Desktop\Browser-Wiki-Skill` are kept only as redirect / compatibility references. If an active Codex session is still running from the legacy path, close it and rename the directory externally rather than renaming the current working directory in place.
 
 Initialize the local PowerShell environment:
 
@@ -813,11 +813,11 @@ Jable 下载路由只是实验占位。它可以通过统一下载 runner 产出
 克隆仓库：
 
 ```bash
-git clone https://github.com/yuetongli-PL/Browser-Wiki-Skill.git
-cd Browser-Wiki-Skill
+git clone https://github.com/yuetongli-PL/SiteForge.git
+cd SiteForge
 ```
 
-仓库 URL 和本地目录可能会在外部迁移完成前继续保留旧名 `Browser-Wiki-Skill`；当前用户可见产品品牌为 SiteForge。
+推荐本地检出路径是 `C:\Users\lyt-p\Desktop\SiteForge`。旧 GitHub URL `https://github.com/yuetongli-PL/Browser-Wiki-Skill.git` 和旧本地路径 `C:\Users\lyt-p\Desktop\Browser-Wiki-Skill` 只作为 redirect / 兼容说明保留。如果当前 Codex 会话仍从旧路径运行，请先关闭会话，再从外部重命名目录，不要在活动 cwd 内直接改名。
 
 初始化本地 PowerShell 环境：
 

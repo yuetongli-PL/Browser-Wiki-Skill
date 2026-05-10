@@ -92,6 +92,52 @@ class DownloadDouyinTests(unittest.TestCase):
         self.assertIsNone(tool_state["cookiesFile"])
         self.assertFalse(tool_state["usedLoginState"])
 
+    def test_persistent_user_data_dir_falls_back_per_site_without_moving_legacy_profiles(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            preferred = temp_root / "SiteForge" / "browser-profiles"
+            legacy = temp_root / "Browser-Wiki-Skill" / "browser-profiles"
+            preferred_profile = preferred / "douyin.com"
+            legacy_profile = legacy / "douyin.com"
+
+            preferred.mkdir(parents=True)
+            legacy.mkdir(parents=True)
+            self.assertEqual(
+                download_douyin.resolve_persistent_user_data_dir(
+                    "https://www.douyin.com/",
+                    candidates=(preferred, legacy),
+                ),
+                preferred_profile.resolve(),
+            )
+
+            legacy_profile.mkdir(parents=True)
+            self.assertEqual(
+                download_douyin.resolve_persistent_user_data_dir(
+                    "https://www.douyin.com/",
+                    candidates=(preferred, legacy),
+                ),
+                legacy_profile.resolve(),
+            )
+
+            preferred_profile.mkdir(parents=True)
+            self.assertEqual(
+                download_douyin.resolve_persistent_user_data_dir(
+                    "https://www.douyin.com/",
+                    candidates=(preferred, legacy),
+                ),
+                preferred_profile.resolve(),
+            )
+
+            explicit_root = temp_root / "explicit-root"
+            self.assertEqual(
+                download_douyin.resolve_persistent_user_data_dir(
+                    "https://www.douyin.com/",
+                    root_dir=explicit_root,
+                    candidates=(preferred, legacy),
+                ),
+                explicit_root.resolve() / "douyin.com",
+            )
+
     def test_legacy_manifest_persistence_removes_profile_cookie_and_browser_evidence(self) -> None:
         manifest = {
             "host": "www.douyin.com",

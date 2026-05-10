@@ -67,16 +67,30 @@ export function resolvePersistentBrowserRootBrandPaths({
   };
 }
 
-export function resolveDefaultPersistentBrowserRoot() {
-  const { preferred, legacy } = resolvePersistentBrowserRootBrandPaths();
-  if (existsSync(legacy) && !existsSync(preferred)) {
-    return legacy;
-  }
+export function resolveDefaultPersistentBrowserRoot({
+  brandPaths = resolvePersistentBrowserRootBrandPaths(),
+} = {}) {
+  const { preferred } = brandPaths;
   return preferred;
 }
 
-export function resolvePersistentUserDataDir(input, { rootDir } = {}) {
-  return path.resolve(rootDir ?? resolveDefaultPersistentBrowserRoot(), derivePersistentProfileKey(input));
+export function resolvePersistentUserDataDir(input, {
+  rootDir,
+  brandPaths = resolvePersistentBrowserRootBrandPaths(),
+} = {}) {
+  const profileKey = derivePersistentProfileKey(input);
+  if (rootDir !== undefined && rootDir !== null) {
+    return path.resolve(rootDir, profileKey);
+  }
+
+  const { preferred, legacy } = brandPaths;
+  const preferredProfileDir = path.resolve(preferred, profileKey);
+  const legacyProfileDir = path.resolve(legacy, profileKey);
+  if (existsSync(legacyProfileDir) && !existsSync(preferredProfileDir)) {
+    return legacyProfileDir;
+  }
+
+  return preferredProfileDir;
 }
 
 const PROFILE_HEALTH_TARGETS = [

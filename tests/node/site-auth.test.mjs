@@ -8,6 +8,7 @@ import { pathExists, readJsonFile } from '../../src/infra/io.mjs';
 import {
   derivePersistentProfileKey,
   inspectPersistentProfileHealth,
+  resolveDefaultPersistentBrowserRoot,
   resolvePersistentBrowserRootBrandPaths,
   resolvePersistentUserDataDir,
 } from '../../src/infra/browser/profile-store.mjs';
@@ -331,6 +332,71 @@ test('persistent browser root brand paths prefer SiteForge while preserving lega
       legacy: '/home/example/.local/state/browser-wiki-skill/browser-profiles',
     },
   );
+});
+
+test('default persistent browser root stays SiteForge while legacy fallback stays per site', async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'siteforge-profile-root-'));
+  try {
+    const preferred = path.join(tempRoot, 'SiteForge', 'browser-profiles');
+    const legacy = path.join(tempRoot, 'Browser-Wiki-Skill', 'browser-profiles');
+
+    assert.equal(
+      resolveDefaultPersistentBrowserRoot({ brandPaths: { preferred, legacy } }),
+      preferred,
+    );
+
+    await mkdir(legacy, { recursive: true });
+    assert.equal(
+      resolveDefaultPersistentBrowserRoot({ brandPaths: { preferred, legacy } }),
+      preferred,
+    );
+
+    await mkdir(preferred, { recursive: true });
+    assert.equal(
+      resolveDefaultPersistentBrowserRoot({ brandPaths: { preferred, legacy } }),
+      preferred,
+    );
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('persistent user data dir falls back per site without moving legacy profiles', async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'siteforge-profile-site-fallback-'));
+  try {
+    const preferred = path.join(tempRoot, 'SiteForge', 'browser-profiles');
+    const legacy = path.join(tempRoot, 'Browser-Wiki-Skill', 'browser-profiles');
+    const brandPaths = { preferred, legacy };
+    const preferredBilibili = path.join(preferred, 'bilibili.com');
+    const legacyBilibili = path.join(legacy, 'bilibili.com');
+
+    await mkdir(preferred, { recursive: true });
+    await mkdir(legacy, { recursive: true });
+    assert.equal(
+      resolvePersistentUserDataDir('https://www.bilibili.com/', { brandPaths }),
+      preferredBilibili,
+    );
+
+    await mkdir(legacyBilibili, { recursive: true });
+    assert.equal(
+      resolvePersistentUserDataDir('https://www.bilibili.com/', { brandPaths }),
+      legacyBilibili,
+    );
+
+    await mkdir(preferredBilibili, { recursive: true });
+    assert.equal(
+      resolvePersistentUserDataDir('https://www.bilibili.com/', { brandPaths }),
+      preferredBilibili,
+    );
+
+    const explicitRoot = path.join(tempRoot, 'explicit-root');
+    assert.equal(
+      resolvePersistentUserDataDir('https://www.bilibili.com/', { rootDir: explicitRoot, brandPaths }),
+      path.join(explicitRoot, 'bilibili.com'),
+    );
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
 });
 
 test('resolveSiteBrowserSessionOptions honors bilibili authSession defaults', async () => {

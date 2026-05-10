@@ -290,6 +290,52 @@ class DownloadBilibiliTests(unittest.TestCase):
             state["warnings"],
         )
 
+    def test_persistent_user_data_dir_falls_back_per_site_without_moving_legacy_profiles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+            preferred = temp_root / "SiteForge" / "browser-profiles"
+            legacy = temp_root / "Browser-Wiki-Skill" / "browser-profiles"
+            preferred_profile = preferred / "bilibili.com"
+            legacy_profile = legacy / "bilibili.com"
+
+            preferred.mkdir(parents=True)
+            legacy.mkdir(parents=True)
+            self.assertEqual(
+                download_bilibili.resolve_persistent_user_data_dir(
+                    "https://www.bilibili.com/",
+                    candidates=(preferred, legacy),
+                ),
+                preferred_profile.resolve(),
+            )
+
+            legacy_profile.mkdir(parents=True)
+            self.assertEqual(
+                download_bilibili.resolve_persistent_user_data_dir(
+                    "https://www.bilibili.com/",
+                    candidates=(preferred, legacy),
+                ),
+                legacy_profile.resolve(),
+            )
+
+            preferred_profile.mkdir(parents=True)
+            self.assertEqual(
+                download_bilibili.resolve_persistent_user_data_dir(
+                    "https://www.bilibili.com/",
+                    candidates=(preferred, legacy),
+                ),
+                preferred_profile.resolve(),
+            )
+
+            explicit_root = temp_root / "explicit-root"
+            self.assertEqual(
+                download_bilibili.resolve_persistent_user_data_dir(
+                    "https://www.bilibili.com/",
+                    root_dir=explicit_root,
+                    candidates=(preferred, legacy),
+                ),
+                explicit_root.resolve() / "bilibili.com",
+            )
+
     def test_download_bilibili_dry_run_writes_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:
             profile_path = Path(tmp) / "www.bilibili.com.json"
