@@ -429,7 +429,7 @@ test('qidian skill is generated with read-only public-navigation boundaries', as
   assert.match(approvalMd, /CAPTCHA, verification, probe, risk-control, or anti-bot flows/u);
 });
 
-test('qidian onboarding discovery fixture passes the coverage gate through SiteAdapter classification', async () => {
+test('qidian onboarding discovery fixture records login and manual-risk surfaces as gate blockers', async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-qidian-discovery-'));
   try {
     const site = await resolveSite({
@@ -450,11 +450,18 @@ test('qidian onboarding discovery fixture passes the coverage gate through SiteA
       adapter: site.adapter,
     });
 
-    assert.equal(artifacts.gate.passed, true);
+    assert.equal(artifacts.gate.passed, false);
+    assert.deepEqual(
+      artifacts.gate.failures.slice().sort(),
+      ['login-required-discovery-item', 'manual-review-required-discovery-item'],
+    );
     assert.equal(artifacts.gate.unknownRequiredNodes, 0);
     assert.equal(artifacts.gate.unknownRequiredApis, 0);
     assert.equal(artifacts.gate.requiredIgnoredNodes, 0);
     assert.equal(artifacts.gate.requiredIgnoredApis, 0);
+    assert.equal(artifacts.gate.requiredRequiresLoginItems > 0, true);
+    assert.equal(artifacts.gate.requiredManualReviewItems > 0, true);
+    assert.equal(artifacts.gate.requiredCoveragePass, true);
     assert.equal(artifacts.gate.requiredCoverage.requiredCoverage >= 0.95, true);
     assert.equal(
       artifacts.objects.NODE_INVENTORY.entries.every((entry) =>
@@ -472,6 +479,22 @@ test('qidian onboarding discovery fixture passes the coverage gate through SiteA
         entry.manualReviewRequired && entry.classification === 'recognized'),
       true,
     );
+    const blockedNodeReport = artifacts.objects.BLOCKED_NODE_REPORT;
+    assert.equal(blockedNodeReport.total > 0, true);
+    assert.equal(blockedNodeReport.statusCounts.requires_login > 0, true);
+    assert.equal(blockedNodeReport.statusCounts.requires_manual_review > 0, true);
+    assert.equal(blockedNodeReport.surfaceCategoryCounts.login_wall > 0, true);
+    assert.equal(blockedNodeReport.surfaceCategoryCounts.risk_control > 0, true);
+    assert.equal(
+      blockedNodeReport.entries.some((entry) =>
+        entry.required && entry.discoveryStatus === 'requires_login'),
+      true,
+    );
+    assert.equal(
+      blockedNodeReport.entries.some((entry) =>
+        entry.required && entry.discoveryStatus === 'requires_manual_review'),
+      true,
+    );
     assert.equal(
       artifacts.objects.API_INVENTORY.entries.some((entry) => entry.classification === 'ignored'),
       true,
@@ -479,16 +502,21 @@ test('qidian onboarding discovery fixture passes the coverage gate through SiteA
     assert.equal(artifacts.objects.UNKNOWN_NODE_REPORT.totalUnknownRequiredNodes, 0);
     assert.match(artifacts.markdown.NODE_INVENTORY, /# NODE_INVENTORY/u);
     assert.match(artifacts.markdown.API_INVENTORY, /# API_INVENTORY/u);
+    assert.match(artifacts.markdown.BLOCKED_NODE_REPORT, /requires_login/u);
+    assert.match(artifacts.markdown.BLOCKED_NODE_REPORT, /requires_manual_review/u);
     assert.match(artifacts.markdown.UNKNOWN_NODE_REPORT, /Unknown required nodes: 0/u);
-    assert.match(artifacts.markdown.SITE_CAPABILITY_REPORT, /Gate passed: yes/u);
+    assert.match(artifacts.markdown.SITE_CAPABILITY_REPORT, /Gate passed: no/u);
     assert.match(artifacts.markdown.DISCOVERY_AUDIT, /unknownRequiredNodesZero\s+\|\s+yes/u);
-    assert.equal(assertSiteOnboardingDiscoveryComplete({ artifacts, acceptedByAgentB: true }), true);
+    assert.throws(
+      () => assertSiteOnboardingDiscoveryComplete({ artifacts, acceptedByAgentB: true }),
+      /login-required-discovery-item, manual-review-required-discovery-item/u,
+    );
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
 });
 
-test('qidian site-doctor simulation writes onboarding discovery artifacts and passes coverage', async () => {
+test('qidian site-doctor simulation writes blocked-surface artifacts and reports gated coverage', async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), 'bwk-qidian-site-doctor-'));
   try {
     const site = await resolveSite({
@@ -519,31 +547,38 @@ test('qidian site-doctor simulation writes onboarding discovery artifacts and pa
     assert.equal(report.search.valid, true);
     assert.equal(report.detail.valid, true);
     assert.equal(report.chapter.valid, true);
-    assert.equal(summary?.passed, true);
-    assert.equal(summary?.failures.length, 0);
+    assert.equal(summary?.passed, false);
+    assert.deepEqual(
+      summary?.failures.slice().sort(),
+      ['login-required-discovery-item', 'manual-review-required-discovery-item'],
+    );
     assert.equal(summary?.requiredCoverage.requiredCoverage >= 0.95, true);
     assert.equal(summary?.requiredCoverage.requiredUnknown, 0);
-    for (const artifactName of [
-      'NODE_INVENTORY',
-      'API_INVENTORY',
-      'UNKNOWN_NODE_REPORT',
-      'SITE_CAPABILITY_REPORT',
-      'DISCOVERY_AUDIT',
-    ]) {
+    assert.equal(summary?.blockedNodes > 0, true);
+    for (const artifactName of SITE_ONBOARDING_DISCOVERY_ARTIFACT_NAMES) {
       assert.equal(await pathExists(summary[artifactName]), true, `${artifactName} must be written`);
+      assert.equal(await pathExists(summary[`${artifactName}_JSON`]), true, `${artifactName}_JSON must be written`);
     }
 
     const nodeInventory = await readFile(summary.NODE_INVENTORY, 'utf8');
     const apiInventory = await readFile(summary.API_INVENTORY, 'utf8');
     const unknownReport = await readFile(summary.UNKNOWN_NODE_REPORT, 'utf8');
+    const blockedReport = await readFile(summary.BLOCKED_NODE_REPORT, 'utf8');
     const capabilityReport = await readFile(summary.SITE_CAPABILITY_REPORT, 'utf8');
     const discoveryAudit = await readFile(summary.DISCOVERY_AUDIT, 'utf8');
+    const blockedReportJson = await readJsonFile(summary.BLOCKED_NODE_REPORT_JSON);
     assert.match(nodeInventory, /qidian:chapter-page/u);
     assert.match(nodeInventory, /qidian:risk-control/u);
     assert.match(apiInventory, /Static or browser-support request is outside Qidian onboarding capability coverage/u);
     assert.match(unknownReport, /Unknown required nodes: 0/u);
     assert.match(unknownReport, /Unknown required APIs: 0/u);
-    assert.match(capabilityReport, /Gate passed: yes/u);
+    assert.match(blockedReport, /requires_login/u);
+    assert.match(blockedReport, /requires_manual_review/u);
+    assert.equal(blockedReportJson.statusCounts.requires_login > 0, true);
+    assert.equal(blockedReportJson.statusCounts.requires_manual_review > 0, true);
+    assert.equal(blockedReportJson.surfaceCategoryCounts.login_wall > 0, true);
+    assert.equal(blockedReportJson.surfaceCategoryCounts.risk_control > 0, true);
+    assert.match(capabilityReport, /Gate passed: no/u);
     assert.match(discoveryAudit, /ignoredItemsHaveReason\s+\|\s+yes/u);
   } finally {
     await rm(workspace, { recursive: true, force: true });
